@@ -23,12 +23,16 @@
             <option value="">No account</option>
           </select>
         </label>
-        <label class="environment-switcher">
-          Environment
-          <select id="environmentSelect">
-            <option value="">No environment</option>
-          </select>
-        </label>
+        <div class="environment-switcher">
+          <span>Environment</span>
+          <div class="combo environment-combo">
+            <button id="environmentDropdownButton" class="combo-button secondary" type="button">No environment</button>
+            <div id="environmentDropdown" class="combo-panel environment-panel" hidden>
+              <input id="environmentPickerSearch" placeholder="Search environments" />
+              <div id="environmentPickerList" class="environment-picker-list"></div>
+            </div>
+          </div>
+        </div>
         <button id="themeButton" type="button" class="secondary">Dark mode</button>
       </div>
     </header>
@@ -93,6 +97,10 @@
           <div class="actions">
             <button id="loadEnvironmentsButton" type="button">Load environments</button>
           </div>
+          <label class="search environment-filter">
+            Filter environments
+            <input id="environmentSearch" placeholder="Type to filter environments" />
+          </label>
           <div id="environmentList" class="list environment-list"></div>
           <p id="status" class="muted"></p>
         </section>

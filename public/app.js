@@ -1,7 +1,10 @@
 const el = {
   themeButton: document.querySelector('#themeButton'),
   accountSelect: document.querySelector('#accountSelect'),
-  environmentSelect: document.querySelector('#environmentSelect'),
+  environmentDropdownButton: document.querySelector('#environmentDropdownButton'),
+  environmentDropdown: document.querySelector('#environmentDropdown'),
+  environmentPickerSearch: document.querySelector('#environmentPickerSearch'),
+  environmentPickerList: document.querySelector('#environmentPickerList'),
   tabs: document.querySelectorAll('.tab'),
   tabPanels: document.querySelectorAll('.tab-panel'),
   signInButton: document.querySelector('#signInButton'),
@@ -20,6 +23,7 @@ const el = {
   selectedEnvironmentUrl: document.querySelector('#selectedEnvironmentUrl'),
   copyEnvironmentButton: document.querySelector('#copyEnvironmentButton'),
   status: document.querySelector('#status'),
+  environmentSearch: document.querySelector('#environmentSearch'),
   environmentList: document.querySelector('#environmentList'),
   roles: document.querySelector('#roles'),
   roleSearch: document.querySelector('#roleSearch'),
@@ -57,10 +61,19 @@ const state = {
 el.tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 el.themeButton.addEventListener('click', toggleTheme);
 el.accountSelect.addEventListener('change', () => withBusy(el.accountSelect, switchAccount));
-el.environmentSelect.addEventListener('change', () => selectHeaderEnvironment().catch((error) => {
-  toast(error.message);
-  console.error(error);
-}));
+el.environmentDropdownButton.addEventListener('click', toggleEnvironmentDropdown);
+el.environmentPickerSearch.addEventListener('input', renderEnvironmentPicker);
+el.environmentPickerSearch.addEventListener('keydown', handleEnvironmentPickerKeydown);
+el.environmentPickerList.addEventListener('click', (event) => {
+  const button = event.target.closest('.environment-picker-option');
+  if (!button) {
+    return;
+  }
+  selectHeaderEnvironment(button.dataset.name || '').catch((error) => {
+    toast(error.message);
+    console.error(error);
+  });
+});
 el.copyEnvironmentButton.addEventListener('click', () => copySelectedEnvironment().catch((error) => {
   toast(error.message);
   console.error(error);
@@ -75,6 +88,7 @@ el.renameButton.addEventListener('click', () => withBusy(el.renameButton, rename
 el.downloadButton.addEventListener('click', () => downloadCsv('table'));
 el.downloadMiscButton.addEventListener('click', () => downloadCsv('misc'));
 el.uploadButton.addEventListener('click', () => withBusy(el.uploadButton, uploadCsv));
+el.environmentSearch.addEventListener('input', renderEnvironmentList);
 el.roleSearch.addEventListener('input', filterRoles);
 el.csvFile.addEventListener('change', () => {
   el.filePickerText.textContent = el.csvFile.files?.[0]?.name || 'Choose CSV file';
@@ -84,10 +98,12 @@ el.solutionSearch.addEventListener('input', renderSolutions);
 el.managedOnly.addEventListener('change', renderSolutions);
 el.publisherFilter.addEventListener('change', renderSolutions);
 el.publisherDropdownButton.addEventListener('click', () => {
+  el.environmentDropdown.hidden = true;
   el.publisherDropdown.hidden = !el.publisherDropdown.hidden;
 });
 document.addEventListener('click', (event) => {
   if (!event.target.closest('.combo')) {
+    el.environmentDropdown.hidden = true;
     el.publisherDropdown.hidden = true;
   }
 });
@@ -203,16 +219,23 @@ function renderSelectedEnvironmentSummary() {
 function renderEnvironmentPicker() {
   const selectedId = state.selectedEnvironment.environmentName;
   const visibleEnvironments = getVisibleEnvironments();
-  const options = [
-    `<option value=""${selectedId ? '' : ' selected'}>${visibleEnvironments.length ? 'Select environment' : 'No visible environments'}</option>`,
-    ...visibleEnvironments.map((environment) => `
-      <option value="${escapeAttr(environment.name)}"${environment.name === selectedId ? ' selected' : ''}>
-        ${escapeHtml(environment.displayName || environment.name)}
-      </option>
-    `),
-  ].join('');
-  el.environmentSelect.innerHTML = options;
-  el.environmentSelect.disabled = !visibleEnvironments.length;
+  const selectedEnvironment = getEnvironmentByName(selectedId);
+  el.environmentDropdownButton.textContent = selectedEnvironment?.displayName || selectedId || (visibleEnvironments.length ? 'Select environment' : 'No visible environments');
+  el.environmentDropdownButton.disabled = !visibleEnvironments.length;
+
+  const filtered = filterEnvironments(visibleEnvironments, el.environmentPickerSearch.value);
+  if (!filtered.length) {
+    el.environmentPickerList.innerHTML = empty(el.environmentPickerSearch.value ? 'No visible environments match.' : 'No visible environments.');
+    return;
+  }
+
+  el.environmentPickerList.innerHTML = filtered.map((environment) => `
+    <button class="environment-picker-option${environment.name === selectedId ? ' selected' : ''}" type="button" data-name="${escapeAttr(environment.name)}">
+      <span class="role-name">${escapeHtml(environment.displayName || environment.name)}</span>
+      <span class="role-id">${escapeHtml(environment.name)}</span>
+      <span class="role-id">${escapeHtml(environment.orgUrl || 'No Dataverse org URL in response')}</span>
+    </button>
+  `).join('');
 }
 
 function renderEnvironmentList() {
@@ -221,9 +244,15 @@ function renderEnvironmentList() {
     return;
   }
 
+  const filteredEnvironments = filterEnvironments(state.environments, el.environmentSearch.value);
+  if (!filteredEnvironments.length) {
+    el.environmentList.innerHTML = empty('No environments match the filter.');
+    return;
+  }
+
   const selectedId = state.selectedEnvironment.environmentName;
   const selectedUrl = state.selectedEnvironment.orgUrl;
-  el.environmentList.innerHTML = state.environments.map((environment) => {
+  el.environmentList.innerHTML = filteredEnvironments.map((environment) => {
     const isCurrent = environment.name === selectedId || (environment.orgUrl && environment.orgUrl === selectedUrl);
     const isVisible = isEnvironmentVisible(environment);
     return `
@@ -253,13 +282,16 @@ function clearEnvironmentOptions() {
   renderEnvironmentPicker();
 }
 
-async function selectHeaderEnvironment() {
-  const environment = getVisibleEnvironments().find((item) => item.name === el.environmentSelect.value) || null;
+async function selectHeaderEnvironment(environmentName) {
+  const environment = getVisibleEnvironments().find((item) => item.name === environmentName) || null;
   if (!environment) {
     renderEnvironmentPicker();
     return;
   }
   await selectEnvironment(environment);
+  el.environmentDropdown.hidden = true;
+  el.environmentPickerSearch.value = '';
+  renderEnvironmentPicker();
 }
 
 async function selectEnvironment(environment) {
@@ -293,6 +325,25 @@ function getEnvironmentByName(name) {
 
 function getVisibleEnvironments() {
   return state.environments.filter((environment) => isEnvironmentVisible(environment));
+}
+
+function filterEnvironments(environments, query) {
+  const normalizedQuery = String(query || '').trim().toLowerCase();
+  if (!normalizedQuery) {
+    return environments;
+  }
+
+  return environments.filter((environment) => environmentText(environment).includes(normalizedQuery));
+}
+
+function environmentText(environment) {
+  return [
+    environment.displayName,
+    environment.name,
+    environment.orgUrl,
+    environment.region,
+    environment.type,
+  ].filter(Boolean).join(' ').toLowerCase();
 }
 
 function isEnvironmentVisible(environment) {
@@ -342,6 +393,43 @@ function saveEnvironmentVisibility() {
 
 function environmentVisibilityKey() {
   return `pdacHiddenEnvironments:${el.accountSelect.value || 'default'}`;
+}
+
+function toggleEnvironmentDropdown() {
+  if (el.environmentDropdownButton.disabled) {
+    return;
+  }
+
+  el.publisherDropdown.hidden = true;
+  el.environmentDropdown.hidden = !el.environmentDropdown.hidden;
+  if (!el.environmentDropdown.hidden) {
+    renderEnvironmentPicker();
+    el.environmentPickerSearch.focus();
+    el.environmentPickerSearch.select();
+  }
+}
+
+function handleEnvironmentPickerKeydown(event) {
+  if (event.key === 'Escape') {
+    el.environmentDropdown.hidden = true;
+    el.environmentDropdownButton.focus();
+    return;
+  }
+
+  if (event.key !== 'Enter') {
+    return;
+  }
+
+  const firstMatch = filterEnvironments(getVisibleEnvironments(), el.environmentPickerSearch.value)[0];
+  if (!firstMatch) {
+    return;
+  }
+
+  event.preventDefault();
+  selectHeaderEnvironment(firstMatch.name).catch((error) => {
+    toast(error.message);
+    console.error(error);
+  });
 }
 
 async function copySelectedEnvironment() {

@@ -76,12 +76,20 @@ header {
   gap: 8px;
 }
 
-.account-switcher select,
-.environment-switcher select {
+.environment-switcher > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-switcher select {
   min-width: 220px;
 }
 
-.environment-switcher select {
+.environment-combo {
+  width: 300px;
+}
+
+.environment-switcher .combo-button {
   min-width: 260px;
 }
 
@@ -286,7 +294,10 @@ select {
 .combo-button {
   justify-content: space-between;
   min-width: 220px;
+  overflow: hidden;
   text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   width: 100%;
 }
 
@@ -302,6 +313,42 @@ select {
   right: 0;
   top: 100%;
   z-index: 20;
+}
+
+.environment-panel {
+  left: 0;
+  min-width: min(420px, calc(100vw - 32px));
+  right: auto;
+}
+
+.environment-panel input {
+  margin-bottom: 6px;
+}
+
+.environment-picker-list {
+  display: grid;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.environment-picker-option {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  display: grid;
+  gap: 3px;
+  min-height: unset;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.environment-picker-option:hover,
+.environment-picker-option.selected {
+  background: var(--soft);
+  border-color: var(--soft-line);
 }
 
 .combo-panel .checkbox-list {
@@ -398,6 +445,10 @@ select:disabled {
 .environment-list {
   margin-top: 12px;
   max-height: 260px;
+}
+
+.environment-filter {
+  margin: 12px 0 0;
 }
 
 .selected-environment-bar {
