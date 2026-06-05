@@ -23,6 +23,12 @@
             <option value="">No account</option>
           </select>
         </label>
+        <label class="environment-switcher">
+          Environment
+          <select id="environmentSelect">
+            <option value="">No environment</option>
+          </select>
+        </label>
         <button id="themeButton" type="button" class="secondary">Dark mode</button>
       </div>
     </header>
@@ -45,7 +51,7 @@
           <div class="home-grid">
             <div class="mini-card">
               <h3>1. Connect</h3>
-              <p>Pick an environment or paste an org URL, then sign in.</p>
+              <p>Sign in, load environments, then choose the current environment from the header.</p>
             </div>
             <div class="mini-card">
               <h3>2. Roles</h3>
@@ -70,22 +76,24 @@
             </div>
           </div>
 
+          <div class="selected-environment-bar">
+            <div>
+              <span class="summary-label">Selected environment ID</span>
+              <strong id="selectedEnvironmentId">None</strong>
+            </div>
+            <div>
+              <span class="summary-label">URL</span>
+              <strong id="selectedEnvironmentUrl">None</strong>
+            </div>
+            <button id="copyEnvironmentButton" class="icon-button secondary" type="button" title="Copy selected environment" aria-label="Copy selected environment">
+              <span class="copy-icon" aria-hidden="true"></span>
+            </button>
+          </div>
+
           <div class="actions">
             <button id="loadEnvironmentsButton" type="button">Load environments</button>
           </div>
           <div id="environmentList" class="list environment-list"></div>
-
-          <div class="row">
-            <label>
-              Environment ID
-              <input id="environmentName" placeholder="00000000-0000-0000-0000-000000000000" />
-            </label>
-            <label>
-              Org URL
-              <input id="orgUrl" placeholder="https://org.crm.dynamics.com" />
-            </label>
-            <button id="saveOrgButton" type="button">Use org</button>
-          </div>
           <p id="status" class="muted"></p>
         </section>
       </section>

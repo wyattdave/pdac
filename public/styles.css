@@ -63,18 +63,26 @@ header {
 .header-actions {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
+  justify-content: flex-end;
 }
 
-.account-switcher {
+.account-switcher,
+.environment-switcher {
   align-items: center;
   display: flex;
   flex: none;
   gap: 8px;
 }
 
-.account-switcher select {
+.account-switcher select,
+.environment-switcher select {
   min-width: 220px;
+}
+
+.environment-switcher select {
+  min-width: 260px;
 }
 
 main {
@@ -312,7 +320,7 @@ select {
 }
 
 .publisher-option input {
-  min-height: auto;
+  min-height: 0;
   width: auto;
 }
 
@@ -338,8 +346,37 @@ button.secondary {
   color: var(--text);
 }
 
+.icon-button {
+  align-items: center;
+  display: inline-flex;
+  flex: none;
+  justify-content: center;
+  padding: 8px;
+  width: 38px;
+}
+
+.copy-icon {
+  border: 2px solid currentColor;
+  border-radius: 3px;
+  height: 15px;
+  position: relative;
+  width: 13px;
+}
+
+.copy-icon::before {
+  border: 2px solid currentColor;
+  border-radius: 3px;
+  content: "";
+  height: 15px;
+  left: -6px;
+  position: absolute;
+  top: 4px;
+  width: 13px;
+}
+
 button:disabled,
-input:disabled {
+input:disabled,
+select:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -361,6 +398,31 @@ input:disabled {
 .environment-list {
   margin-top: 12px;
   max-height: 260px;
+}
+
+.selected-environment-bar {
+  align-items: center;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(170px, 0.8fr) minmax(220px, 1.2fr) auto;
+  margin-bottom: 14px;
+  padding: 12px;
+}
+
+.selected-environment-bar strong {
+  display: block;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.summary-label {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  margin-bottom: 4px;
 }
 
 .list-item {
@@ -387,6 +449,22 @@ input:disabled {
 
 .role-name {
   font-weight: 650;
+}
+
+.env-option {
+  align-items: center;
+  cursor: pointer;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.env-details {
+  display: grid;
+  gap: 3px;
+}
+
+.env-checkbox {
+  min-height: 0;
+  width: auto;
 }
 
 .role-row {
@@ -427,7 +505,7 @@ input:disabled {
 }
 
 .checkbox-label input {
-  min-height: auto;
+  min-height: 0;
   width: auto;
 }
 
@@ -554,6 +632,7 @@ input:disabled {
 
   .home-grid,
   .solution-filters,
+  .selected-environment-bar,
   .component-row {
     grid-template-columns: 1fr;
   }

@@ -85,6 +85,7 @@ const selected = {
   orgUrl: normalizeOrgUrl(process.env.PP_ORG_URL || ''),
   accountHomeId: '',
 };
+const accountEnvironmentSelections = new Map();
 
 const authProvider = new NodeMsalAuthenticationProvider();
 await authProvider.initAsync(REGION);
@@ -117,10 +118,12 @@ async function handleApi(req, res) {
   const route = `${req.method || 'GET'} ${url.pathname}`;
 
   if (route === 'GET /api/status') {
+    ensureSelectedAccount(await listAccounts());
     sendJson(res, 200, {
       region: REGION,
       environmentName: selected.environmentName,
       orgUrl: selected.orgUrl,
+      selectedEnvironment: selectedEnvironmentPayload(),
       accounts: await listAccounts(),
       selectedAccountHomeId: selected.accountHomeId,
     });
@@ -129,15 +132,21 @@ async function handleApi(req, res) {
 
   if (route === 'POST /api/login') {
     const body = await readJson(req);
-    const orgUrl = normalizeOrgUrl(body.orgUrl || selected.orgUrl);
-    if (orgUrl) {
-      selected.orgUrl = orgUrl;
+    const requestedEnvironment = environmentFromBody(body, selectedEnvironmentPayload());
+    if (requestedEnvironment.orgUrl) {
+      setSelectedEnvironment(requestedEnvironment);
     }
     const resource = selected.orgUrl || SERVICE_RESOURCE;
     await authProvider.getAccessTokenForResource(resource);
+    ensureSelectedAccount(await listAccounts());
+    if (requestedEnvironment.orgUrl) {
+      saveSelectedEnvironmentForAccount();
+    }
     sendJson(res, 200, {
       tenantId: authProvider.getUserTenantId(),
       orgUrl: selected.orgUrl,
+      environmentName: selected.environmentName,
+      selectedEnvironment: selectedEnvironmentPayload(),
       resource,
       accounts: await listAccounts(),
       selectedAccountHomeId: selected.accountHomeId,
@@ -147,15 +156,22 @@ async function handleApi(req, res) {
 
   if (route === 'POST /api/login-different') {
     const body = await readJson(req);
-    const orgUrl = normalizeOrgUrl(body.orgUrl || selected.orgUrl);
-    if (orgUrl) {
-      selected.orgUrl = orgUrl;
+    const requestedEnvironment = environmentFromBody(body, selectedEnvironmentPayload());
+    if (requestedEnvironment.orgUrl) {
+      setSelectedEnvironment(requestedEnvironment);
     }
     const resource = selected.orgUrl || SERVICE_RESOURCE;
     const tokenResult = await acquireTokenWithAccountPicker(resource);
+    if (requestedEnvironment.orgUrl) {
+      saveSelectedEnvironmentForAccount();
+    } else {
+      applySavedEnvironmentForAccount(selected.accountHomeId);
+    }
     sendJson(res, 200, {
       tenantId: tokenResult.tenantId,
       orgUrl: selected.orgUrl,
+      environmentName: selected.environmentName,
+      selectedEnvironment: selectedEnvironmentPayload(),
       resource,
       account: tokenResult.account?.username || '',
       accounts: await listAccounts(),
@@ -170,35 +186,66 @@ async function handleApi(req, res) {
   }
 
   if (route === 'GET /api/accounts') {
+    ensureSelectedAccount(await listAccounts());
     sendJson(res, 200, {
       accounts: await listAccounts(),
       selectedAccountHomeId: selected.accountHomeId,
+      selectedEnvironment: selectedEnvironmentPayload(),
     });
     return;
   }
 
   if (route === 'POST /api/account') {
     const body = await readJson(req);
-    selected.accountHomeId = requireString(body.homeAccountId, 'homeAccountId');
+    selectAccount(requireString(body.homeAccountId, 'homeAccountId'));
     sendJson(res, 200, {
       accounts: await listAccounts(),
       selectedAccountHomeId: selected.accountHomeId,
+      environmentName: selected.environmentName,
+      orgUrl: selected.orgUrl,
+      selectedEnvironment: selectedEnvironmentPayload(),
     });
     return;
   }
 
   if (route === 'GET /api/environments') {
-    sendJson(res, 200, await listEnvironments());
+    const data = await listEnvironments();
+    sendJson(res, 200, {
+      ...data,
+      environmentName: selected.environmentName,
+      orgUrl: selected.orgUrl,
+      selectedEnvironment: selectedEnvironmentPayload(),
+      selectedAccountHomeId: selected.accountHomeId,
+    });
     return;
   }
 
   if (route === 'POST /api/org') {
     const body = await readJson(req);
-    selected.environmentName = String(body.environmentName || '').trim();
-    selected.orgUrl = normalizeOrgUrl(requireString(body.orgUrl, 'orgUrl'));
+    if (body.clear) {
+      setSelectedEnvironment({ environmentName: '', orgUrl: '' });
+      clearSelectedEnvironmentForAccount();
+      sendJson(res, 200, {
+        environmentName: selected.environmentName,
+        orgUrl: selected.orgUrl,
+        selectedEnvironment: selectedEnvironmentPayload(),
+        accounts: await listAccounts(),
+        selectedAccountHomeId: selected.accountHomeId,
+      });
+      return;
+    }
+
+    setSelectedEnvironment({
+      environmentName: String(body.environmentName || '').trim(),
+      orgUrl: normalizeOrgUrl(requireString(body.orgUrl, 'orgUrl')),
+    });
+    saveSelectedEnvironmentForAccount();
     sendJson(res, 200, {
       environmentName: selected.environmentName,
       orgUrl: selected.orgUrl,
+      selectedEnvironment: selectedEnvironmentPayload(),
+      accounts: await listAccounts(),
+      selectedAccountHomeId: selected.accountHomeId,
     });
     return;
   }
@@ -548,7 +595,69 @@ async function listAccounts() {
     username: account.username,
     name: account.name || account.username,
     tenantId: account.tenantId,
+    selectedEnvironment: accountEnvironmentSelections.get(account.homeAccountId) || null,
   }));
+}
+
+function ensureSelectedAccount(accounts) {
+  if (selected.accountHomeId && accounts.some((account) => account.homeAccountId === selected.accountHomeId)) {
+    return;
+  }
+
+  selected.accountHomeId = accounts.length === 1 ? accounts[0].homeAccountId : '';
+  if (selected.accountHomeId && accountEnvironmentSelections.has(selected.accountHomeId)) {
+    applySavedEnvironmentForAccount(selected.accountHomeId);
+  } else if (selected.accountHomeId && selected.orgUrl) {
+    saveSelectedEnvironmentForAccount();
+  }
+}
+
+function selectAccount(homeAccountId) {
+  selected.accountHomeId = homeAccountId;
+  applySavedEnvironmentForAccount(homeAccountId);
+}
+
+function selectedEnvironmentPayload() {
+  return {
+    environmentName: selected.environmentName,
+    orgUrl: selected.orgUrl,
+  };
+}
+
+function environmentFromBody(body, fallback = {}) {
+  return {
+    environmentName: String(body.environmentName || fallback.environmentName || '').trim(),
+    orgUrl: normalizeOrgUrl(body.orgUrl || fallback.orgUrl || ''),
+  };
+}
+
+function setSelectedEnvironment(environment) {
+  selected.environmentName = String(environment.environmentName || '').trim();
+  selected.orgUrl = normalizeOrgUrl(environment.orgUrl || '');
+}
+
+function saveSelectedEnvironmentForAccount() {
+  if (!selected.accountHomeId || !selected.orgUrl) {
+    return;
+  }
+
+  accountEnvironmentSelections.set(selected.accountHomeId, selectedEnvironmentPayload());
+}
+
+function clearSelectedEnvironmentForAccount() {
+  if (selected.accountHomeId) {
+    accountEnvironmentSelections.delete(selected.accountHomeId);
+  }
+}
+
+function applySavedEnvironmentForAccount(homeAccountId) {
+  const environment = accountEnvironmentSelections.get(homeAccountId);
+  if (environment) {
+    setSelectedEnvironment(environment);
+    return;
+  }
+
+  setSelectedEnvironment({ environmentName: '', orgUrl: '' });
 }
 
 async function logoutAccounts() {
@@ -563,6 +672,7 @@ async function logoutAccounts() {
   }
   authProvider._tenantId = undefined;
   selected.accountHomeId = '';
+  setSelectedEnvironment({ environmentName: '', orgUrl: '' });
   return { removed: accounts.length };
 }
 
@@ -812,7 +922,7 @@ async function listEnvironments() {
     }
   }
 
-  throw new HttpError(502, `Could not list environments. You can still enter the org URL manually. ${errors.join(' | ')}`);
+  throw new HttpError(502, `Could not list environments. Try signing in again or switching accounts. ${errors.join(' | ')}`);
 }
 
 function normalizeEnvironments(data) {
@@ -1169,7 +1279,7 @@ function pascalize(value) {
 
 function requireOrgUrl() {
   if (!selected.orgUrl) {
-    throw new HttpError(400, 'Enter a Dataverse org URL first.');
+    throw new HttpError(400, 'Select an environment first.');
   }
 }
 

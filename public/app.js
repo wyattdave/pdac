@@ -1,13 +1,13 @@
 const el = {
   themeButton: document.querySelector('#themeButton'),
   accountSelect: document.querySelector('#accountSelect'),
+  environmentSelect: document.querySelector('#environmentSelect'),
   tabs: document.querySelectorAll('.tab'),
   tabPanels: document.querySelectorAll('.tab-panel'),
   signInButton: document.querySelector('#signInButton'),
   signInDifferentButton: document.querySelector('#signInDifferentButton'),
   logoutButton: document.querySelector('#logoutButton'),
   loadEnvironmentsButton: document.querySelector('#loadEnvironmentsButton'),
-  saveOrgButton: document.querySelector('#saveOrgButton'),
   loadRolesButton: document.querySelector('#loadRolesButton'),
   createRoleForm: document.querySelector('#createRoleForm'),
   renameButton: document.querySelector('#renameButton'),
@@ -16,8 +16,9 @@ const el = {
   uploadButton: document.querySelector('#uploadButton'),
   csvFile: document.querySelector('#csvFile'),
   filePickerText: document.querySelector('#filePickerText'),
-  environmentName: document.querySelector('#environmentName'),
-  orgUrl: document.querySelector('#orgUrl'),
+  selectedEnvironmentId: document.querySelector('#selectedEnvironmentId'),
+  selectedEnvironmentUrl: document.querySelector('#selectedEnvironmentUrl'),
+  copyEnvironmentButton: document.querySelector('#copyEnvironmentButton'),
   status: document.querySelector('#status'),
   environmentList: document.querySelector('#environmentList'),
   roles: document.querySelector('#roles'),
@@ -42,6 +43,13 @@ const el = {
 };
 
 const state = {
+  environments: [],
+  environmentsLoaded: false,
+  hiddenEnvironmentIds: new Set(),
+  selectedEnvironment: {
+    environmentName: '',
+    orgUrl: '',
+  },
   solutions: [],
   selectedSolutionId: '',
 };
@@ -49,11 +57,18 @@ const state = {
 el.tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 el.themeButton.addEventListener('click', toggleTheme);
 el.accountSelect.addEventListener('change', () => withBusy(el.accountSelect, switchAccount));
+el.environmentSelect.addEventListener('change', () => selectHeaderEnvironment().catch((error) => {
+  toast(error.message);
+  console.error(error);
+}));
+el.copyEnvironmentButton.addEventListener('click', () => copySelectedEnvironment().catch((error) => {
+  toast(error.message);
+  console.error(error);
+}));
 el.signInButton.addEventListener('click', () => withBusy(el.signInButton, signIn));
 el.signInDifferentButton.addEventListener('click', () => withBusy(el.signInDifferentButton, signInDifferent));
 el.logoutButton.addEventListener('click', () => withBusy(el.logoutButton, logout));
 el.loadEnvironmentsButton.addEventListener('click', () => withBusy(el.loadEnvironmentsButton, loadEnvironments));
-el.saveOrgButton.addEventListener('click', () => withBusy(el.saveOrgButton, saveOrg));
 el.loadRolesButton.addEventListener('click', () => withBusy(el.loadRolesButton, loadRoles));
 el.createRoleForm.addEventListener('submit', createRole);
 el.renameButton.addEventListener('click', () => withBusy(el.renameButton, renameRole));
@@ -84,11 +99,9 @@ await loadStatus();
 
 async function loadStatus() {
   const status = await api('/api/status');
-  renderAccounts(status.accounts || [], status.selectedAccountHomeId || '');
-  if (status.orgUrl) {
-    el.environmentName.value = status.environmentName || '';
-    el.orgUrl.value = status.orgUrl;
-    el.status.textContent = `Using ${status.orgUrl}`;
+  applyAuthState(status);
+  if (state.selectedEnvironment.orgUrl) {
+    el.status.textContent = `Using ${state.selectedEnvironment.orgUrl}`;
   } else {
     el.status.textContent = `Region: ${status.region}`;
   }
@@ -97,30 +110,37 @@ async function loadStatus() {
 async function signIn() {
   const result = await api('/api/login', {
     method: 'POST',
-    body: { orgUrl: el.orgUrl.value },
+    body: {},
   });
-  renderAccounts(result.accounts || [], result.selectedAccountHomeId || '');
-  el.status.textContent = result.orgUrl
-    ? `Signed in to ${result.orgUrl}`
+  applyAuthState(result);
+  el.status.textContent = state.selectedEnvironment.orgUrl
+    ? `Signed in to ${state.selectedEnvironment.orgUrl}`
     : `Signed in. Load environments to choose a Dataverse org URL.`;
   toast('Signed in.');
+  clearEnvironmentOptions();
+  await loadEnvironments();
 }
 
 async function signInDifferent() {
   const result = await api('/api/login-different', {
     method: 'POST',
-    body: { orgUrl: el.orgUrl.value },
+    body: {},
   });
-  renderAccounts(result.accounts || [], result.selectedAccountHomeId || '');
-  el.status.textContent = result.orgUrl
-    ? `Signed in to ${result.orgUrl}${result.account ? ` as ${result.account}` : ''}`
+  applyAuthState(result);
+  el.status.textContent = state.selectedEnvironment.orgUrl
+    ? `Signed in to ${state.selectedEnvironment.orgUrl}${result.account ? ` as ${result.account}` : ''}`
     : `Signed in${result.account ? ` as ${result.account}` : ''}. Load environments to choose a Dataverse org URL.`;
   toast('Signed in with account picker.');
+  clearEnvironmentOptions();
+  await loadEnvironments();
 }
 
 async function logout() {
   const result = await api('/api/logout', { method: 'POST' });
-  renderAccounts([], '');
+  state.environments = [];
+  state.environmentsLoaded = false;
+  applyAuthState({ accounts: [], selectedAccountHomeId: '', selectedEnvironment: {} });
+  renderEnvironmentList();
   el.status.textContent = `Logged out. Removed ${result.removed} cached account${result.removed === 1 ? '' : 's'}.`;
   toast('Logged out.');
 }
@@ -134,8 +154,13 @@ async function switchAccount() {
     method: 'POST',
     body: { homeAccountId },
   });
-  renderAccounts(result.accounts || [], result.selectedAccountHomeId || homeAccountId);
+  applyAuthState(result);
+  el.status.textContent = state.selectedEnvironment.orgUrl
+    ? `Using ${state.selectedEnvironment.orgUrl}`
+    : 'Account switched. Select an environment.';
   toast('Account switched.');
+  clearEnvironmentOptions();
+  await loadEnvironments();
 }
 
 function renderAccounts(accounts, selectedAccountHomeId) {
@@ -152,47 +177,221 @@ function renderAccounts(accounts, selectedAccountHomeId) {
   el.accountSelect.disabled = !accounts.length;
 }
 
+function applyAuthState(data) {
+  renderAccounts(data.accounts || [], data.selectedAccountHomeId || '');
+  loadEnvironmentVisibility();
+  setSelectedEnvironmentFromPayload(data);
+  renderEnvironmentPicker();
+  renderSelectedEnvironmentSummary();
+}
+
+function setSelectedEnvironmentFromPayload(data) {
+  const environment = data?.selectedEnvironment || data || {};
+  state.selectedEnvironment = {
+    environmentName: environment.environmentName || environment.name || '',
+    orgUrl: environment.orgUrl || '',
+  };
+  renderSelectedEnvironmentSummary();
+}
+
+function renderSelectedEnvironmentSummary() {
+  el.selectedEnvironmentId.textContent = state.selectedEnvironment.environmentName || 'None';
+  el.selectedEnvironmentUrl.textContent = state.selectedEnvironment.orgUrl || 'None';
+  el.copyEnvironmentButton.disabled = !state.selectedEnvironment.environmentName && !state.selectedEnvironment.orgUrl;
+}
+
+function renderEnvironmentPicker() {
+  const selectedId = state.selectedEnvironment.environmentName;
+  const visibleEnvironments = getVisibleEnvironments();
+  const options = [
+    `<option value=""${selectedId ? '' : ' selected'}>${visibleEnvironments.length ? 'Select environment' : 'No visible environments'}</option>`,
+    ...visibleEnvironments.map((environment) => `
+      <option value="${escapeAttr(environment.name)}"${environment.name === selectedId ? ' selected' : ''}>
+        ${escapeHtml(environment.displayName || environment.name)}
+      </option>
+    `),
+  ].join('');
+  el.environmentSelect.innerHTML = options;
+  el.environmentSelect.disabled = !visibleEnvironments.length;
+}
+
+function renderEnvironmentList() {
+  if (!state.environments.length) {
+    el.environmentList.innerHTML = empty(state.environmentsLoaded ? 'No environments returned for this account.' : 'Sign in, then load environments.');
+    return;
+  }
+
+  const selectedId = state.selectedEnvironment.environmentName;
+  const selectedUrl = state.selectedEnvironment.orgUrl;
+  el.environmentList.innerHTML = state.environments.map((environment) => {
+    const isCurrent = environment.name === selectedId || (environment.orgUrl && environment.orgUrl === selectedUrl);
+    const isVisible = isEnvironmentVisible(environment);
+    return `
+      <label class="list-item env-option${isVisible ? ' selected' : ''}" data-name="${escapeAttr(environment.name)}">
+        <input class="env-checkbox" type="checkbox" value="${escapeAttr(environment.name)}"${isVisible ? ' checked' : ''} />
+        <span class="env-details">
+          <span class="role-name">${escapeHtml(environment.displayName || environment.name)}</span>
+          <span class="role-id">${escapeHtml(environment.name)}</span>
+          <span class="role-id">${escapeHtml(environment.orgUrl || 'No Dataverse org URL in response')}</span>
+          <span class="role-id">${isVisible ? 'Shown in header picker' : 'Hidden from header picker'}${isCurrent ? ' | current environment' : ''}</span>
+        </span>
+      </label>
+    `;
+  }).join('');
+
+  document.querySelectorAll('.env-checkbox').forEach((input) => {
+    input.addEventListener('change', () => toggleEnvironmentVisibility(input).catch((error) => {
+      toast(error.message);
+      console.error(error);
+    }));
+  });
+}
+
+function clearEnvironmentOptions() {
+  state.environments = [];
+  state.environmentsLoaded = false;
+  renderEnvironmentPicker();
+}
+
+async function selectHeaderEnvironment() {
+  const environment = getVisibleEnvironments().find((item) => item.name === el.environmentSelect.value) || null;
+  if (!environment) {
+    renderEnvironmentPicker();
+    return;
+  }
+  await selectEnvironment(environment);
+}
+
+async function selectEnvironment(environment) {
+  const next = {
+    environmentName: environment.name || environment.environmentName || '',
+    orgUrl: environment.orgUrl || '',
+  };
+  if (!next.orgUrl) {
+    renderEnvironmentPicker();
+    toast('Environment has no Dataverse org URL and cannot be selected.');
+    return;
+  }
+
+  setSelectedEnvironmentFromPayload(next);
+  renderEnvironmentPicker();
+  renderEnvironmentList();
+
+  const result = await api('/api/org', {
+    method: 'POST',
+    body: next,
+  });
+  applyAuthState(result);
+  renderEnvironmentList();
+  el.status.textContent = `Using ${state.selectedEnvironment.orgUrl}`;
+  toast('Environment selected.');
+}
+
+function getEnvironmentByName(name) {
+  return state.environments.find((environment) => environment.name === name) || null;
+}
+
+function getVisibleEnvironments() {
+  return state.environments.filter((environment) => isEnvironmentVisible(environment));
+}
+
+function isEnvironmentVisible(environment) {
+  return !state.hiddenEnvironmentIds.has(environment.name);
+}
+
+async function toggleEnvironmentVisibility(input) {
+  const environmentName = input.value;
+  if (input.checked) {
+    state.hiddenEnvironmentIds.delete(environmentName);
+  } else {
+    state.hiddenEnvironmentIds.add(environmentName);
+  }
+  saveEnvironmentVisibility();
+
+  const hiddenCurrentEnvironment = !input.checked && environmentName === state.selectedEnvironment.environmentName;
+  if (hiddenCurrentEnvironment) {
+    await clearSelectedEnvironment();
+  } else {
+    renderEnvironmentPicker();
+    renderEnvironmentList();
+  }
+
+  toast(input.checked ? 'Environment shown in header picker.' : 'Environment hidden from header picker.');
+}
+
+async function clearSelectedEnvironment() {
+  setSelectedEnvironmentFromPayload({});
+  renderEnvironmentPicker();
+  renderEnvironmentList();
+  const result = await api('/api/org', {
+    method: 'POST',
+    body: { clear: true },
+  });
+  applyAuthState(result);
+  renderEnvironmentList();
+  el.status.textContent = 'Select an environment.';
+}
+
+function loadEnvironmentVisibility() {
+  state.hiddenEnvironmentIds = new Set(readJsonStorage(environmentVisibilityKey(), []));
+}
+
+function saveEnvironmentVisibility() {
+  localStorage.setItem(environmentVisibilityKey(), JSON.stringify([...state.hiddenEnvironmentIds]));
+}
+
+function environmentVisibilityKey() {
+  return `pdacHiddenEnvironments:${el.accountSelect.value || 'default'}`;
+}
+
+async function copySelectedEnvironment() {
+  const lines = [
+    state.selectedEnvironment.environmentName ? `Environment ID: ${state.selectedEnvironment.environmentName}` : '',
+    state.selectedEnvironment.orgUrl ? `Org URL: ${state.selectedEnvironment.orgUrl}` : '',
+  ].filter(Boolean);
+  if (!lines.length) {
+    toast('No environment selected.');
+    return;
+  }
+
+  await writeClipboard(lines.join('\n'));
+  toast('Selected environment copied.');
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.append(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
 function activateTab(name) {
   el.tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
   el.tabPanels.forEach((panel) => panel.classList.toggle('active', panel.id === `${name}Tab`));
 }
 
-async function saveOrg() {
-  const result = await api('/api/org', {
-    method: 'POST',
-    body: {
-      environmentName: el.environmentName.value,
-      orgUrl: el.orgUrl.value,
-    },
-  });
-  el.status.textContent = `Using ${result.orgUrl}`;
-  toast('Org URL saved.');
-}
-
 async function loadEnvironments() {
   el.environmentList.innerHTML = empty('Loading environments...');
   const data = await api('/api/environments');
-  const environments = data.value || [];
-  if (!environments.length) {
-    el.environmentList.innerHTML = empty('No environments returned. You can enter the org URL manually.');
+  state.environments = data.value || [];
+  state.environmentsLoaded = true;
+  loadEnvironmentVisibility();
+  setSelectedEnvironmentFromPayload(data);
+  if (state.selectedEnvironment.environmentName && !isEnvironmentVisible({ name: state.selectedEnvironment.environmentName })) {
+    await clearSelectedEnvironment();
     return;
   }
-
-  el.environmentList.innerHTML = environments.map((env) => `
-    <button class="list-item env-option" type="button" data-name="${escapeAttr(env.name)}" data-url="${escapeAttr(env.orgUrl || '')}">
-      <span class="role-name">${escapeHtml(env.displayName || env.name)}</span>
-      <span class="role-id">${escapeHtml(env.name)}</span>
-      <span class="role-id">${escapeHtml(env.orgUrl || 'No Dataverse org URL in response')}</span>
-    </button>
-  `).join('');
-
-  document.querySelectorAll('.env-option').forEach((button) => {
-    button.addEventListener('click', () => {
-      el.environmentName.value = button.dataset.name || '';
-      el.orgUrl.value = button.dataset.url || '';
-      toast('Environment copied into the fields.');
-    });
-  });
+  renderEnvironmentPicker();
+  renderEnvironmentList();
 }
 
 async function loadRoles() {
@@ -490,7 +689,8 @@ async function api(path, options = {}) {
 }
 
 async function withBusy(button, task) {
-  const text = button.textContent;
+  const isButton = button.tagName === 'BUTTON';
+  const text = isButton ? button.textContent : '';
   button.disabled = true;
   try {
     await task();
@@ -498,7 +698,9 @@ async function withBusy(button, task) {
     console.error(error);
   } finally {
     button.disabled = false;
-    button.textContent = text;
+    if (isButton) {
+      button.textContent = text;
+    }
   }
 }
 
@@ -568,4 +770,13 @@ function cssEscape(value) {
 
 function safeFilename(value) {
   return String(value || 'security-role').replace(/[^\w.-]+/g, '-').replace(/^-|-$/g, '') || 'security-role';
+}
+
+function readJsonStorage(key, fallback) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || 'null');
+    return Array.isArray(value) ? value : fallback;
+  } catch {
+    return fallback;
+  }
 }

@@ -29,7 +29,7 @@ npm start
 ## Tabs
 
 - **Home**: quick overview.
-- **Environment and Auth**: environment picker, manual org URL, sign in, sign in with account picker, and log out.
+- **Environment and Auth**: account-scoped environment picker, manual org URL, sign in, sign in with account picker, and log out.
 - **Roles**: edit editable root security roles through CSV files.
 - **Solution**: list/filter solutions, inspect components, and export solution ZIP files.
 
@@ -37,7 +37,7 @@ npm start
 
 1. Sign in.
 2. Load environments or manually enter your Dataverse org URL.
-3. Select the environment/org URL.
+3. Select the environment/org URL. The selected environment is remembered for the active account and appears in the header picker.
 4. Load roles.
 5. Select or create a role.
 6. Download the table permissions CSV or the misc privileges CSV.
