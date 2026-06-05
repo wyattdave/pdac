@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PDAC - Power DevBox Admin Center</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <img src="/icon.png" alt="" class="brand-mark" />
+        <div>
+          <h1>PDAC - Power DevBox Admin Center</h1>
+          <p>Settings by function not by environment</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <label class="account-switcher">
+          Account
+          <select id="accountSelect">
+            <option value="">No account</option>
+          </select>
+        </label>
+        <button id="themeButton" type="button" class="secondary">Dark mode</button>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="App sections">
+      <button class="tab active" type="button" data-tab="home">Home</button>
+      <button class="tab" type="button" data-tab="auth">Environment and Auth</button>
+      <button class="tab" type="button" data-tab="roles">Roles</button>
+      <button class="tab" type="button" data-tab="solutions">Solution</button>
+    </nav>
+
+    <main>
+      <section id="homeTab" class="tab-panel active">
+        <div class="panel hero-panel">
+          <h2>Home</h2>
+          <div class="home-brand">
+            <img src="/icon.png" alt="" class="home-logo" />
+            <p class="lead">Settings by function not by environment. Connect once, then work by admin function across roles, solutions, and environment tools.</p>
+          </div>
+          <div class="home-grid">
+            <div class="mini-card">
+              <h3>1. Connect</h3>
+              <p>Pick an environment or paste an org URL, then sign in.</p>
+            </div>
+            <div class="mini-card">
+              <h3>2. Roles</h3>
+              <p>Download role permissions, edit scopes in Excel, and upload the CSV.</p>
+            </div>
+            <div class="mini-card">
+              <h3>3. Solutions</h3>
+              <p>Filter solutions, view components, and export a solution ZIP.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="authTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Environment and Auth</h2>
+            <div class="actions">
+              <button id="signInButton" type="button">Sign in</button>
+              <button id="signInDifferentButton" type="button" class="secondary">Sign in different account</button>
+              <button id="logoutButton" type="button" class="secondary">Log out</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="loadEnvironmentsButton" type="button">Load environments</button>
+          </div>
+          <div id="environmentList" class="list environment-list"></div>
+
+          <div class="row">
+            <label>
+              Environment ID
+              <input id="environmentName" placeholder="00000000-0000-0000-0000-000000000000" />
+            </label>
+            <label>
+              Org URL
+              <input id="orgUrl" placeholder="https://org.crm.dynamics.com" />
+            </label>
+            <button id="saveOrgButton" type="button">Use org</button>
+          </div>
+          <p id="status" class="muted"></p>
+        </section>
+      </section>
+
+      <section id="rolesTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Roles</h2>
+            <button id="loadRolesButton" type="button">Load roles</button>
+          </div>
+
+          <label class="search">
+            Search roles
+            <input id="roleSearch" placeholder="Type to filter roles" />
+          </label>
+          <p class="muted roles-note">Dataverse creates inherited security-role copies per business unit. This list shows only editable root roles and notes how many inherited copies exist.</p>
+
+          <form id="createRoleForm" class="row compact">
+            <label>
+              New role name
+              <input name="name" placeholder="CSV Managed Role" />
+            </label>
+            <button type="submit">Create role</button>
+          </form>
+
+          <div class="split">
+            <div id="roles" class="list role-list"></div>
+            <div class="editor">
+              <h3 id="selectedRoleName">No role selected</h3>
+              <input id="selectedRoleId" type="hidden" />
+              <label>
+                Role name
+                <input id="roleNameInput" disabled />
+              </label>
+              <div class="actions">
+                <button id="renameButton" type="button" disabled>Save name</button>
+                <button id="downloadButton" type="button" disabled>Download table CSV</button>
+                <button id="downloadMiscButton" type="button" disabled>Download misc CSV</button>
+              </div>
+              <div class="upload">
+                <span>Upload edited CSV</span>
+                <label class="file-picker">
+                  <input id="csvFile" type="file" accept=".csv,text/csv" disabled />
+                  <span id="filePickerText">Choose CSV file</span>
+                </label>
+              </div>
+              <button id="uploadButton" type="button" disabled>Apply CSV</button>
+              <div class="guide">
+                <h4>Scope Guide</h4>
+                <p><strong>none</strong>: no permission.</p>
+                <p><strong>user</strong>: records owned by the user or their teams.</p>
+                <p><strong>business</strong>: records in the user's business unit.</p>
+                <p><strong>parent</strong>: records in the user's business unit and child business units.</p>
+                <p><strong>org</strong>: records across the organization.</p>
+                <p><strong>recordfilter</strong>: special filtered access where Dataverse exposes it for a privilege.</p>
+                <p class="muted">Table CSV columns are Create, Read, Write, Delete, Append, Append To, Assign, and Share. Misc privileges use a separate CSV.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="solutionsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Solutions</h2>
+            <button id="loadSolutionsButton" type="button">Load solutions</button>
+          </div>
+
+          <div class="solution-filters">
+            <label>
+              Filter by name
+              <input id="solutionSearch" placeholder="Search friendly or unique name" />
+            </label>
+            <label class="checkbox-label">
+              <input id="managedOnly" type="checkbox" />
+              Managed only
+            </label>
+            <label>
+              Publishers
+              <div class="combo">
+                <button id="publisherDropdownButton" class="combo-button secondary" type="button">All publishers</button>
+                <div id="publisherDropdown" class="combo-panel" hidden>
+                  <div id="publisherFilter" class="checkbox-list"></div>
+                </div>
+              </div>
+            </label>
+          </div>
+
+          <div class="split">
+            <div id="solutions" class="list solution-list"></div>
+            <div class="editor">
+              <div class="section-title compact-title">
+                <div>
+                  <h3 id="selectedSolutionName">No solution selected</h3>
+                  <p id="selectedSolutionMeta" class="muted"></p>
+                </div>
+                <div class="actions">
+                  <button id="loadComponentsButton" type="button" disabled>List components</button>
+                  <button id="exportSolutionButton" type="button" disabled>Export solution</button>
+                </div>
+              </div>
+              <label class="checkbox-label export-managed-row">
+                <input id="exportManaged" type="checkbox" />
+                Export as managed
+              </label>
+              <div id="solutionComponents" class="component-list"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <a href="https://wyattdave.com">WyattDave</a>
+      <span>|</span>
+      <a href="https://powerdevbox.com">Power Devbox</a>
+      <span>|</span>
+      <span>2026</span>
+    </footer>
+
+    <div id="toast"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

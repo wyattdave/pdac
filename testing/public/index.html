@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Power Platform Local PoC</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Power Platform Local PoC</h1>
+        <p>Manage Dataverse metadata and create connector connections through a tiny localhost helper.</p>
+      </div>
+      <button id="loginButton" type="button">Sign in</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel environment-panel">
+        <div class="section-header">
+          <h2>Environment</h2>
+          <button id="loadEnvironmentsButton" type="button">Load environments</button>
+        </div>
+
+        <div class="grid two">
+          <label>
+            Environment ID
+            <input id="environmentName" autocomplete="off" placeholder="00000000-0000-0000-0000-000000000000" />
+          </label>
+          <label>
+            Dataverse org URL
+            <input id="orgUrl" autocomplete="off" placeholder="https://org.crm.dynamics.com" />
+          </label>
+        </div>
+
+        <div class="section-actions">
+          <button id="selectEnvironmentButton" type="button">Use environment</button>
+          <span id="environmentStatus" class="muted"></span>
+        </div>
+
+        <div id="environmentList" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-header">
+          <h2>Dataverse Tables</h2>
+          <button id="refreshTablesButton" type="button">Refresh</button>
+        </div>
+
+        <div class="split">
+          <div>
+            <div id="tableList" class="list table-list"></div>
+          </div>
+          <div>
+            <h3 id="columnsTitle">Columns</h3>
+            <div id="columnList" class="list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Create Table</h2>
+        <form id="createTableForm" class="grid two">
+          <label>
+            Schema name
+            <input name="schemaName" required placeholder="new_Project" />
+          </label>
+          <label>
+            Display name
+            <input name="displayName" required placeholder="Project" />
+          </label>
+          <label>
+            Collection name
+            <input name="collectionName" placeholder="Projects" />
+          </label>
+          <label>
+            Primary name schema
+            <input name="primaryNameSchemaName" placeholder="new_ProjectName" />
+          </label>
+          <label class="wide">
+            Description
+            <input name="description" placeholder="Optional description" />
+          </label>
+          <div class="wide section-actions">
+            <button type="submit">Create table</button>
+            <span id="createTableStatus" class="muted"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Add Column</h2>
+        <form id="addColumnForm" class="grid three">
+          <label>
+            Table logical name
+            <input name="tableName" required placeholder="new_project" />
+          </label>
+          <label>
+            Schema name
+            <input name="schemaName" required placeholder="new_Status" />
+          </label>
+          <label>
+            Display name
+            <input name="displayName" required placeholder="Status" />
+          </label>
+          <label>
+            Type
+            <select name="type">
+              <option value="string">Text</option>
+              <option value="memo">Multiline text</option>
+              <option value="integer">Whole number</option>
+              <option value="decimal">Decimal</option>
+              <option value="boolean">Yes/no</option>
+              <option value="datetime">Date/time</option>
+            </select>
+          </label>
+          <label>
+            Max length
+            <input name="maxLength" type="number" min="1" placeholder="100" />
+          </label>
+          <label>
+            Required level
+            <select name="requiredLevel">
+              <option value="None">Optional</option>
+              <option value="ApplicationRequired">Business required</option>
+              <option value="Recommended">Recommended</option>
+            </select>
+          </label>
+          <div class="wide section-actions">
+            <button type="submit">Add column</button>
+            <span id="addColumnStatus" class="muted"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Connections</h2>
+        <div class="grid three">
+          <label>
+            Connector ID
+            <input id="connectorId" placeholder="shared_office365" />
+          </label>
+          <label>
+            Display name
+            <input id="connectionDisplayName" placeholder="Optional" />
+          </label>
+          <div class="button-stack">
+            <button id="createConnectionButton" type="button">Create connection</button>
+            <button id="listConnectionsButton" type="button" class="secondary">List connections</button>
+          </div>
+        </div>
+        <div id="connectionStatus" class="muted"></div>
+        <div id="connectionList" class="list"></div>
+      </section>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
