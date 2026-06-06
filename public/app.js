@@ -105,9 +105,7 @@ const state = {
   selectedSolutionId: '',
   selectedComponent: null,
   componentPrincipals: [],
-  importEnvironments: [],
   importPackage: null,
-  importTarget: null,
   importTargetPrepared: null,
 };
 
@@ -796,7 +794,7 @@ async function createRole(event) {
     renderBusinessUnits();
     toast(`Created ${role.name}`);
     await loadRoles();
-    const newButton = document.querySelector(`.role-row[data-id="${cssEscape(role.roleid)}"]`);
+    const newButton = findRoleRow(role.roleid);
     if (newButton) {
       selectRole(newButton);
     }
@@ -1041,14 +1039,10 @@ async function renameRole() {
   });
   toast('Role name saved.');
   await loadRoles();
-  const button = document.querySelector(`.role-row[data-id="${cssEscape(result.roleid)}"]`);
+  const button = findRoleRow(result.roleid);
   if (button) {
     selectRole(button);
   }
-}
-
-async function downloadCsv(kind) {
-  return downloadRoleFile(kind);
 }
 
 async function downloadRoleFile(kind) {
@@ -1097,8 +1091,9 @@ function filterRoles() {
   });
 }
 
-async function uploadCsv() {
-  return uploadRoleFile();
+function findRoleRow(roleId) {
+  return [...document.querySelectorAll('.role-row')]
+    .find((button) => button.dataset.id === roleId) || null;
 }
 
 async function uploadRoleFile() {
@@ -1357,7 +1352,6 @@ function renderConnectionReferenceManager(details) {
       <div class="role-id">Match keys: ${escapeHtml((details.connectorKeys || []).join(' | ') || 'none')}</div>
       <div class="role-id">Current connection found: ${details.currentConnectionFound ? 'yes' : 'no'}</div>
       ${connections.length ? '' : '<div class="guide"><p>No existing connections match this connection reference connector. Create a connection, then refresh or switch to the new matching connection.</p></div>'}
-      ${connections.length ? '' : renderConnectionDebug(details.connectionDebug || [])}
       <label>
         New connection name
         <input id="componentConnectionNameInput" value="${escapeAttr(createName)}" />
@@ -1370,20 +1364,6 @@ function renderConnectionReferenceManager(details) {
         <button class="secondary" type="button" data-modal-action="refresh-component">Refresh</button>
       </div>
     </div>
-  `;
-}
-
-function renderConnectionDebug(debugRows) {
-  if (!debugRows.length) {
-    return '';
-  }
-  return `
-    <details class="guide">
-      <summary>Connection debug sample</summary>
-      ${debugRows.map((row) => `
-        <p>${escapeHtml(row.displayName || row.name || row.id || 'Connection')} | ${escapeHtml(row.connectorId || 'no connectorId')} | ${escapeHtml((row.keys || []).slice(0, 5).join(' / ') || 'no keys')}</p>
-      `).join('')}
-    </details>
   `;
 }
 
@@ -1778,7 +1758,7 @@ function renderImportPackage() {
   el.importPackageSummary.innerHTML = `
     <h4>${escapeHtml(state.importPackage.filename)}</h4>
     <p>${escapeHtml(analysis.solution?.uniqueName || 'Solution package')}</p>
-    ${sourceSolutionUrl ? `<p><a href="${escapeAttr(sourceSolutionUrl)}" target="_blank" rel="noreferrer">Open source solution</a></p>` : ''}
+    ${sourceSolutionUrl ? `<p><a href="${escapeAttr(sourceSolutionUrl)}" target="_blank" rel="noopener noreferrer">Open source solution</a></p>` : ''}
     <p class="muted">${analysis.connectionReferences?.length || 0} connection reference${(analysis.connectionReferences?.length || 0) === 1 ? '' : 's'} | ${analysis.environmentVariables?.length || 0} environment variable${(analysis.environmentVariables?.length || 0) === 1 ? '' : 's'}</p>
   `;
   updateImportButtons();
@@ -1861,7 +1841,8 @@ function renderImportConnections(connectionReferences) {
           </option>
         `).join('')
       : '<option value="">No matching connection found</option>';
-    const link = reference.matches?.length ? '' : `<a href="${escapeAttr(reference.createUrl)}" target="_blank" rel="noreferrer">Create connection</a>`;
+    const createUrl = safeHttpsUrl(reference.createUrl);
+    const link = reference.matches?.length || !createUrl ? '' : `<a href="${escapeAttr(createUrl)}" target="_blank" rel="noopener noreferrer">Create connection</a>`;
     return `
       <div class="import-row" data-logical-name="${escapeAttr(reference.logicalName)}" data-connector-id="${escapeAttr(reference.connectorId)}">
         <div>
@@ -1919,7 +1900,7 @@ async function importSolutionToTarget() {
   const targetSolutionUrl = makePowerAutomateSolutionUrl(target.environmentName, result.targetSolutionId);
   el.importStatus.innerHTML = [
     `Import submitted. Job ID: ${escapeHtml(result.importJobId)}`,
-    targetSolutionUrl ? `<a href="${escapeAttr(targetSolutionUrl)}" target="_blank" rel="noreferrer">Open target solution</a>` : '',
+    targetSolutionUrl ? `<a href="${escapeAttr(targetSolutionUrl)}" target="_blank" rel="noopener noreferrer">Open target solution</a>` : '',
   ].filter(Boolean).join(' ');
   toast('Solution import submitted.');
 }
@@ -2186,6 +2167,15 @@ function makePowerAutomateSolutionUrl(environmentId, solutionId) {
   return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}/overview`;
 }
 
+function safeHttpsUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
 function requireSelectedSolution() {
   if (!state.selectedSolutionId) {
     throw new Error('Select a solution first.');
@@ -2302,13 +2292,6 @@ function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, '&#96;');
 }
 
-function cssEscape(value) {
-  if (globalThis.CSS?.escape) {
-    return CSS.escape(value);
-  }
-  return String(value).replace(/"/g, '\\"');
-}
-
 function safeFilename(value) {
   return String(value || 'security-role').replace(/[^\w.-]+/g, '-').replace(/^-|-$/g, '') || 'security-role';
 }
@@ -2316,7 +2299,10 @@ function safeFilename(value) {
 function readJsonStorage(key, fallback) {
   try {
     const value = JSON.parse(localStorage.getItem(key) || 'null');
-    return Array.isArray(value) ? value : fallback;
+    if (value === null) {
+      return fallback;
+    }
+    return Array.isArray(fallback) && !Array.isArray(value) ? fallback : value;
   } catch {
     return fallback;
   }

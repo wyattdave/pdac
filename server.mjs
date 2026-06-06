@@ -1387,7 +1387,6 @@ async function getConnectionReferenceDetails(connectionReferenceId) {
     totalConnectionCount: allConnections.length,
     matchingConnectionCount: connections.length,
     currentConnectionFound: Boolean(currentConnection),
-    connectionDebug: connectionDebugRows(allConnections, effectiveConnectorKeys),
     createUrl: makeConnectionCreateUrl(selected.environmentName, reference.connectorid),
     notes: ['PDAC only lists existing connections whose connector matches this connection reference. Create connection starts the Microsoft Power Apps connection flow, then refreshes this panel.'],
   };
@@ -2481,19 +2480,6 @@ function connectionLooksLikeConnector(connection, connectorKeys) {
     }
   }
   return false;
-}
-
-function connectionDebugRows(connections, connectorKeys) {
-  const related = connections.filter((connection) => connectionLooksLikeConnector(connection, connectorKeys));
-  const rows = related.length ? related : connections.slice(0, 8);
-  return rows.slice(0, 12).map((connection) => ({
-    id: connection.connectionId,
-    name: connection.name,
-    displayName: connection.displayName,
-    connectorId: connection.connectorId,
-    keys: connection.connectorKeys || [],
-    source: connection.source,
-  }));
 }
 
 function makeConnectionCreateUrl(environmentName, connectorId) {
