@@ -511,6 +511,34 @@ button .spinner {
   width: 13px;
 }
 
+.trash-icon {
+  border: 2px solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 3px 3px;
+  display: inline-block;
+  height: 15px;
+  position: relative;
+  width: 13px;
+}
+
+.trash-icon::before {
+  border-top: 2px solid currentColor;
+  content: "";
+  left: -3px;
+  position: absolute;
+  top: -5px;
+  width: 17px;
+}
+
+.trash-icon::after {
+  border-top: 2px solid currentColor;
+  content: "";
+  left: 3px;
+  position: absolute;
+  top: -8px;
+  width: 7px;
+}
+
 button:disabled,
 input:disabled,
 select:disabled {
@@ -614,6 +642,86 @@ select:disabled {
 
 .solution-row {
   min-height: 104px;
+}
+
+.connection-filters {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  margin-bottom: 10px;
+}
+
+.connection-summary {
+  margin-bottom: 12px;
+}
+
+.connection-list {
+  max-height: 620px;
+}
+
+.connection-row {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.connection-row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.connection-row-actions {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.status-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+
+.status-pill.valid {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #166534;
+}
+
+.status-pill.broken {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.status-pill.fix-pill {
+  display: inline-flex;
+  text-decoration: none;
+}
+
+.status-pill.fix-pill:hover {
+  background: #fecaca;
+}
+
+.status-pill.unknown {
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.danger-action {
+  color: #991b1b;
+}
+
+.trash-button {
+  min-height: 34px;
+  width: 34px;
 }
 
 .role-id {
@@ -827,6 +935,26 @@ select:disabled {
   width: min(820px, calc(100vw - 36px));
 }
 
+.delete-modal {
+  max-width: 520px;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+}
+
+.danger-button {
+  background: #b91c1c;
+}
+
+.danger-button:hover {
+  background: #991b1b;
+}
+
+.delete-warning {
+  border-color: #fca5a5;
+}
+
 .component-modal-body,
 .component-form,
 .share-panel {
@@ -938,7 +1066,9 @@ select:disabled {
 
 .button-link {
   align-items: center;
+  background: var(--primary);
   border-radius: 6px;
+  color: #ffffff;
   display: inline-flex;
   font-size: 14px;
   font-weight: 650;
@@ -946,6 +1076,10 @@ select:disabled {
   min-height: 38px;
   padding: 8px 14px;
   text-decoration: none;
+}
+
+.button-link:hover {
+  background: var(--primary-hover);
 }
 
 .button-link.secondary {
@@ -1046,6 +1180,8 @@ select:disabled {
   .create-role-form,
   .import-grid,
   .solution-filters,
+  .connection-filters,
+  .connection-row,
   .share-grid,
   .selected-environment-bar,
   .component-row {

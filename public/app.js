@@ -12,6 +12,7 @@ const el = {
   logoutButton: document.querySelector('#logoutButton'),
   loadEnvironmentsButton: document.querySelector('#loadEnvironmentsButton'),
   loadUsersTeamsButton: document.querySelector('#loadUsersTeamsButton'),
+  loadConnectionsButton: document.querySelector('#loadConnectionsButton'),
   toggleCreateUserButton: document.querySelector('#toggleCreateUserButton'),
   toggleCreateTeamButton: document.querySelector('#toggleCreateTeamButton'),
   createUserPanel: document.querySelector('#createUserPanel'),
@@ -24,6 +25,17 @@ const el = {
   createTeamForm: document.querySelector('#createTeamForm'),
   teamBusinessUnit: document.querySelector('#teamBusinessUnit'),
   teamMembersPanel: document.querySelector('#teamMembersPanel'),
+  connectionSearch: document.querySelector('#connectionSearch'),
+  myConnectionsOnly: document.querySelector('#myConnectionsOnly'),
+  brokenConnectionsOnly: document.querySelector('#brokenConnectionsOnly'),
+  connectionSummary: document.querySelector('#connectionSummary'),
+  connectionsList: document.querySelector('#connectionsList'),
+  connectionDeleteModal: document.querySelector('#connectionDeleteModal'),
+  connectionDeleteTitle: document.querySelector('#connectionDeleteTitle'),
+  connectionDeleteMeta: document.querySelector('#connectionDeleteMeta'),
+  connectionDeleteClose: document.querySelector('#connectionDeleteClose'),
+  connectionDeleteConfirm: document.querySelector('#connectionDeleteConfirm'),
+  connectionDeleteCancel: document.querySelector('#connectionDeleteCancel'),
   roleAssignmentModal: document.querySelector('#roleAssignmentModal'),
   roleAssignmentTitle: document.querySelector('#roleAssignmentTitle'),
   roleAssignmentMeta: document.querySelector('#roleAssignmentMeta'),
@@ -106,6 +118,10 @@ const state = {
   businessUnitsLoaded: false,
   users: [],
   teams: [],
+  connections: [],
+  connectionsLoaded: false,
+  connectionUser: null,
+  pendingConnectionDeleteId: '',
   roles: [],
   selectedTeamId: '',
   roleAssignmentPrincipal: null,
@@ -145,10 +161,14 @@ el.signInDifferentButton.addEventListener('click', () => withBusy(el.signInDiffe
 el.logoutButton.addEventListener('click', () => withBusy(el.logoutButton, logout));
 el.loadEnvironmentsButton.addEventListener('click', () => withBusy(el.loadEnvironmentsButton, loadEnvironments));
 el.loadUsersTeamsButton.addEventListener('click', () => withBusy(el.loadUsersTeamsButton, loadUsersAndTeams));
+el.loadConnectionsButton.addEventListener('click', () => withBusy(el.loadConnectionsButton, loadConnections));
 el.toggleCreateUserButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('user'));
 el.toggleCreateTeamButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('team'));
 el.userSearch.addEventListener('input', renderUsers);
 el.teamSearch.addEventListener('input', renderTeams);
+el.connectionSearch.addEventListener('input', renderConnections);
+el.myConnectionsOnly.addEventListener('change', renderConnections);
+el.brokenConnectionsOnly.addEventListener('change', renderConnections);
 el.syncUserForm.addEventListener('submit', syncEnvironmentUser);
 el.createTeamForm.addEventListener('submit', createEnvironmentTeam);
 el.roleAssignmentClose.addEventListener('click', closeRoleAssignmentModal);
@@ -186,6 +206,21 @@ el.teamMembersPanel.addEventListener('click', (event) => {
     return;
   }
   handleTeamAction(button.dataset.teamAction || '', button).catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.connectionsList.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-connection-action="delete"]');
+  if (!button) {
+    return;
+  }
+  openConnectionDeleteModal(button.dataset.connectionId || '');
+});
+el.connectionDeleteClose.addEventListener('click', closeConnectionDeleteModal);
+el.connectionDeleteCancel.addEventListener('click', closeConnectionDeleteModal);
+el.connectionDeleteConfirm.addEventListener('click', () => {
+  confirmDeleteConnection().catch((error) => {
     toast(error.message, 'error');
     console.error(error);
   });
@@ -231,6 +266,11 @@ document.addEventListener('click', (event) => {
   if (!event.target.closest('.combo')) {
     el.environmentDropdown.hidden = true;
     el.publisherDropdown.hidden = true;
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !el.connectionDeleteModal.hidden) {
+    closeConnectionDeleteModal();
   }
 });
 el.loadComponentsButton.addEventListener('click', () => withBusy(el.loadComponentsButton, loadSolutionComponents));
@@ -889,11 +929,17 @@ function clearEnvironmentData() {
   clearBusinessUnits();
   state.users = [];
   state.teams = [];
+  state.connections = [];
+  state.connectionsLoaded = false;
+  state.connectionUser = null;
+  state.pendingConnectionDeleteId = '';
   state.roles = [];
   state.selectedTeamId = '';
   state.roleAssignmentPrincipal = null;
   renderUsers();
   renderTeams();
+  renderConnections();
+  closeConnectionDeleteModal();
   closeRoleAssignmentModal();
   clearRoleSelection();
 }
@@ -1040,6 +1086,138 @@ async function refreshUsers() {
 async function refreshTeams() {
   state.teams = await api('/api/teams');
   renderTeams();
+}
+
+async function loadConnections() {
+  if (!state.selectedEnvironment.environmentName) {
+    throw new Error('Select an environment first.');
+  }
+  const data = await api('/api/connections');
+  state.connections = data.connections || [];
+  state.connectionUser = data.currentUser || null;
+  state.connectionsLoaded = true;
+  renderConnections();
+  toast('Connections loaded.');
+}
+
+function renderConnections() {
+  if (!el.connectionsList) {
+    return;
+  }
+
+  const query = el.connectionSearch.value.trim().toLowerCase();
+  const mineOnly = el.myConnectionsOnly.checked;
+  const brokenOnly = el.brokenConnectionsOnly.checked;
+  const filtered = state.connections.filter((connection) => {
+    if (mineOnly && !connection.isCurrentUserConnection) {
+      return false;
+    }
+    if (brokenOnly && connection.health !== 'broken') {
+      return false;
+    }
+    return !query || connectionSearchText(connection).includes(query);
+  });
+
+  const total = state.connections.length;
+  const broken = state.connections.filter((connection) => connection.health === 'broken').length;
+  const mine = state.connections.filter((connection) => connection.isCurrentUserConnection).length;
+  el.connectionSummary.textContent = total
+    ? `${total} connection${total === 1 ? '' : 's'} loaded | ${broken} broken | ${mine} owned by ${state.connectionUser?.displayName || state.connectionUser?.email || 'the selected account'}`
+    : '';
+
+  if (!filtered.length) {
+    el.connectionsList.innerHTML = empty(state.connectionsLoaded ? 'No connections match the filter.' : 'Load connections.');
+    return;
+  }
+
+  el.connectionsList.innerHTML = filtered.map((connection) => {
+    const health = connection.health || 'unknown';
+    const canFix = health === 'broken' && connection.isCurrentUserConnection && connection.fixUrl;
+    const owner = connection.owner?.displayName || connection.owner?.email || connection.owner?.id || 'Unknown owner';
+    const ownerEmail = connection.owner?.email && connection.owner.email !== owner ? ` | ${connection.owner.email}` : '';
+    const healthMarkup = canFix
+      ? `<a class="status-pill broken fix-pill" href="${escapeAttr(connection.fixUrl)}" target="_blank" rel="noopener noreferrer">Broken - Click to Fix</a>`
+      : `<span class="status-pill ${escapeAttr(health)}">${escapeHtml(connection.healthLabel || health)}</span>`;
+    return `
+      <div class="list-item connection-row">
+        <div class="connection-row-main">
+          <span class="role-name">${escapeHtml(connection.displayName || connection.connectionId || 'Connection')}</span>
+          <span class="role-id">Connector: ${escapeHtml(connection.connectorDisplayName || connection.connectorName || connection.connectorId || 'Unknown connector')}</span>
+          <span class="role-id">Owner: ${escapeHtml(owner)}${escapeHtml(ownerEmail)}</span>
+          <span class="role-id">${escapeHtml(connection.connectionId || '')}</span>
+          ${connection.statusDetail ? `<span class="role-id">${escapeHtml(connection.statusDetail)}</span>` : ''}
+        </div>
+        <div class="connection-row-actions">
+          ${healthMarkup}
+          <button class="icon-button secondary danger-action trash-button" type="button" data-connection-action="delete" data-connection-id="${escapeAttr(connection.connectionId || '')}" title="Delete connection" aria-label="Delete connection"${connection.connectionId ? '' : ' disabled'}>
+            <span class="trash-icon" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function connectionSearchText(connection) {
+  return [
+    connection.displayName,
+    connection.connectionId,
+    connection.name,
+    connection.connectorDisplayName,
+    connection.connectorName,
+    connection.connectorId,
+    connection.owner?.displayName,
+    connection.owner?.email,
+    connection.owner?.id,
+    connection.health,
+    connection.healthLabel,
+    connection.statusDetail,
+    connection.source,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function openConnectionDeleteModal(connectionId) {
+  if (!connectionId) {
+    toast('Connection ID is missing.', 'error');
+    return;
+  }
+  const connection = state.connections.find((item) => item.connectionId === connectionId);
+  if (!connection) {
+    toast('Connection was not found. Refresh connections and try again.', 'error');
+    return;
+  }
+
+  state.pendingConnectionDeleteId = connectionId;
+  el.connectionDeleteTitle.textContent = 'Delete Connection';
+  el.connectionDeleteMeta.textContent = [
+    connection.displayName || connection.connectionId,
+    connection.connectorDisplayName || connection.connectorName || connection.connectorId,
+    connection.owner?.displayName || connection.owner?.email || '',
+  ].filter(Boolean).join(' | ');
+  el.connectionDeleteModal.hidden = false;
+  el.connectionDeleteConfirm.focus();
+}
+
+function closeConnectionDeleteModal() {
+  state.pendingConnectionDeleteId = '';
+  el.connectionDeleteModal.hidden = true;
+  el.connectionDeleteMeta.textContent = '';
+}
+
+async function confirmDeleteConnection() {
+  const connectionId = state.pendingConnectionDeleteId;
+  if (!connectionId) {
+    closeConnectionDeleteModal();
+    return;
+  }
+
+  await withBusy(el.connectionDeleteConfirm, async () => {
+    await api(`/api/connections/${encodeURIComponent(connectionId)}`, { method: 'DELETE' });
+    state.connections = state.connections.filter((item) => item.connectionId !== connectionId);
+    closeConnectionDeleteModal();
+    renderConnections();
+    toast('Connection deleted.');
+  }, 'Deleting');
 }
 
 async function openRoleAssignmentModal(principalType, principalId) {
@@ -1454,7 +1632,13 @@ async function openComponentManager(componentType, objectId) {
   el.componentModalTitle.textContent = 'Loading component';
   el.componentModalMeta.textContent = '';
   el.componentModalBody.innerHTML = empty('Loading component actions...');
-  const details = await api(`/api/components/${encodeURIComponent(componentType)}/${encodeURIComponent(objectId)}/manage`);
+  let details;
+  try {
+    details = await api(`/api/components/${encodeURIComponent(componentType)}/${encodeURIComponent(objectId)}/manage`);
+  } catch (error) {
+    closeComponentManager();
+    throw error;
+  }
   state.selectedComponent = { componentType, objectId, details };
   state.componentPrincipals = [];
   renderComponentManager(details);
@@ -1583,6 +1767,12 @@ function renderSharePanel(details) {
   if (!details.share?.supported) {
     return '<div class="guide"><p>Sharing is not available for this component.</p></div>';
   }
+  const roles = details.share.roles?.length
+    ? details.share.roles
+    : [
+        { value: 'user', label: 'User' },
+        { value: 'coowner', label: 'Co-owner' },
+      ];
   return `
     <div class="share-panel">
       <h3>Share</h3>
@@ -1590,8 +1780,7 @@ function renderSharePanel(details) {
         <label>
           Role
           <select id="componentShareRole">
-            <option value="user">User</option>
-            <option value="coowner">Co-owner</option>
+            ${roles.map((role) => `<option value="${escapeAttr(role.value)}">${escapeHtml(role.label)}</option>`).join('')}
           </select>
         </label>
         <label>
@@ -2368,9 +2557,16 @@ function requireSelectedSolution() {
 }
 
 async function api(path, options = {}) {
+  const headers = {};
+  if (state.selectedAccountHomeId) {
+    headers['X-PDAC-Account-Home-Id'] = state.selectedAccountHomeId;
+  }
+  if (options.body) {
+    headers['Content-Type'] = 'application/json';
+  }
   const response = await fetch(path, {
     method: options.method || 'GET',
-    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const text = await response.text();

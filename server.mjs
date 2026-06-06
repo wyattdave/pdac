@@ -20,6 +20,7 @@ import { NodeMsalAuthenticationProvider } from '@microsoft/power-apps-cli/dist/A
 import { initializeCliSettings, setCliLogger } from '@microsoft/power-apps-cli/dist/CliSettings.js';
 import { CliHttpClient } from '@microsoft/power-apps-cli/dist/HttpClient/CliHttpClient.js';
 import open from 'open';
+import { deleteConnectionAsync } from './node_modules/@microsoft/power-apps-actions/dist/services/connectivity/ConnectivityService.js';
 
 const PORT = Number(process.env.SECURITY_ROLES_PORT || process.env.PORT || 4280);
 const REGION = process.env.PP_REGION || 'prod';
@@ -104,8 +105,8 @@ const MANAGEABLE_LOGICAL_NAMES = new Set([
   'workflow',
   'canvasapp',
   'bot',
-  'botcomponent',
 ]);
+const MANAGEABLE_COMPONENT_TYPES = new Set([29, 300, 380, 381]);
 const SHAREABLE_COMPONENTS = {
   workflow: { collection: 'workflows', idName: 'workflowid', odataType: 'Microsoft.Dynamics.CRM.workflow' },
   canvasapp: { collection: 'canvasapps', idName: 'canvasappid', odataType: 'Microsoft.Dynamics.CRM.canvasapp' },
@@ -114,6 +115,7 @@ const SHAREABLE_COMPONENTS = {
 };
 const SHARE_ROLE_ACCESS = {
   user: 'ReadAccess',
+  analyticsviewer: 'ReadAccess',
   coowner: 'ReadAccess, WriteAccess, ShareAccess',
 };
 const selected = {
@@ -190,6 +192,7 @@ server.listen(PORT, () => {
 async function handleApi(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const route = `${req.method || 'GET'} ${url.pathname}`;
+  await applyRequestAccount(req);
 
   if (route === 'GET /api/status') {
     ensureSelectedAccount(await listAccounts());
@@ -463,6 +466,19 @@ async function handleApi(req, res) {
   if (route === 'GET /api/principals') {
     requireOrgUrl();
     sendJson(res, 200, await listEnvironmentPrincipals(url.searchParams.get('q') || ''));
+    return;
+  }
+
+  if (route === 'GET /api/connections') {
+    requireOrgUrl();
+    sendJson(res, 200, await listEnvironmentConnections());
+    return;
+  }
+
+  const connectionDeleteMatch = url.pathname.match(/^\/api\/connections\/([^/]+)$/);
+  if (req.method === 'DELETE' && connectionDeleteMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await deleteEnvironmentConnection(decodeURIComponent(connectionDeleteMatch[1])));
     return;
   }
 
@@ -999,6 +1015,24 @@ function selectAccount(homeAccountId) {
   applySavedEnvironmentForAccount(homeAccountId);
 }
 
+async function applyRequestAccount(req) {
+  const homeAccountId = String(req.headers['x-pdac-account-home-id'] || '').trim();
+  if (!homeAccountId || selected.accountHomeId === homeAccountId) {
+    return;
+  }
+
+  const accounts = await getMsalAccounts();
+  if (!accounts.some((account) => account.homeAccountId === homeAccountId)) {
+    throw new HttpError(401, 'Selected account is no longer signed in. Sign in again.');
+  }
+
+  selected.accountHomeId = homeAccountId;
+  const savedEnvironment = accountEnvironmentSelections.get(homeAccountId);
+  if (savedEnvironment) {
+    setSelectedEnvironment(savedEnvironment);
+  }
+}
+
 function selectedEnvironmentPayload() {
   return {
     environmentName: selected.environmentName,
@@ -1156,11 +1190,11 @@ function componentDisplayAttempts(componentType, objectId) {
     380: [{ path: `environmentvariabledefinitions(${id})?$select=schemaname,displayname`, map: namedRowMap('displayname', 'schemaname') }],
     381: [{ path: `environmentvariablevalues(${id})?$select=schemaname,value,_environmentvariabledefinitionid_value`, map: namedRowMap('schemaname', 'value') }],
   }[componentType] || [
-    { path: `entities?$filter=objecttypecode eq ${componentType}`, map: (data) => entityBackedComponentMap(data, id) },
+    { path: `entities?$filter=objecttypecode eq ${componentType}`, map: (data) => entityBackedComponentMap(data, id, componentType) },
   ];
 }
 
-async function entityBackedComponentMap(data, id) {
+async function entityBackedComponentMap(data, id, componentType = 0) {
   const row = Array.isArray(data?.value) ? data.value[0] : data;
   if (!row) {
     return {};
@@ -1184,10 +1218,10 @@ async function entityBackedComponentMap(data, id) {
   }
 
   try {
-    const component = await dvGet(`${collection}(${id})`);
+    const component = await getEntityBackedComponentRow(collection, id, entityLogicalName);
     return {
       typeLabel,
-      displayName: pickDisplayName(component) || typeLabel,
+      displayName: pickEntityBackedDisplayName(component, entityLogicalName, typeLabel) || typeLabel,
       logicalName: entityLogicalName,
       recordLogicalName: pickLogicalName(component),
     };
@@ -1200,11 +1234,56 @@ async function entityBackedComponentMap(data, id) {
   }
 }
 
+async function getEntityBackedComponentRow(collection, id, logicalName) {
+  if (logicalName === 'bot') {
+    return dvGet(`${collection}(${id})?$select=botid,name,schemaname`);
+  }
+  if (logicalName === 'botcomponent') {
+    return dvGet(`${collection}(${id})?$select=botcomponentid,name,schemaname,componenttype,category`);
+  }
+  return dvGet(`${collection}(${id})`);
+}
+
+function pickEntityBackedDisplayName(row, logicalName, typeLabel) {
+  if (logicalName === 'bot' || logicalName === 'botcomponent') {
+    return pickBotDisplayName(row, typeLabel);
+  }
+  return pickDisplayName(row);
+}
+
+function pickBotDisplayName(row, typeLabel = '') {
+  const primaryName = String(row?.name || '').trim();
+  if (primaryName && !isGenericBotDisplayName(primaryName, typeLabel)) {
+    return primaryName;
+  }
+
+  const schemaName = String(row?.schemaname || '').trim();
+  if (schemaName && !isGenericBotDisplayName(schemaName, typeLabel)) {
+    return schemaName;
+  }
+
+  return primaryName || schemaName || '';
+}
+
+function isGenericBotDisplayName(value, typeLabel = '') {
+  const text = String(value || '').trim().toLowerCase();
+  const label = String(typeLabel || '').trim().toLowerCase();
+  return !text ||
+    text === label ||
+    text === 'chatbot' ||
+    text === 'copilot' ||
+    text === 'bot' ||
+    text === 'chatbot subcomponent' ||
+    text === 'copilot component' ||
+    text === 'botcomponent';
+}
+
 function pickDisplayName(row) {
   const keys = [
     'connectionreferencedisplayname',
     'displayname',
     'name',
+    'schemaname',
     'friendlyname',
     'localizedname',
     'title',
@@ -1224,6 +1303,7 @@ function pickLogicalName(row) {
     'connectionreferencelogicalname',
     'logicalname',
     'uniquename',
+    'schemaname',
     'name',
   ];
   for (const key of keys) {
@@ -1236,7 +1316,7 @@ function pickLogicalName(row) {
 }
 
 function isManageableComponent(componentType, logicalName) {
-  if ([29, 300, 380, 381].includes(Number(componentType))) {
+  if (MANAGEABLE_COMPONENT_TYPES.has(Number(componentType))) {
     return true;
   }
   return MANAGEABLE_LOGICAL_NAMES.has(String(logicalName || '').toLowerCase());
@@ -1607,38 +1687,54 @@ async function getCanvasAppDetails(canvasAppId) {
 async function getBotDetails(objectId, logicalName, resolved) {
   const config = SHAREABLE_COMPONENTS[logicalName];
   const row = resolved.row || await dvGet(`${config.collection}(${objectId})`);
+  const isBot = logicalName === 'bot';
   return {
-    kind: logicalName === 'botcomponent' ? 'botComponent' : 'bot',
+    kind: isBot ? 'bot' : 'botComponent',
     objectId,
     displayName: pickDisplayName(row) || resolved.displayName || objectId,
     logicalName,
     share: shareCapability(logicalName),
-    notes: ['Copilot Studio agents and bot components are Dataverse user-owned records that support GrantAccess. Channel-specific publishing and authentication settings may still be required in Copilot Studio.'],
+    notes: [
+      isBot
+        ? 'Copilot Studio agents are Dataverse user-owned records that support GrantAccess for users and teams.'
+        : 'Copilot components are Dataverse user-owned records that support GrantAccess for users and teams.',
+      ...(isBot ? ['Analytics viewer grants Dataverse read access to the bot row. Copilot Studio analytics may still require additional product permissions outside Dataverse record sharing.'] : []),
+      'Channel-specific publishing and authentication settings may still be required in Copilot Studio.',
+    ],
   };
 }
 
 function shareCapability(logicalName) {
+  const normalized = String(logicalName || '').toLowerCase();
+  const roles = [
+    { value: 'user', label: 'User' },
+    { value: 'coowner', label: 'Co-owner' },
+  ];
+  if (normalized === 'bot') {
+    roles.push({ value: 'analyticsviewer', label: 'Analytics viewer' });
+  }
   return {
-    supported: Boolean(SHAREABLE_COMPONENTS[logicalName]),
-    roles: [
-      { value: 'user', label: 'User' },
-      { value: 'coowner', label: 'Co-owner' },
-    ],
+    supported: Boolean(SHAREABLE_COMPONENTS[normalized]),
+    roles,
   };
 }
 
 async function shareComponent(componentType, objectId, body) {
   const resolved = await resolveComponentRecord(componentType, objectId);
-  const logicalName = resolved.logicalName;
+  const logicalName = String(resolved.logicalName || '').toLowerCase();
   const config = SHAREABLE_COMPONENTS[logicalName];
   if (!config) {
     throw new HttpError(400, 'This component does not support Dataverse record sharing from PDAC.');
   }
 
   const role = String(body.role || 'user').toLowerCase();
+  const roleAllowed = shareCapability(logicalName).roles.some((item) => item.value === role);
+  if (!roleAllowed) {
+    throw new HttpError(400, `Share role '${role}' is not available for this component.`);
+  }
   const accessMask = SHARE_ROLE_ACCESS[role];
   if (!accessMask) {
-    throw new HttpError(400, 'Share role must be user or coowner.');
+    throw new HttpError(400, 'Share role must be user, coowner, or analyticsviewer.');
   }
 
   const principals = Array.isArray(body.principals) ? body.principals : [];
@@ -2280,9 +2376,15 @@ function normalizeEnvironmentVariableType(type) {
 }
 
 async function listTargetConnections(environmentName) {
-  const url = `https://api.powerplatform.com/connectivity/environments/${encodeURIComponent(environmentName)}/connections?api-version=2024-10-01`;
   const sources = [];
 
+  try {
+    sources.push(...await listAdminConnections(environmentName));
+  } catch (error) {
+    console.warn(`Power Apps admin connection list failed: ${errorMessage(error)}`);
+  }
+
+  const url = `https://api.powerplatform.com/connectivity/environments/${encodeURIComponent(environmentName)}/connections?api-version=2024-10-01`;
   try {
     const rows = await powerPlatformGetAll(url);
     sources.push(...rows.map(normalizeConnectivityConnection));
@@ -2291,14 +2393,145 @@ async function listTargetConnections(environmentName) {
   }
 
   try {
-    const actionConnections = await listConnectionsAsync(actionContext({}));
-    const values = Array.isArray(actionConnections) ? actionConnections : actionConnections?.value || [];
-    sources.push(...values.map(normalizeActionConnection));
+    sources.push(...await listUserConnections());
   } catch (error) {
     console.warn(`Power Apps action connection list failed: ${errorMessage(error)}`);
   }
 
   return uniqueConnections(sources).filter((connection) => connection.connectionId);
+}
+
+async function listAdminConnections(environmentName) {
+  const url = `https://api.powerapps.com/providers/Microsoft.PowerApps/scopes/admin/environments/${encodeURIComponent(environmentName)}/connections?api-version=2016-11-01&$top=250`;
+  const rows = await powerAppsGetAll(url);
+  return rows.map(normalizeAdminConnection);
+}
+
+async function listUserConnections() {
+  const actionConnections = await listConnectionsAsync(actionContext({}));
+  const values = Array.isArray(actionConnections) ? actionConnections : actionConnections?.value || [];
+  return values.map(normalizeActionConnection);
+}
+
+async function listEnvironmentConnections() {
+  if (!selected.environmentName) {
+    throw new HttpError(400, 'Selected environment has no environment ID. Choose it from the loaded environment list, then try again.');
+  }
+  const currentUser = await getCurrentConnectionUser();
+  const adminConnections = await listAdminConnections(selected.environmentName);
+  const sources = [...adminConnections];
+  try {
+    const actionConnections = await listUserConnections();
+    sources.push(...actionConnections);
+  } catch (error) {
+    console.warn(`Power Apps action connection enrichment failed: ${errorMessage(error)}`);
+  }
+
+  const connections = uniqueConnections(sources)
+    .map((connection) => enrichConnectionForAdmin(connection, currentUser))
+    .sort((a, b) =>
+      String(a.displayName || a.connectionId).localeCompare(String(b.displayName || b.connectionId), undefined, { sensitivity: 'base' })
+    );
+
+  return {
+    environmentName: selected.environmentName,
+    orgUrl: selected.orgUrl,
+    currentUser,
+    source: 'admin',
+    connections,
+  };
+}
+
+async function deleteEnvironmentConnection(connectionId) {
+  if (!selected.environmentName) {
+    throw new HttpError(400, 'Selected environment has no environment ID. Choose it from the loaded environment list, then try again.');
+  }
+  const id = requireString(connectionId, 'connectionId');
+  const connection = findConnectionById(await listTargetConnections(selected.environmentName), id);
+  if (!connection) {
+    throw new HttpError(404, 'Connection was not found in the selected environment. Refresh connections and try again.');
+  }
+
+  const connectorId = normalizeActionConnectorId(connection.connectorId || connectorIdFromConnection(connection));
+  if (!connectorName(connectorId)) {
+    throw new HttpError(400, 'Connection connector could not be determined. Refresh connections and try again.');
+  }
+  try {
+    await deleteAdminConnection(selected.environmentName, connectorId, connection.connectionId);
+  } catch (error) {
+    console.warn(`Power Apps admin connection delete failed: ${errorMessage(error)}`);
+    await deleteConnectionAsync(connectorId, connection.connectionId, logger);
+  }
+  return {
+    deleted: true,
+    connectionId: connection.connectionId,
+    connectorId,
+  };
+}
+
+async function deleteAdminConnection(environmentName, connectorId, connectionId) {
+  const url = `https://api.powerapps.com/providers/Microsoft.PowerApps/scopes/admin/environments/${encodeURIComponent(environmentName)}/apis/${encodeURIComponent(connectorName(connectorId))}/connections/${encodeURIComponent(connectionId)}?api-version=2016-11-01`;
+  await apiHttpRequest('DELETE', url, { authResource: SERVICE_RESOURCE });
+}
+
+async function getCurrentConnectionUser() {
+  const account = (await listAccounts()).find((item) => item.homeAccountId === selected.accountHomeId) || {};
+  const current = {
+    accountHomeId: selected.accountHomeId || '',
+    displayName: account.name || account.username || '',
+    email: account.username || '',
+    systemUserId: '',
+    azureActiveDirectoryObjectId: '',
+    domainName: '',
+  };
+
+  try {
+    const who = await dvGet('WhoAmI()');
+    const systemUserId = normalizeGuid(who.UserId);
+    if (systemUserId) {
+      const user = await dvGet(`systemusers(${systemUserId})?$select=systemuserid,fullname,internalemailaddress,domainname,azureactivedirectoryobjectid`);
+      current.systemUserId = user.systemuserid || systemUserId;
+      current.azureActiveDirectoryObjectId = user.azureactivedirectoryobjectid || '';
+      current.displayName = current.displayName || user.fullname || '';
+      current.email = current.email || user.internalemailaddress || user.domainname || '';
+      current.domainName = user.domainname || '';
+    }
+  } catch (error) {
+    console.warn(`Current Dataverse user lookup failed: ${errorMessage(error)}`);
+  }
+
+  return current;
+}
+
+function enrichConnectionForAdmin(connection, currentUser) {
+  const isActionOwned = String(connection.source || '').split(',').map((item) => item.trim()).includes('actions');
+  const inferredOwner = hasOwnerDetails(connection.owner)
+    ? connection.owner
+    : isActionOwned
+      ? {
+          id: currentUser.systemUserId || currentUser.azureActiveDirectoryObjectId || '',
+          displayName: currentUser.displayName || currentUser.email || '',
+          email: currentUser.email || currentUser.domainName || '',
+        }
+      : connection.owner;
+  const isCurrentUserConnection = ownerMatchesCurrentUser(inferredOwner, currentUser) || isActionOwned;
+  const health = connection.health || 'unknown';
+
+  return {
+    ...connection,
+    owner: inferredOwner,
+    connectorName: connectorName(connection.connectorId),
+    health,
+    healthLabel: {
+      valid: 'Valid',
+      broken: 'Broken',
+      unknown: 'Unknown',
+    }[health] || 'Unknown',
+    isCurrentUserConnection,
+    fixUrl: health === 'broken' && isCurrentUserConnection
+      ? makeConnectionManageUrl(selected.environmentName, connection.connectionId)
+      : '',
+  };
 }
 
 async function powerPlatformGetAll(initialUrl) {
@@ -2310,6 +2543,28 @@ async function powerPlatformGetAll(initialUrl) {
     next = response.data['@odata.nextLink'] || response.data.nextLink || '';
   }
   return rows;
+}
+
+async function powerAppsGetAll(initialUrl) {
+  const rows = [];
+  let next = initialUrl;
+  while (next) {
+    const response = await apiHttpRequest('GET', next, { authResource: SERVICE_RESOURCE });
+    rows.push(...(response.data.value || []));
+    next = response.data.nextLink || response.data['@odata.nextLink'] || '';
+  }
+  return rows;
+}
+
+function normalizeAdminConnection(connection) {
+  const connectorId = connection.properties?.apiId ||
+    connection.properties?.apiid ||
+    connection.properties?.api?.id ||
+    connection.properties?.api?.name ||
+    connection.api?.id ||
+    connection.api?.name ||
+    connectorIdFromConnection(connection);
+  return normalizeConnectionPayload(connection, connectorId, 'admin');
 }
 
 function normalizeConnectivityConnection(connection) {
@@ -2343,10 +2598,13 @@ function normalizeActionConnection(connection) {
 function normalizeConnectionPayload(connection, connectorId, source) {
   const pathConnectionId = String(connection.id || '').match(/\/connections\/([^/?#]+)/i)?.[1] || '';
   const connectionId = connection.connectionId || pathConnectionId || connection.name || connection.connectionName || lastPathPart(connection.id);
+  const statusDetail = connectionStatusDetail(connection);
+  const health = connectionHealth(connection, statusDetail);
   return {
     id: connection.id || '',
     name: connection.name || connection.connectionName || '',
     displayName: connection.properties?.displayName || connection.displayName || connection.name || connectionId || '',
+    connectorDisplayName: connection.properties?.api?.displayName || connection.properties?.apiDisplayName || connection.api?.displayName || connection.connectorDisplayName || '',
     connectorId,
     connectorKeys: [...connectorMatchKeys([
       connectorId,
@@ -2368,7 +2626,15 @@ function normalizeConnectionPayload(connection, connectorId, source) {
       connectorIdFromConnection(connection),
     ])],
     connectionId,
+    owner: normalizeConnectionOwner(connection),
+    isAuthenticated: typeof connection.isAuthenticated === 'boolean'
+      ? connection.isAuthenticated
+      : typeof connection.properties?.isAuthenticated === 'boolean'
+        ? connection.properties.isAuthenticated
+        : undefined,
     status: connection.properties?.statuses?.[0]?.status || connection.properties?.connectionRuntimeUrl || connection.status || '',
+    statusDetail,
+    health,
     source,
   };
 }
@@ -2385,14 +2651,163 @@ function uniqueConnections(connections) {
       byId.set(key, connection);
       continue;
     }
+    const source = [...new Set(String(`${existing.source || ''},${connection.source || ''}`).split(',').map((item) => item.trim()).filter(Boolean))].join(',');
+    const health = mergeConnectionHealth(existing.health, connection.health);
     byId.set(key, {
       ...existing,
       ...connection,
+      owner: hasOwnerDetails(connection.owner) ? connection.owner : existing.owner,
+      connectorDisplayName: connection.connectorDisplayName || existing.connectorDisplayName || '',
+      statusDetail: connection.statusDetail || existing.statusDetail || '',
+      isAuthenticated: connection.isAuthenticated ?? existing.isAuthenticated,
+      health,
       connectorKeys: [...new Set([...(existing.connectorKeys || []), ...(connection.connectorKeys || [])])],
-      source: `${existing.source},${connection.source}`,
+      source,
     });
   }
   return [...byId.values()];
+}
+
+function mergeConnectionHealth(left, right) {
+  if (left === 'broken' || right === 'broken') {
+    return 'broken';
+  }
+  if (left === 'valid' || right === 'valid') {
+    return 'valid';
+  }
+  return 'unknown';
+}
+
+function normalizeConnectionOwner(connection) {
+  const properties = connection.properties || {};
+  const candidates = [
+    properties.owner,
+    properties.createdBy,
+    properties.createdby,
+    properties.createdByUser,
+    properties.createdByUserDetails,
+    properties.creator,
+    properties.user,
+    connection.owner,
+    connection.createdBy,
+    connection.createdby,
+    connection.user,
+  ];
+
+  for (const candidate of candidates) {
+    const owner = ownerFromValue(candidate);
+    if (hasOwnerDetails(owner)) {
+      return owner;
+    }
+  }
+
+  const owner = {
+    id: properties.ownerId || properties.createdById || properties.createdByObjectId || connection.ownerId || '',
+    displayName: properties.ownerDisplayName || properties.createdByDisplayName || connection.ownerDisplayName || '',
+    email: properties.ownerEmail || properties.createdByEmail || properties.createdByUserPrincipalName || connection.ownerEmail || '',
+  };
+  return hasOwnerDetails(owner) ? owner : {};
+}
+
+function ownerFromValue(value) {
+  if (!value) {
+    return {};
+  }
+  if (typeof value === 'string') {
+    return value.includes('@')
+      ? { email: value, displayName: value }
+      : { id: value, displayName: value };
+  }
+  if (typeof value !== 'object') {
+    return {};
+  }
+
+  return {
+    id: value.id || value.objectId || value.userId || value.principalId || value.aadObjectId || value.azureActiveDirectoryObjectId || '',
+    displayName: value.displayName || value.name || value.fullName || value.fullname || value.userName || value.username || '',
+    email: value.email || value.mail || value.userPrincipalName || value.upn || value.internalemailaddress || value.domainname || '',
+  };
+}
+
+function hasOwnerDetails(owner) {
+  return Boolean(owner && (owner.id || owner.displayName || owner.email));
+}
+
+function ownerMatchesCurrentUser(owner, currentUser) {
+  if (!hasOwnerDetails(owner) || !currentUser) {
+    return false;
+  }
+
+  const ownerIds = [
+    owner.id,
+    owner.azureActiveDirectoryObjectId,
+  ].map(normalizeGuid).filter(Boolean);
+  const currentIds = [
+    currentUser.systemUserId,
+    currentUser.azureActiveDirectoryObjectId,
+  ].map(normalizeGuid).filter(Boolean);
+  if (ownerIds.some((id) => currentIds.includes(id))) {
+    return true;
+  }
+
+  const ownerEmails = [owner.email, owner.displayName].map(normalizeEmailLike).filter(Boolean);
+  const currentEmails = [currentUser.email, currentUser.domainName, currentUser.displayName].map(normalizeEmailLike).filter(Boolean);
+  return ownerEmails.some((email) => currentEmails.includes(email));
+}
+
+function normalizeEmailLike(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return text.includes('@') ? text : '';
+}
+
+function connectionStatusDetail(connection) {
+  const statuses = [
+    ...toArray(connection.properties?.statuses),
+    ...toArray(connection.statuses),
+  ];
+  const statusTexts = statuses
+    .map((status) => [
+      status.status,
+      status.state,
+      status.code,
+      status.error?.message,
+      status.error?.code,
+      status.message,
+      status.target,
+    ].filter(Boolean).join(' '))
+    .filter(Boolean);
+
+  return [
+    ...statusTexts,
+    connection.properties?.status,
+    connection.properties?.connectionState,
+    connection.properties?.overallStatus,
+    connection.status,
+    connection.connectionStatus,
+  ].filter(Boolean).join(' | ');
+}
+
+function connectionHealth(connection, statusDetail) {
+  const isAuthenticated = typeof connection.isAuthenticated === 'boolean'
+    ? connection.isAuthenticated
+    : typeof connection.properties?.isAuthenticated === 'boolean'
+      ? connection.properties.isAuthenticated
+      : undefined;
+  const text = String(statusDetail || '').toLowerCase();
+  if (isAuthenticated === false || /\b(error|failed|failure|invalid|broken|unauthorized|forbidden|expired|disabled|disconnected|notauthenticated|not authenticated|needsattention|needs attention)\b/.test(text)) {
+    return 'broken';
+  }
+  if (isAuthenticated === true || /\b(connected|ready|enabled|succeeded|success|valid|authenticated)\b/.test(text)) {
+    return 'valid';
+  }
+  return 'unknown';
+}
+
+function toArray(value) {
+  if (!value) {
+    return [];
+  }
+  return Array.isArray(value) ? value : [value];
 }
 
 function findConnectionById(connections, connectionId) {
@@ -2574,6 +2989,17 @@ function makeConnectionCreateUrl(environmentName, connectorId) {
     return '';
   }
   return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/connections/available/${encodeURIComponent(connector)}`;
+}
+
+function makeConnectionManageUrl(environmentName, connectionId) {
+  const environmentId = environmentUrlName(environmentName);
+  if (!environmentId) {
+    return 'https://make.powerapps.com/connections';
+  }
+  if (!connectionId) {
+    return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/connections`;
+  }
+  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/connections/${encodeURIComponent(connectionId)}`;
 }
 
 function environmentUrlName(environmentName) {

@@ -2,7 +2,7 @@
 
 Settings by function not by environment.
 
-PDAC is a small local admin app for working across Power Platform and Dataverse environments. It helps with authentication, users and teams, security roles, solution inspection, solution export/import, and solution component settings.
+PDAC is a small local admin app for working across Power Platform and Dataverse environments. It helps with authentication, users and teams, connections, security roles, solution inspection, solution export/import, and solution component settings.
 
 ## Run
 
@@ -34,6 +34,7 @@ npm start
 - **Home**: quick guide for each admin function.
 - **Environment and Auth**: sign in, switch accounts, load environments, choose the active environment, and copy the selected environment details.
 - **Users and Teams**: list environment users and teams, force-sync an Entra user into Dataverse, create Dataverse teams, add loaded users to a selected team, and assign security roles to users or teams.
+- **Connections**: list environment connections with connector, owner, and health, filter by text or broken state, show only the selected account's connections, open broken owned connections for repair, and delete connections.
 - **Roles**: create roles, download editable permission workbooks or CSVs, upload edited permissions, and rename editable root roles.
 - **Solutions**: list and filter solutions, filter publishers, open the solution in Power Automate, list components, export as managed or unmanaged, and stage a deployment.
 - **Solution component actions**: manage supported components from the solution component list.
@@ -52,6 +53,16 @@ npm start
 Adding a user uses the supported Power Platform admin force-sync pattern. The user must already exist in Microsoft Entra ID and must meet the environment requirements such as license, sign-in status, and environment security group membership.
 
 Role assignment uses the Dataverse user-role and team-role associations. When you choose a root role, PDAC assigns the matching inherited role copy for the selected user's or team's business unit.
+
+## Connections
+
+1. Sign in and select an environment.
+2. Open **Connections**.
+3. Click **Load connections**.
+4. Use the search box to filter by connection name, connector, owner, ID, or status.
+5. Use **My connections only** or **Broken only** to narrow the list.
+6. For a broken connection owned by the selected account, use **Broken - Click to Fix** to open the connection in Power Apps and re-authenticate it.
+7. Use **Delete** to remove a connection after confirming. Apps and flows using that connection may stop working.
 
 ## Roles
 
@@ -94,7 +105,7 @@ Supported actions from the solution component list:
 - **Flow sharing**: share the workflow row as user or co-owner through Dataverse record sharing.
 - **Canvas app sharing**: share as user or co-owner.
 - **Code app sharing**: share as user or co-owner.
-- **Agent/bot sharing**: share supported bot or bot component records as user or co-owner.
+- **Agent/bot sharing**: share bot records with users or teams as user, co-owner, or analytics viewer. Analytics viewer grants Dataverse read access to the bot row; Copilot Studio analytics may still need product permissions outside record sharing.
 
 Flow run-only users and manual-trigger connection mode are not updated by PDAC because those settings are exposed through the Power Automate Management connector rather than the supported Dataverse workflow row API.
 

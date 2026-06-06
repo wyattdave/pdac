@@ -43,6 +43,7 @@
       <button class="tab" type="button" data-tab="solutions">Solutions</button>
       <button class="tab" type="button" data-tab="import">Imports</button>
       <button class="tab" type="button" data-tab="users">Users and Teams</button>
+      <button class="tab" type="button" data-tab="connections">Connections</button>
       <button class="tab" type="button" data-tab="auth">Environment and Auth</button>
     </nav>
 
@@ -62,6 +63,10 @@
             <div class="mini-card">
               <h3>Users and Teams</h3>
               <p>View environment users and teams, force-sync an Entra user, create Dataverse teams, and add users to teams.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Connections</h3>
+              <p>Review environment connections, owners, connector details, and broken connection health.</p>
             </div>
             <div class="mini-card">
               <h3>Roles</h3>
@@ -202,6 +207,34 @@
             </div>
           </div>
 
+        </section>
+      </section>
+
+      <section id="connectionsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Connections</h2>
+            <div class="actions">
+              <button id="loadConnectionsButton" type="button">Load connections</button>
+            </div>
+          </div>
+
+          <div class="connection-filters">
+            <label class="search">
+              Search connections
+              <input id="connectionSearch" placeholder="Name, connector, owner, or status" />
+            </label>
+            <label class="checkbox-label">
+              <input id="myConnectionsOnly" type="checkbox" />
+              My connections only
+            </label>
+            <label class="checkbox-label">
+              <input id="brokenConnectionsOnly" type="checkbox" />
+              Broken only
+            </label>
+          </div>
+          <p id="connectionSummary" class="muted connection-summary"></p>
+          <div id="connectionsList" class="list connection-list"></div>
         </section>
       </section>
 
@@ -455,6 +488,25 @@
           <input id="roleAssignmentSearch" placeholder="Type to filter roles" />
         </label>
         <div id="roleAssignmentRoles" class="list role-assignment-list"></div>
+      </section>
+    </div>
+
+    <div id="connectionDeleteModal" class="modal-backdrop" hidden>
+      <section class="modal delete-modal" role="dialog" aria-modal="true" aria-labelledby="connectionDeleteTitle">
+        <div class="section-title compact-title">
+          <div>
+            <h2 id="connectionDeleteTitle">Delete Connection</h2>
+            <p id="connectionDeleteMeta" class="muted"></p>
+          </div>
+          <button id="connectionDeleteClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+        </div>
+        <div class="guide delete-warning">
+          <p>Deleting this connection removes it from Power Apps and Power Automate. Apps and flows using it may stop working.</p>
+        </div>
+        <div class="actions modal-actions">
+          <button id="connectionDeleteConfirm" class="danger-button" type="button">Delete connection</button>
+          <button id="connectionDeleteCancel" class="secondary" type="button">Cancel</button>
+        </div>
       </section>
     </div>
 
