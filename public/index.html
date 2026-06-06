@@ -42,6 +42,7 @@
       <button class="tab" type="button" data-tab="auth">Environment and Auth</button>
       <button class="tab" type="button" data-tab="roles">Roles</button>
       <button class="tab" type="button" data-tab="solutions">Solution</button>
+      <button class="tab" type="button" data-tab="import">Import</button>
     </nav>
 
     <main>
@@ -59,7 +60,7 @@
             </div>
             <div class="mini-card">
               <h3>2. Roles</h3>
-              <p>Download role permissions, edit scopes in Excel, and upload the CSV.</p>
+              <p>Download role permissions, edit scopes in Excel, and upload the edited file.</p>
             </div>
             <div class="mini-card">
               <h3>3. Solutions</h3>
@@ -119,10 +120,35 @@
           </label>
           <p class="muted roles-note">Dataverse creates inherited security-role copies per business unit. This list shows only editable root roles and notes how many inherited copies exist.</p>
 
-          <form id="createRoleForm" class="row compact">
+          <form id="createRoleForm" class="create-role-form compact">
             <label>
               New role name
-              <input name="name" placeholder="CSV Managed Role" />
+              <input name="name" placeholder="Managed Role" />
+            </label>
+            <label>
+              Business unit
+              <select id="createRoleBusinessUnit" name="businessUnitId">
+                <option value="">Current user's business unit</option>
+              </select>
+            </label>
+            <label>
+              Description
+              <textarea name="description" placeholder="Purpose of this role"></textarea>
+            </label>
+            <label>
+              Summary of Core Table Privileges
+              <textarea name="summaryOfCoreTablePrivileges" placeholder="Key tables and permission intent"></textarea>
+            </label>
+            <label>
+              Member's privilege inheritance
+              <select name="memberPrivilegeInheritance">
+                <option value="direct">Direct User (Basic) access level and Team privileges</option>
+                <option value="team">Team privileges only</option>
+              </select>
+            </label>
+            <label class="checkbox-label create-role-checkbox">
+              <input name="includeAppOpeningPrivileges" type="checkbox" checked />
+              Include app opening privileges
             </label>
             <button type="submit">Create role</button>
           </form>
@@ -136,13 +162,23 @@
                 Role name
                 <input id="roleNameInput" disabled />
               </label>
+              <div class="file-format-toggle" role="group" aria-label="Role file format">
+                <label class="checkbox-label">
+                  <input name="roleFileFormat" type="radio" value="csv" />
+                  CSV
+                </label>
+                <label class="checkbox-label">
+                  <input name="roleFileFormat" type="radio" value="xlsx" checked />
+                  XLSX
+                </label>
+              </div>
               <div class="actions">
                 <button id="renameButton" type="button" disabled>Save name</button>
                 <button id="downloadButton" type="button" disabled>Download table CSV</button>
                 <button id="downloadMiscButton" type="button" disabled>Download misc CSV</button>
               </div>
               <div class="upload">
-                <span>Upload edited CSV</span>
+                <span id="uploadLabel">Upload edited CSV</span>
                 <label class="file-picker">
                   <input id="csvFile" type="file" accept=".csv,text/csv" disabled />
                   <span id="filePickerText">Choose CSV file</span>
@@ -157,7 +193,7 @@
                 <p><strong>parent</strong>: records in the user's business unit and child business units.</p>
                 <p><strong>org</strong>: records across the organization.</p>
                 <p><strong>recordfilter</strong>: special filtered access where Dataverse exposes it for a privilege.</p>
-                <p class="muted">Table CSV columns are Create, Read, Write, Delete, Append, Append To, Assign, and Share. Misc privileges use a separate CSV.</p>
+                <p class="muted">Table files use Create, Read, Write, Delete, Append, Append To, Assign, and Share. XLSX files hide metadata columns and add dropdown validation for editable scopes.</p>
               </div>
             </div>
           </div>
@@ -177,8 +213,8 @@
               <input id="solutionSearch" placeholder="Search friendly or unique name" />
             </label>
             <label class="checkbox-label">
-              <input id="managedOnly" type="checkbox" />
-              Managed only
+              <input id="unmanagedOnly" type="checkbox" checked />
+              Unmanaged only
             </label>
             <label>
               Publishers
@@ -198,18 +234,86 @@
                 <div>
                   <h3 id="selectedSolutionName">No solution selected</h3>
                   <p id="selectedSolutionMeta" class="muted"></p>
+                  <p><a id="selectedSolutionLink" class="solution-link" href="#" target="_blank" rel="noreferrer" hidden>Open in Power Automate</a></p>
                 </div>
-                <div class="actions">
+                <div class="actions solution-actions">
                   <button id="loadComponentsButton" type="button" disabled>List components</button>
                   <button id="exportSolutionButton" type="button" disabled>Export solution</button>
+                  <button id="deploySolutionButton" type="button" disabled>Deploy</button>
                 </div>
               </div>
+              <label>
+                Version override
+                <input id="solutionVersionInput" placeholder="1.0.0.0" disabled />
+              </label>
               <label class="checkbox-label export-managed-row">
                 <input id="exportManaged" type="checkbox" />
                 Export as managed
               </label>
               <div id="solutionComponents" class="component-list"></div>
             </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="importTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Import Solution</h2>
+          </div>
+
+          <div class="import-grid">
+            <div class="editor">
+              <label>
+                Solution ZIP
+                <label class="file-picker">
+                  <input id="solutionZipFile" type="file" accept=".zip,application/zip" />
+                  <span id="solutionZipText">Choose solution ZIP</span>
+                </label>
+              </label>
+              <div id="importPackageSummary" class="guide"></div>
+            </div>
+
+            <div class="editor">
+              <label>
+                Target environment
+                <select id="importEnvironmentSelect">
+                  <option value="">Load environments first</option>
+                </select>
+              </label>
+              <div class="actions">
+                <button id="prepareImportButton" type="button" disabled>Prepare mappings</button>
+                <button id="refreshImportTargetButton" type="button" class="secondary" disabled>Refresh target</button>
+              </div>
+              <p class="muted">Prepare mappings reads the target environment, matches connections, and loads existing environment variable values before import.</p>
+              <p id="importStatus" class="muted"></p>
+            </div>
+          </div>
+
+          <div class="import-grid">
+            <div class="editor">
+              <h3>Connection references</h3>
+              <div id="importConnections" class="import-list"></div>
+            </div>
+            <div class="editor">
+              <h3>Environment variables</h3>
+              <div id="importEnvironmentVariables" class="import-list"></div>
+            </div>
+          </div>
+
+          <div class="actions import-actions">
+            <button id="downloadImportSettingsButton" type="button" class="secondary" disabled>Download settings</button>
+            <button id="importSettingsButton" type="button" class="secondary" disabled>Import settings</button>
+            <input id="importSettingsFile" type="file" accept=".json,application/json" hidden />
+            <label class="checkbox-label">
+              <input id="importOverwrite" type="checkbox" checked />
+              Overwrite unmanaged customizations
+            </label>
+            <label class="checkbox-label">
+              <input id="importPublishWorkflows" type="checkbox" checked />
+              Publish workflows
+            </label>
+            <button id="importSolutionButton" type="button" disabled>Import solution</button>
           </div>
         </section>
       </section>

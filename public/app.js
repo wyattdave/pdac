@@ -13,12 +13,15 @@ const el = {
   loadEnvironmentsButton: document.querySelector('#loadEnvironmentsButton'),
   loadRolesButton: document.querySelector('#loadRolesButton'),
   createRoleForm: document.querySelector('#createRoleForm'),
+  createRoleBusinessUnit: document.querySelector('#createRoleBusinessUnit'),
   renameButton: document.querySelector('#renameButton'),
   downloadButton: document.querySelector('#downloadButton'),
   downloadMiscButton: document.querySelector('#downloadMiscButton'),
   uploadButton: document.querySelector('#uploadButton'),
   csvFile: document.querySelector('#csvFile'),
   filePickerText: document.querySelector('#filePickerText'),
+  uploadLabel: document.querySelector('#uploadLabel'),
+  roleFileFormats: document.querySelectorAll('input[name="roleFileFormat"]'),
   selectedEnvironmentId: document.querySelector('#selectedEnvironmentId'),
   selectedEnvironmentUrl: document.querySelector('#selectedEnvironmentUrl'),
   copyEnvironmentButton: document.querySelector('#copyEnvironmentButton'),
@@ -32,21 +35,41 @@ const el = {
   roleNameInput: document.querySelector('#roleNameInput'),
   loadSolutionsButton: document.querySelector('#loadSolutionsButton'),
   solutionSearch: document.querySelector('#solutionSearch'),
-  managedOnly: document.querySelector('#managedOnly'),
+  unmanagedOnly: document.querySelector('#unmanagedOnly'),
   publisherDropdownButton: document.querySelector('#publisherDropdownButton'),
   publisherDropdown: document.querySelector('#publisherDropdown'),
   publisherFilter: document.querySelector('#publisherFilter'),
   solutions: document.querySelector('#solutions'),
   selectedSolutionName: document.querySelector('#selectedSolutionName'),
   selectedSolutionMeta: document.querySelector('#selectedSolutionMeta'),
+  selectedSolutionLink: document.querySelector('#selectedSolutionLink'),
   loadComponentsButton: document.querySelector('#loadComponentsButton'),
   exportSolutionButton: document.querySelector('#exportSolutionButton'),
+  deploySolutionButton: document.querySelector('#deploySolutionButton'),
+  solutionVersionInput: document.querySelector('#solutionVersionInput'),
   exportManaged: document.querySelector('#exportManaged'),
   solutionComponents: document.querySelector('#solutionComponents'),
+  solutionZipFile: document.querySelector('#solutionZipFile'),
+  solutionZipText: document.querySelector('#solutionZipText'),
+  importPackageSummary: document.querySelector('#importPackageSummary'),
+  importEnvironmentSelect: document.querySelector('#importEnvironmentSelect'),
+  prepareImportButton: document.querySelector('#prepareImportButton'),
+  refreshImportTargetButton: document.querySelector('#refreshImportTargetButton'),
+  importStatus: document.querySelector('#importStatus'),
+  importConnections: document.querySelector('#importConnections'),
+  importEnvironmentVariables: document.querySelector('#importEnvironmentVariables'),
+  downloadImportSettingsButton: document.querySelector('#downloadImportSettingsButton'),
+  importSettingsButton: document.querySelector('#importSettingsButton'),
+  importSettingsFile: document.querySelector('#importSettingsFile'),
+  importOverwrite: document.querySelector('#importOverwrite'),
+  importPublishWorkflows: document.querySelector('#importPublishWorkflows'),
+  importSolutionButton: document.querySelector('#importSolutionButton'),
   toast: document.querySelector('#toast'),
 };
 
 const state = {
+  accounts: [],
+  selectedAccountHomeId: '',
   environments: [],
   environmentsLoaded: false,
   hiddenEnvironmentIds: new Set(),
@@ -54,9 +77,18 @@ const state = {
     environmentName: '',
     orgUrl: '',
   },
+  businessUnits: [],
+  businessUnitsLoaded: false,
   solutions: [],
   selectedSolutionId: '',
+  importEnvironments: [],
+  importPackage: null,
+  importTarget: null,
+  importTargetPrepared: null,
 };
+
+const LAST_ACCOUNT_KEY = 'pdacLastAccountHomeId';
+const LAST_ENVIRONMENT_PREFIX = 'pdacLastEnvironment';
 
 el.tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 el.themeButton.addEventListener('click', toggleTheme);
@@ -84,18 +116,27 @@ el.logoutButton.addEventListener('click', () => withBusy(el.logoutButton, logout
 el.loadEnvironmentsButton.addEventListener('click', () => withBusy(el.loadEnvironmentsButton, loadEnvironments));
 el.loadRolesButton.addEventListener('click', () => withBusy(el.loadRolesButton, loadRoles));
 el.createRoleForm.addEventListener('submit', createRole);
+el.createRoleBusinessUnit.addEventListener('focus', () => {
+  if (!state.businessUnitsLoaded && state.selectedEnvironment.orgUrl) {
+    loadBusinessUnits().catch((error) => {
+      toast(error.message);
+      console.error(error);
+    });
+  }
+});
 el.renameButton.addEventListener('click', () => withBusy(el.renameButton, renameRole));
-el.downloadButton.addEventListener('click', () => downloadCsv('table'));
-el.downloadMiscButton.addEventListener('click', () => downloadCsv('misc'));
-el.uploadButton.addEventListener('click', () => withBusy(el.uploadButton, uploadCsv));
+el.downloadButton.addEventListener('click', () => downloadRoleFile('table'));
+el.downloadMiscButton.addEventListener('click', () => downloadRoleFile('misc'));
+el.uploadButton.addEventListener('click', () => withBusy(el.uploadButton, uploadRoleFile, `Processing ${getRoleFileFormat().toUpperCase()}`));
+el.roleFileFormats.forEach((input) => input.addEventListener('change', handleRoleFileFormatChange));
 el.environmentSearch.addEventListener('input', renderEnvironmentList);
 el.roleSearch.addEventListener('input', filterRoles);
 el.csvFile.addEventListener('change', () => {
-  el.filePickerText.textContent = el.csvFile.files?.[0]?.name || 'Choose CSV file';
+  updateRoleFileFormatUi();
 });
 el.loadSolutionsButton.addEventListener('click', () => withBusy(el.loadSolutionsButton, loadSolutions));
 el.solutionSearch.addEventListener('input', renderSolutions);
-el.managedOnly.addEventListener('change', renderSolutions);
+el.unmanagedOnly.addEventListener('change', renderSolutions);
 el.publisherFilter.addEventListener('change', renderSolutions);
 el.publisherDropdownButton.addEventListener('click', () => {
   el.environmentDropdown.hidden = true;
@@ -109,17 +150,58 @@ document.addEventListener('click', (event) => {
 });
 el.loadComponentsButton.addEventListener('click', () => withBusy(el.loadComponentsButton, loadSolutionComponents));
 el.exportSolutionButton.addEventListener('click', () => withBusy(el.exportSolutionButton, exportSolutionZip));
+el.deploySolutionButton.addEventListener('click', () => withBusy(el.deploySolutionButton, deploySolution, 'Deploying'));
+el.solutionZipFile.addEventListener('change', async () => {
+  const originalText = el.solutionZipText.textContent;
+  el.solutionZipText.textContent = el.solutionZipFile.files?.[0]?.name || 'Choose solution ZIP';
+  if (!el.solutionZipFile.files?.[0]) {
+    setImportPackage(null);
+    return;
+  }
+  el.solutionZipFile.disabled = true;
+  el.solutionZipText.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Analyzing ZIP</span>';
+  try {
+    await analyzeUploadedSolutionZip();
+  } finally {
+    el.solutionZipFile.disabled = false;
+    el.solutionZipText.textContent = el.solutionZipFile.files?.[0]?.name || originalText || 'Choose solution ZIP';
+  }
+});
+el.importEnvironmentSelect.addEventListener('change', () => {
+  state.importTargetPrepared = null;
+  renderImportTarget();
+});
+el.prepareImportButton.addEventListener('click', () => withBusy(el.prepareImportButton, prepareImportTarget, 'Preparing import'));
+el.refreshImportTargetButton.addEventListener('click', () => withBusy(el.refreshImportTargetButton, prepareImportTarget, 'Refreshing target'));
+el.downloadImportSettingsButton.addEventListener('click', downloadImportSettings);
+el.importSettingsButton.addEventListener('click', () => el.importSettingsFile.click());
+el.importSettingsFile.addEventListener('change', () => importSettingsFile().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+}));
+el.importSolutionButton.addEventListener('click', () => withBusy(el.importSolutionButton, importSolutionToTarget, 'Importing solution'));
 
 initTheme();
+updateRoleFileFormatUi();
 await loadStatus();
 
 async function loadStatus() {
   const status = await api('/api/status');
-  applyAuthState(status);
+  const authState = await restoreLastAccount(status);
+  applyAuthState(authState);
+  if (!hasSelectedAccount()) {
+    clearEnvironmentOptions();
+    el.status.textContent = authState.accounts?.length ? 'Select an account.' : `Region: ${authState.region}`;
+    return;
+  }
+  await loadEnvironments({ silentAutoSelect: true });
   if (state.selectedEnvironment.orgUrl) {
     el.status.textContent = `Using ${state.selectedEnvironment.orgUrl}`;
+    await loadBusinessUnits().catch((error) => {
+      console.error(error);
+    });
   } else {
-    el.status.textContent = `Region: ${status.region}`;
+    el.status.textContent = 'Select an environment.';
   }
 }
 
@@ -155,6 +237,8 @@ async function logout() {
   const result = await api('/api/logout', { method: 'POST' });
   state.environments = [];
   state.environmentsLoaded = false;
+  clearBusinessUnits();
+  forgetLastAccount();
   applyAuthState({ accounts: [], selectedAccountHomeId: '', selectedEnvironment: {} });
   renderEnvironmentList();
   el.status.textContent = `Logged out. Removed ${result.removed} cached account${result.removed === 1 ? '' : 's'}.`;
@@ -164,6 +248,11 @@ async function logout() {
 async function switchAccount() {
   const homeAccountId = el.accountSelect.value;
   if (!homeAccountId) {
+    forgetLastAccount();
+    setSelectedEnvironmentFromPayload({});
+    clearEnvironmentOptions();
+    renderEnvironmentList();
+    el.status.textContent = 'Select an account.';
     return;
   }
   const result = await api('/api/account', {
@@ -171,6 +260,7 @@ async function switchAccount() {
     body: { homeAccountId },
   });
   applyAuthState(result);
+  clearBusinessUnits();
   el.status.textContent = state.selectedEnvironment.orgUrl
     ? `Using ${state.selectedEnvironment.orgUrl}`
     : 'Account switched. Select an environment.';
@@ -180,7 +270,9 @@ async function switchAccount() {
 }
 
 function renderAccounts(accounts, selectedAccountHomeId) {
+  state.accounts = accounts;
   const selectedId = selectedAccountHomeId || (accounts.length === 1 ? accounts[0].homeAccountId : '');
+  state.selectedAccountHomeId = selectedId;
   const options = [
     `<option value=""${selectedId ? '' : ' selected'}>${accounts.length ? 'Select account' : 'No account'}</option>`,
     ...accounts.map((account) => `
@@ -191,6 +283,11 @@ function renderAccounts(accounts, selectedAccountHomeId) {
   ].join('');
   el.accountSelect.innerHTML = options;
   el.accountSelect.disabled = !accounts.length;
+  if (selectedId) {
+    rememberLastAccount(selectedId);
+  } else if (!accounts.length) {
+    forgetLastAccount();
+  }
 }
 
 function applyAuthState(data) {
@@ -207,7 +304,11 @@ function setSelectedEnvironmentFromPayload(data) {
     environmentName: environment.environmentName || environment.name || '',
     orgUrl: environment.orgUrl || '',
   };
+  if (state.selectedEnvironment.environmentName) {
+    rememberLastEnvironment(state.selectedEnvironment);
+  }
   renderSelectedEnvironmentSummary();
+  renderSolutionLink(getSelectedSolution());
 }
 
 function renderSelectedEnvironmentSummary() {
@@ -217,11 +318,22 @@ function renderSelectedEnvironmentSummary() {
 }
 
 function renderEnvironmentPicker() {
+  if (!hasSelectedAccount()) {
+    el.environmentDropdownButton.textContent = '';
+    el.environmentDropdownButton.disabled = true;
+    el.environmentPickerList.innerHTML = '';
+    renderSolutionLink(null);
+    renderImportEnvironments();
+    return;
+  }
+
   const selectedId = state.selectedEnvironment.environmentName;
   const visibleEnvironments = getVisibleEnvironments();
   const selectedEnvironment = getEnvironmentByName(selectedId);
-  el.environmentDropdownButton.textContent = selectedEnvironment?.displayName || selectedId || (visibleEnvironments.length ? 'Select environment' : 'No visible environments');
+  el.environmentDropdownButton.textContent = selectedEnvironment?.displayName || state.selectedEnvironment.orgUrl || selectedId || (visibleEnvironments.length ? 'Select environment' : 'No visible environments');
   el.environmentDropdownButton.disabled = !visibleEnvironments.length;
+  renderSolutionLink(getSelectedSolution());
+  renderImportEnvironments();
 
   const filtered = filterEnvironments(visibleEnvironments, el.environmentPickerSearch.value);
   if (!filtered.length) {
@@ -294,7 +406,7 @@ async function selectHeaderEnvironment(environmentName) {
   renderEnvironmentPicker();
 }
 
-async function selectEnvironment(environment) {
+async function selectEnvironment(environment, options = {}) {
   const next = {
     environmentName: environment.name || environment.environmentName || '',
     orgUrl: environment.orgUrl || '',
@@ -314,9 +426,18 @@ async function selectEnvironment(environment) {
     body: next,
   });
   applyAuthState(result);
+  rememberLastEnvironment(next);
+  clearBusinessUnits();
+  if (options.loadBusinessUnits !== false) {
+    await loadBusinessUnits().catch((error) => {
+      console.error(error);
+    });
+  }
   renderEnvironmentList();
-  el.status.textContent = `Using ${state.selectedEnvironment.orgUrl}`;
-  toast('Environment selected.');
+  if (!options.silent) {
+    el.status.textContent = `Using ${state.selectedEnvironment.orgUrl}`;
+    toast('Environment selected.');
+  }
 }
 
 function getEnvironmentByName(name) {
@@ -372,6 +493,8 @@ async function toggleEnvironmentVisibility(input) {
 
 async function clearSelectedEnvironment() {
   setSelectedEnvironmentFromPayload({});
+  clearBusinessUnits();
+  forgetLastEnvironment();
   renderEnvironmentPicker();
   renderEnvironmentList();
   const result = await api('/api/org', {
@@ -465,9 +588,30 @@ async function writeClipboard(text) {
 function activateTab(name) {
   el.tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
   el.tabPanels.forEach((panel) => panel.classList.toggle('active', panel.id === `${name}Tab`));
+  if (name === 'roles' && state.selectedEnvironment.orgUrl && !state.businessUnitsLoaded) {
+    loadBusinessUnits().catch((error) => {
+      toast(error.message);
+      console.error(error);
+    });
+  }
+  if (name === 'import' && state.selectedEnvironment.orgUrl && !state.environmentsLoaded) {
+    loadImportEnvironments().catch((error) => {
+      toast(error.message);
+      console.error(error);
+    });
+  } else if (name === 'import') {
+    renderImportEnvironments();
+  }
 }
 
-async function loadEnvironments() {
+async function loadEnvironments(options = {}) {
+  if (!hasSelectedAccount()) {
+    clearEnvironmentOptions();
+    renderEnvironmentList();
+    el.status.textContent = 'Select an account first.';
+    return;
+  }
+
   el.environmentList.innerHTML = empty('Loading environments...');
   const data = await api('/api/environments');
   state.environments = data.value || [];
@@ -478,13 +622,27 @@ async function loadEnvironments() {
     await clearSelectedEnvironment();
     return;
   }
+  if (!state.selectedEnvironment.environmentName && options.autoSelectLast !== false) {
+    const remembered = findRememberedEnvironment();
+    if (remembered) {
+      await selectEnvironment(remembered, {
+        loadBusinessUnits: false,
+        silent: options.silentAutoSelect,
+      });
+    }
+  }
   renderEnvironmentPicker();
   renderEnvironmentList();
 }
 
 async function loadRoles() {
   el.roles.innerHTML = empty('Loading roles...');
-  const roles = await api('/api/roles');
+  const [roles] = await Promise.all([
+    api('/api/roles'),
+    loadBusinessUnits().catch((error) => {
+      console.error(error);
+    }),
+  ]);
   if (!roles.length) {
     el.roles.innerHTML = empty('No roles found.');
     return;
@@ -515,12 +673,20 @@ async function createRole(event) {
   const form = event.currentTarget;
   const button = form.querySelector('button');
   await withBusy(button, async () => {
-    const name = new FormData(form).get('name');
+    const formData = new FormData(form);
     const role = await api('/api/roles', {
       method: 'POST',
-      body: { name },
+      body: {
+        name: formData.get('name'),
+        businessUnitId: formData.get('businessUnitId'),
+        description: formData.get('description'),
+        summaryOfCoreTablePrivileges: formData.get('summaryOfCoreTablePrivileges'),
+        memberPrivilegeInheritance: formData.get('memberPrivilegeInheritance'),
+        includeAppOpeningPrivileges: formData.get('includeAppOpeningPrivileges') === 'on',
+      },
     });
     form.reset();
+    renderBusinessUnits();
     toast(`Created ${role.name}`);
     await loadRoles();
     const newButton = document.querySelector(`.role-row[data-id="${cssEscape(role.roleid)}"]`);
@@ -528,6 +694,30 @@ async function createRole(event) {
       selectRole(newButton);
     }
   });
+}
+
+async function loadBusinessUnits() {
+  state.businessUnits = await api('/api/business-units');
+  state.businessUnitsLoaded = true;
+  renderBusinessUnits();
+}
+
+function renderBusinessUnits() {
+  const selected = el.createRoleBusinessUnit.value;
+  el.createRoleBusinessUnit.innerHTML = [
+    '<option value="">Current user\'s business unit</option>',
+    ...state.businessUnits.map((unit) => `
+      <option value="${escapeAttr(unit.businessunitid)}"${unit.businessunitid === selected ? ' selected' : ''}>
+        ${escapeHtml(unit.name)}
+      </option>
+    `),
+  ].join('');
+}
+
+function clearBusinessUnits() {
+  state.businessUnits = [];
+  state.businessUnitsLoaded = false;
+  renderBusinessUnits();
 }
 
 function selectRole(button) {
@@ -560,33 +750,45 @@ async function renameRole() {
 }
 
 async function downloadCsv(kind) {
-  const roleId = requireSelectedRole();
-  const path = kind === 'misc'
-    ? `/api/roles/${encodeURIComponent(roleId)}/misc-csv`
-    : `/api/roles/${encodeURIComponent(roleId)}/csv`;
-  try {
-    const response = await fetch(path);
-    if (!response.ok) {
-      const data = await response.json().catch(() => null);
-      throw new Error(data?.error || `Download failed: ${response.status}`);
-    }
+  return downloadRoleFile(kind);
+}
 
-    const blob = await response.blob();
-    const disposition = response.headers.get('content-disposition') || '';
-    const match = disposition.match(/filename="([^"]+)"/);
-    const filename = match?.[1] || `${safeFilename(el.roleNameInput.value)}-security-role.csv`;
-    const href = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = href;
-    link.download = filename;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(href);
-  } catch (error) {
-    toast(error.message);
-    console.error(error);
-  }
+async function downloadRoleFile(kind) {
+  const roleId = requireSelectedRole();
+  const format = getRoleFileFormat();
+  const path = roleDownloadPath(roleId, kind, format);
+  await withBusy(kind === 'misc' ? el.downloadMiscButton : el.downloadButton, async () => {
+    try {
+      const response = await fetch(path);
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || `Download failed: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get('content-disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/);
+      const filename = match?.[1] || `${safeFilename(el.roleNameInput.value)}-security-role.${format}`;
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(href);
+    } catch (error) {
+      toast(error.message);
+      throw error;
+    }
+  }, `Creating ${format.toUpperCase()}`);
+}
+
+function roleDownloadPath(roleId, kind, format) {
+  const suffix = format === 'xlsx' ? 'xlsx' : 'csv';
+  return kind === 'misc'
+    ? `/api/roles/${encodeURIComponent(roleId)}/misc-${suffix}`
+    : `/api/roles/${encodeURIComponent(roleId)}/${suffix}`;
 }
 
 function filterRoles() {
@@ -598,23 +800,59 @@ function filterRoles() {
 }
 
 async function uploadCsv() {
+  return uploadRoleFile();
+}
+
+async function uploadRoleFile() {
   const roleId = requireSelectedRole();
   const file = el.csvFile.files?.[0];
   if (!file) {
-    toast('Choose a CSV file first.');
+    toast(`Choose a ${getRoleFileFormat().toUpperCase()} file first.`);
     return;
   }
 
-  const csv = await file.text();
+  const format = getRoleFileFormat();
+  const body = format === 'xlsx'
+    ? { format, xlsx: await fileToBase64(file), fallbackRoleId: roleId }
+    : { format, csv: await file.text(), fallbackRoleId: roleId };
   const result = await api('/api/import', {
     method: 'POST',
-    body: {
-      csv,
-      fallbackRoleId: roleId,
-    },
+    body,
   });
   toast(`Applied ${result.appliedPrivileges} privilege rows to ${result.name}.`);
   await loadRoles();
+}
+
+function getRoleFileFormat() {
+  return [...el.roleFileFormats].find((input) => input.checked)?.value || 'xlsx';
+}
+
+function updateRoleFileFormatUi() {
+  const format = getRoleFileFormat();
+  const label = format.toUpperCase();
+  el.downloadButton.textContent = `Download table ${label}`;
+  el.downloadMiscButton.textContent = `Download misc ${label}`;
+  el.uploadLabel.textContent = `Upload edited ${label}`;
+  el.filePickerText.textContent = el.csvFile.files?.[0]?.name || `Choose ${label} file`;
+  el.uploadButton.textContent = `Apply ${label}`;
+  el.csvFile.accept = format === 'xlsx'
+    ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    : '.csv,text/csv';
+}
+
+function handleRoleFileFormatChange() {
+  el.csvFile.value = '';
+  updateRoleFileFormatUi();
+}
+
+async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
 }
 
 async function loadSolutions() {
@@ -653,7 +891,7 @@ function renderSolutions() {
     const text = `${solution.friendlyname || ''} ${solution.uniquename || ''}`.toLowerCase();
     const publisherId = solution.publisher?.publisherid || '';
     return (!query || text.includes(query)) &&
-      (!el.managedOnly.checked || solution.ismanaged) &&
+      (!el.unmanagedOnly.checked || !solution.ismanaged) &&
       (!publisherIds.size || publisherIds.has(publisherId));
   });
 
@@ -700,8 +938,12 @@ function selectSolution(solutionId) {
   el.selectedSolutionMeta.textContent = solution
     ? `${solution.uniquename} | ${solution.ismanaged ? 'managed' : 'unmanaged'} | ${solution.version || 'no version'}`
     : '';
+  renderSolutionLink(solution);
   el.loadComponentsButton.disabled = !solution;
   el.exportSolutionButton.disabled = !solution;
+  el.deploySolutionButton.disabled = !solution;
+  el.solutionVersionInput.disabled = !solution;
+  el.solutionVersionInput.value = solution?.version || '';
   el.exportManaged.checked = Boolean(solution?.ismanaged);
   el.solutionComponents.innerHTML = '';
 }
@@ -729,7 +971,10 @@ async function exportSolutionZip() {
   const response = await fetch(`/api/solutions/${encodeURIComponent(solutionId)}/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ managed: el.exportManaged.checked }),
+    body: JSON.stringify({
+      managed: el.exportManaged.checked,
+      version: el.solutionVersionInput.value.trim(),
+    }),
   });
   if (!response.ok) {
     const data = await response.json().catch(() => null);
@@ -753,6 +998,468 @@ async function exportSolutionZip() {
   toast('Solution export downloaded.');
 }
 
+async function deploySolution() {
+  const solutionId = requireSelectedSolution();
+  const result = await api(`/api/solutions/${encodeURIComponent(solutionId)}/deploy-cache`, {
+    method: 'POST',
+    body: {
+      managed: el.exportManaged.checked,
+      version: el.solutionVersionInput.value.trim(),
+    },
+  });
+  setImportPackage(result);
+  await loadImportEnvironments();
+  activateTab('import');
+  toast('Solution cached for deployment.');
+}
+
+async function analyzeUploadedSolutionZip() {
+  const file = el.solutionZipFile.files?.[0];
+  if (!file) {
+    setImportPackage(null);
+    return;
+  }
+
+  const result = await api('/api/import-packages', {
+    method: 'POST',
+    body: {
+      filename: file.name,
+      zipBase64: await fileToBase64(file),
+    },
+  });
+  setImportPackage(result);
+  await maybeAutoPrepareImportTarget();
+  toast('Solution ZIP analyzed.');
+}
+
+function setImportPackage(result) {
+  state.importPackage = result;
+  state.importTargetPrepared = null;
+  renderImportPackage();
+  renderImportTarget();
+}
+
+function renderImportPackage() {
+  if (!state.importPackage) {
+    el.importPackageSummary.innerHTML = '<p class="muted">Upload a ZIP or use Deploy from the Solutions tab.</p>';
+    el.prepareImportButton.disabled = true;
+    el.importSolutionButton.disabled = true;
+    return;
+  }
+
+  const analysis = state.importPackage.analysis || {};
+  const sourceSolutionUrl = makePowerAutomateSolutionUrl(state.importPackage.sourceEnvironmentName, state.importPackage.sourceSolutionId);
+  el.importPackageSummary.innerHTML = `
+    <h4>${escapeHtml(state.importPackage.filename)}</h4>
+    <p>${escapeHtml(analysis.solution?.uniqueName || 'Solution package')}</p>
+    ${sourceSolutionUrl ? `<p><a href="${escapeAttr(sourceSolutionUrl)}" target="_blank" rel="noreferrer">Open source solution</a></p>` : ''}
+    <p class="muted">${analysis.connectionReferences?.length || 0} connection reference${(analysis.connectionReferences?.length || 0) === 1 ? '' : 's'} | ${analysis.environmentVariables?.length || 0} environment variable${(analysis.environmentVariables?.length || 0) === 1 ? '' : 's'}</p>
+  `;
+  updateImportButtons();
+}
+
+async function loadImportEnvironments() {
+  if (!state.environmentsLoaded) {
+    await loadEnvironments();
+  }
+  renderImportEnvironments();
+  await maybeAutoPrepareImportTarget();
+}
+
+function renderImportEnvironments() {
+  const selected = el.importEnvironmentSelect.value;
+  const environments = getVisibleEnvironments();
+  const nextSelected = selected || (environments.length === 1 ? environments[0].name : '');
+  el.importEnvironmentSelect.innerHTML = [
+    `<option value="">${environments.length ? 'Select target environment' : 'No visible environments loaded'}</option>`,
+    ...environments.map((environment) => `
+      <option value="${escapeAttr(environment.name)}"${environment.name === nextSelected ? ' selected' : ''}>
+        ${escapeHtml(environment.displayName || environment.name)}
+      </option>
+    `),
+  ].join('');
+  updateImportButtons();
+}
+
+async function prepareImportTarget() {
+  const target = getImportTargetEnvironment();
+  if (!state.importPackage || !target) {
+    toast('Choose a package and target environment.', 'error');
+    return;
+  }
+
+  state.importTargetPrepared = await api(`/api/import-packages/${encodeURIComponent(state.importPackage.id)}/target`, {
+    method: 'POST',
+    body: target,
+  });
+  renderImportTarget();
+  toast('Target environment prepared.');
+}
+
+async function maybeAutoPrepareImportTarget() {
+  if (!state.importPackage || state.importTargetPrepared || !getImportTargetEnvironment()) {
+    return;
+  }
+  await prepareImportTarget();
+}
+
+function renderImportTarget() {
+  const prepared = state.importTargetPrepared;
+  if (!prepared) {
+    el.importConnections.innerHTML = empty(state.importPackage ? 'Prepare mappings to read target connections.' : 'No solution package.');
+    el.importEnvironmentVariables.innerHTML = empty(state.importPackage ? 'Prepare mappings to load target values.' : 'No solution package.');
+    el.importStatus.textContent = state.importPackage && getImportTargetEnvironment()
+      ? 'Prepare mappings before importing.'
+      : '';
+    updateImportButtons();
+    return;
+  }
+
+  el.importStatus.textContent = `Target: ${prepared.target.orgUrl}`;
+  renderImportConnections(prepared.connectionReferences || []);
+  renderImportEnvironmentVariables(prepared.environmentVariables || []);
+  updateImportButtons();
+}
+
+function renderImportConnections(connectionReferences) {
+  if (!connectionReferences.length) {
+    el.importConnections.innerHTML = empty('No connection references found.');
+    return;
+  }
+
+  el.importConnections.innerHTML = connectionReferences.map((reference) => {
+    const options = reference.matches?.length
+      ? reference.matches.map((connection) => `
+          <option value="${escapeAttr(connection.connectionId)}"${connection.connectionId === reference.selectedConnectionId ? ' selected' : ''}>
+            ${escapeHtml(connection.displayName || connection.connectionId)}
+          </option>
+        `).join('')
+      : '<option value="">No matching connection found</option>';
+    const link = reference.matches?.length ? '' : `<a href="${escapeAttr(reference.createUrl)}" target="_blank" rel="noreferrer">Create connection</a>`;
+    return `
+      <div class="import-row" data-logical-name="${escapeAttr(reference.logicalName)}" data-connector-id="${escapeAttr(reference.connectorId)}">
+        <div>
+          <strong>${escapeHtml(reference.displayName || reference.logicalName)}</strong>
+          <span class="role-id">${escapeHtml(reference.connectorId)}</span>
+          ${link}
+        </div>
+        <select class="import-connection-select">${options}</select>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderImportEnvironmentVariables(environmentVariables) {
+  if (!environmentVariables.length) {
+    el.importEnvironmentVariables.innerHTML = empty('No environment variables found.');
+    return;
+  }
+
+  el.importEnvironmentVariables.innerHTML = environmentVariables.map((variable) => {
+    const input = variable.type === 'boolean'
+      ? `<select class="import-env-value"><option value="true"${String(variable.value).toLowerCase() === 'true' ? ' selected' : ''}>true</option><option value="false"${String(variable.value).toLowerCase() === 'false' ? ' selected' : ''}>false</option></select>`
+      : variable.type === 'json'
+        ? `<textarea class="import-env-value">${escapeHtml(variable.value || '')}</textarea>`
+        : `<input class="import-env-value" type="${variable.type === 'number' ? 'number' : 'text'}" value="${escapeAttr(variable.value || '')}" />`;
+    return `
+      <label class="import-row" data-schema-name="${escapeAttr(variable.schemaName)}" data-type="${escapeAttr(variable.type)}">
+        <span>
+          <strong>${escapeHtml(variable.displayName || variable.schemaName)}</strong>
+          <span class="role-id">${escapeHtml(variable.schemaName)} | ${escapeHtml(variable.type)}</span>
+        </span>
+        ${input}
+      </label>
+    `;
+  }).join('');
+}
+
+async function importSolutionToTarget() {
+  const target = getImportTargetEnvironment();
+  if (!state.importPackage || !state.importTargetPrepared || !target) {
+    toast('Prepare the import first.');
+    return;
+  }
+
+  const result = await api(`/api/import-packages/${encodeURIComponent(state.importPackage.id)}/import`, {
+    method: 'POST',
+    body: {
+      target,
+      overwriteUnmanagedCustomizations: el.importOverwrite.checked,
+      publishWorkflows: el.importPublishWorkflows.checked,
+      connectionReferences: collectImportConnectionMappings(),
+      environmentVariables: collectImportEnvironmentVariableValues(),
+    },
+  });
+  const targetSolutionUrl = makePowerAutomateSolutionUrl(target.environmentName, result.targetSolutionId);
+  el.importStatus.innerHTML = [
+    `Import submitted. Job ID: ${escapeHtml(result.importJobId)}`,
+    targetSolutionUrl ? `<a href="${escapeAttr(targetSolutionUrl)}" target="_blank" rel="noreferrer">Open target solution</a>` : '',
+  ].filter(Boolean).join(' ');
+  toast('Solution import submitted.');
+}
+
+function collectImportConnectionMappings() {
+  return [...el.importConnections.querySelectorAll('.import-row')].map((row) => ({
+    logicalName: row.dataset.logicalName || '',
+    connectorId: row.dataset.connectorId || '',
+    connectionId: row.querySelector('.import-connection-select')?.value || '',
+  }));
+}
+
+function collectImportEnvironmentVariableValues() {
+  return [...el.importEnvironmentVariables.querySelectorAll('.import-row')].map((row) => ({
+    schemaName: row.dataset.schemaName || '',
+    type: row.dataset.type || 'string',
+    value: row.querySelector('.import-env-value')?.value || '',
+  }));
+}
+
+function downloadImportSettings() {
+  if (!state.importTargetPrepared) {
+    toast('Prepare mappings first.', 'error');
+    return;
+  }
+
+  const settings = {
+    EnvironmentVariables: collectImportSettingsEnvironmentVariables(),
+    ConnectionReferences: collectImportSettingsConnectionReferences(),
+  };
+  const name = state.importPackage?.analysis?.solution?.uniqueName || state.importPackage?.filename || 'solution';
+  downloadJsonFile(`${safeFilename(name)}-deployment-settings.json`, settings);
+  toast('Import settings downloaded.');
+}
+
+async function importSettingsFile() {
+  const file = el.importSettingsFile.files?.[0];
+  el.importSettingsFile.value = '';
+  if (!file) {
+    return;
+  }
+
+  const data = JSON.parse(await file.text());
+  const settings = normalizeImportSettings(data);
+  const applied = applyImportSettings(settings);
+  toast(`Applied ${applied} setting${applied === 1 ? '' : 's'}.`);
+}
+
+function collectImportSettingsEnvironmentVariables() {
+  return collectImportEnvironmentVariableValues()
+    .map((item) => ({
+      SchemaName: item.schemaName,
+      Value: String(item.value ?? ''),
+    }));
+}
+
+function collectImportSettingsConnectionReferences() {
+  return collectImportConnectionMappings()
+    .filter((item) => item.connectionId)
+    .map((item) => ({
+      LogicalName: item.logicalName,
+      ConnectionId: item.connectionId,
+      ConnectorId: item.connectorId,
+    }));
+}
+
+function normalizeImportSettings(data) {
+  const officialEnvironmentVariables = data?.EnvironmentVariables || data?.environmentVariables;
+  const officialConnectionReferences = data?.ConnectionReferences || data?.connectionReferences;
+  if (Array.isArray(officialEnvironmentVariables) || Array.isArray(officialConnectionReferences)) {
+    return {
+      environmentVariables: (officialEnvironmentVariables || []).filter((item) => item && typeof item === 'object'),
+      connectionReferences: (officialConnectionReferences || []).filter((item) => item && typeof item === 'object'),
+    };
+  }
+
+  const componentParameters = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.ComponentParameters)
+      ? data.ComponentParameters
+      : Array.isArray(data?.componentParameters)
+        ? data.componentParameters
+        : [];
+  if (!componentParameters.length) {
+    throw new Error('No deployment settings found in settings file.');
+  }
+
+  return {
+    environmentVariables: componentParameters
+      .filter((item) => item && typeof item === 'object' && (item.schemaname || item.schemaName))
+      .map((item) => ({
+        SchemaName: item.schemaname || item.schemaName,
+        Value: item.value ?? '',
+      })),
+    connectionReferences: componentParameters
+      .filter((item) => item && typeof item === 'object' && (item.connectionreferencelogicalname || item.logicalName))
+      .map((item) => ({
+        LogicalName: item.connectionreferencelogicalname || item.logicalName,
+        ConnectionId: item.connectionid || item.connectionId || '',
+        ConnectorId: item.connectorid || item.connectorId || '',
+      })),
+  };
+}
+
+function applyImportSettings(settings) {
+  const connectionRows = new Map([...el.importConnections.querySelectorAll('.import-row')]
+    .map((row) => [row.dataset.logicalName || '', row]));
+  const variableRows = new Map([...el.importEnvironmentVariables.querySelectorAll('.import-row')]
+    .map((row) => [row.dataset.schemaName || '', row]));
+  let applied = 0;
+
+  for (const reference of settings.connectionReferences || []) {
+    const logicalName = reference.LogicalName || reference.logicalName || '';
+    const connectionId = reference.ConnectionId || reference.connectionId || '';
+    const select = connectionRows.get(logicalName)?.querySelector('.import-connection-select');
+    if (select && [...select.options].some((option) => option.value === connectionId)) {
+      select.value = connectionId;
+      applied += 1;
+    }
+  }
+
+  for (const variable of settings.environmentVariables || []) {
+    const schemaName = variable.SchemaName || variable.schemaName || '';
+    const input = variableRows.get(schemaName)?.querySelector('.import-env-value');
+    if (input) {
+      input.value = String(variable.Value ?? variable.value ?? '');
+      applied += 1;
+    }
+  }
+
+  return applied;
+}
+
+function downloadJsonFile(filename, data) {
+  const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json' });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(href);
+}
+
+function getImportTargetEnvironment() {
+  const name = el.importEnvironmentSelect.value;
+  const environment = getVisibleEnvironments().find((item) => item.name === name);
+  return environment ? {
+    ...environment,
+    environmentName: environment.name,
+  } : null;
+}
+
+function updateImportButtons() {
+  const hasPackage = Boolean(state.importPackage);
+  const hasTarget = Boolean(getImportTargetEnvironment());
+  el.prepareImportButton.disabled = !hasPackage || !hasTarget;
+  el.refreshImportTargetButton.disabled = !hasPackage || !hasTarget;
+  el.downloadImportSettingsButton.disabled = !state.importTargetPrepared;
+  el.importSettingsButton.disabled = !state.importTargetPrepared;
+  el.importSolutionButton.disabled = !hasPackage || !hasTarget || !state.importTargetPrepared;
+  el.importSolutionButton.title = el.importSolutionButton.disabled && hasPackage && hasTarget
+    ? 'Prepare mappings before importing'
+    : '';
+}
+
+async function restoreLastAccount(status) {
+  if (status.selectedAccountHomeId) {
+    rememberLastAccount(status.selectedAccountHomeId);
+    return status;
+  }
+
+  const lastAccountHomeId = localStorage.getItem(LAST_ACCOUNT_KEY) || '';
+  if (!lastAccountHomeId || !(status.accounts || []).some((account) => account.homeAccountId === lastAccountHomeId)) {
+    return {
+      ...status,
+      selectedEnvironment: {},
+      environmentName: '',
+      orgUrl: '',
+    };
+  }
+
+  try {
+    return await api('/api/account', {
+      method: 'POST',
+      body: { homeAccountId: lastAccountHomeId },
+      quiet: true,
+    });
+  } catch (error) {
+    console.error(error);
+    forgetLastAccount();
+    return {
+      ...status,
+      selectedEnvironment: {},
+      environmentName: '',
+      orgUrl: '',
+      selectedAccountHomeId: '',
+    };
+  }
+}
+
+function rememberLastAccount(homeAccountId) {
+  if (homeAccountId) {
+    localStorage.setItem(LAST_ACCOUNT_KEY, homeAccountId);
+  }
+}
+
+function forgetLastAccount() {
+  localStorage.removeItem(LAST_ACCOUNT_KEY);
+}
+
+function hasSelectedAccount() {
+  return Boolean(state.selectedAccountHomeId);
+}
+
+function rememberLastEnvironment(environment) {
+  if (!state.selectedAccountHomeId || !environment?.environmentName) {
+    return;
+  }
+
+  localStorage.setItem(lastEnvironmentKey(), JSON.stringify({
+    environmentName: environment.environmentName,
+    orgUrl: environment.orgUrl || '',
+  }));
+}
+
+function forgetLastEnvironment() {
+  if (state.selectedAccountHomeId) {
+    localStorage.removeItem(lastEnvironmentKey());
+  }
+}
+
+function findRememberedEnvironment() {
+  const remembered = readJsonStorage(lastEnvironmentKey(), null);
+  if (!remembered) {
+    return null;
+  }
+
+  return getVisibleEnvironments().find((environment) =>
+    environment.name === remembered.environmentName ||
+    (remembered.orgUrl && environment.orgUrl === remembered.orgUrl)
+  ) || null;
+}
+
+function lastEnvironmentKey() {
+  return `${LAST_ENVIRONMENT_PREFIX}:${state.selectedAccountHomeId || 'default'}`;
+}
+
+function renderSolutionLink(solution) {
+  const href = solution ? makePowerAutomateSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
+  el.selectedSolutionLink.hidden = !href;
+  el.selectedSolutionLink.href = href || '#';
+}
+
+function getSelectedSolution() {
+  return state.solutions.find((item) => item.solutionid === state.selectedSolutionId) || null;
+}
+
+function makePowerAutomateSolutionUrl(environmentId, solutionId) {
+  if (!environmentId || !solutionId) {
+    return '';
+  }
+  return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}/overview`;
+}
+
 function requireSelectedSolution() {
   if (!state.selectedSolutionId) {
     throw new Error('Select a solution first.');
@@ -769,17 +1476,22 @@ async function api(path, options = {}) {
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    const message = data?.error || `Request failed: ${response.status}`;
-    toast(message);
+    const message = cleanApiErrorMessage(data?.error || data?.message || `Request failed: ${response.status}`);
+    if (!options.quiet) {
+      toast(message, 'error');
+    }
     throw new Error(message);
   }
   return data;
 }
 
-async function withBusy(button, task) {
+async function withBusy(button, task, busyText = '') {
   const isButton = button.tagName === 'BUTTON';
   const text = isButton ? button.textContent : '';
   button.disabled = true;
+  if (isButton && busyText) {
+    button.innerHTML = `<span class="spinner" aria-hidden="true"></span><span>${escapeHtml(busyText)}</span>`;
+  }
   try {
     await task();
   } catch (error) {
@@ -828,11 +1540,26 @@ function uniqueById(roles) {
   });
 }
 
-function toast(message) {
+function toast(message, type = 'info') {
   el.toast.textContent = message;
+  el.toast.classList.toggle('error', type === 'error');
   el.toast.classList.add('show');
   clearTimeout(toast.timeout);
   toast.timeout = setTimeout(() => el.toast.classList.remove('show'), 3600);
+}
+
+function cleanApiErrorMessage(message) {
+  const text = String(message || '').trim();
+  const jsonMatch = text.match(/:\s*(\{.*\})\s*$/);
+  if (jsonMatch) {
+    try {
+      const data = JSON.parse(jsonMatch[1]);
+      return data?.error?.message || data?.error || data?.message || text;
+    } catch {
+      return text;
+    }
+  }
+  return text;
 }
 
 function escapeHtml(value) {

@@ -75,7 +75,7 @@ You normally edit only the permission/scope columns, such as `Create`, `Read`, o
 
 1. Open the **Solution** tab.
 2. Load solutions.
-3. Filter by name, managed only, or selected publishers.
+3. Filter by name, unmanaged only, or selected publishers.
 4. Select a solution to view components.
 5. Choose managed/unmanaged export and click **Export solution**.
 
