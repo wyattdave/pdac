@@ -24,6 +24,12 @@ const el = {
   createTeamForm: document.querySelector('#createTeamForm'),
   teamBusinessUnit: document.querySelector('#teamBusinessUnit'),
   teamMembersPanel: document.querySelector('#teamMembersPanel'),
+  roleAssignmentModal: document.querySelector('#roleAssignmentModal'),
+  roleAssignmentTitle: document.querySelector('#roleAssignmentTitle'),
+  roleAssignmentMeta: document.querySelector('#roleAssignmentMeta'),
+  roleAssignmentClose: document.querySelector('#roleAssignmentClose'),
+  roleAssignmentSearch: document.querySelector('#roleAssignmentSearch'),
+  roleAssignmentRoles: document.querySelector('#roleAssignmentRoles'),
   loadRolesButton: document.querySelector('#loadRolesButton'),
   createRoleForm: document.querySelector('#createRoleForm'),
   toggleCreateRoleButton: document.querySelector('#toggleCreateRoleButton'),
@@ -100,7 +106,9 @@ const state = {
   businessUnitsLoaded: false,
   users: [],
   teams: [],
+  roles: [],
   selectedTeamId: '',
+  roleAssignmentPrincipal: null,
   solutions: [],
   selectedSolutionId: '',
   selectedComponent: null,
@@ -143,10 +151,33 @@ el.userSearch.addEventListener('input', renderUsers);
 el.teamSearch.addEventListener('input', renderTeams);
 el.syncUserForm.addEventListener('submit', syncEnvironmentUser);
 el.createTeamForm.addEventListener('submit', createEnvironmentTeam);
-el.teamsList.addEventListener('click', (event) => {
-  const button = event.target.closest('.team-row');
+el.roleAssignmentClose.addEventListener('click', closeRoleAssignmentModal);
+el.roleAssignmentSearch.addEventListener('input', renderRoleAssignmentList);
+el.roleAssignmentRoles.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-role-assignment-id]');
+  if (!button) {
+    return;
+  }
+  assignSecurityRole(button.dataset.roleAssignmentId || '', button).catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.usersList.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-principal-action="assign-role"]');
   if (button) {
-    selectTeam(button.dataset.id || '');
+    openRoleAssignmentModal(button.dataset.principalType || '', button.dataset.principalId || '');
+  }
+});
+el.teamsList.addEventListener('click', (event) => {
+  const assignButton = event.target.closest('[data-principal-action="assign-role"]');
+  if (assignButton) {
+    openRoleAssignmentModal(assignButton.dataset.principalType || '', assignButton.dataset.principalId || '');
+    return;
+  }
+  const selectButton = event.target.closest('[data-team-select]');
+  if (selectButton) {
+    selectTeam(selectButton.dataset.id || '');
   }
 });
 el.teamMembersPanel.addEventListener('click', (event) => {
@@ -314,7 +345,7 @@ async function logout() {
   const result = await api('/api/logout', { method: 'POST' });
   state.environments = [];
   state.environmentsLoaded = false;
-  clearBusinessUnits();
+  clearEnvironmentData();
   forgetLastAccount();
   applyAuthState({ accounts: [], selectedAccountHomeId: '', selectedEnvironment: {} });
   renderEnvironmentList();
@@ -327,6 +358,7 @@ async function switchAccount() {
   if (!homeAccountId) {
     forgetLastAccount();
     setSelectedEnvironmentFromPayload({});
+    clearEnvironmentData();
     clearEnvironmentOptions();
     renderEnvironmentList();
     el.status.textContent = 'Select an account.';
@@ -337,7 +369,7 @@ async function switchAccount() {
     body: { homeAccountId },
   });
   applyAuthState(result);
-  clearBusinessUnits();
+  clearEnvironmentData();
   el.status.textContent = state.selectedEnvironment.orgUrl
     ? `Using ${state.selectedEnvironment.orgUrl}`
     : 'Account switched. Select an environment.';
@@ -504,7 +536,7 @@ async function selectEnvironment(environment, options = {}) {
   });
   applyAuthState(result);
   rememberLastEnvironment(next);
-  clearBusinessUnits();
+  clearEnvironmentData();
   if (options.loadBusinessUnits !== false) {
     await loadBusinessUnits().catch((error) => {
       console.error(error);
@@ -570,7 +602,7 @@ async function toggleEnvironmentVisibility(input) {
 
 async function clearSelectedEnvironment() {
   setSelectedEnvironmentFromPayload({});
-  clearBusinessUnits();
+  clearEnvironmentData();
   forgetLastEnvironment();
   renderEnvironmentPicker();
   renderEnvironmentList();
@@ -746,13 +778,22 @@ async function loadRoles() {
       console.error(error);
     }),
   ]);
-  if (!roles.length) {
+  setRoles(roles || []);
+  renderRoleList();
+}
+
+function setRoles(roles) {
+  state.roles = uniqueById(roles || []);
+  renderRoleAssignmentList();
+}
+
+function renderRoleList() {
+  if (!state.roles.length) {
     el.roles.innerHTML = empty('No roles found.');
     return;
   }
 
-  const uniqueRoles = uniqueById(roles);
-  el.roles.innerHTML = uniqueRoles.map((role) => {
+  el.roles.innerHTML = state.roles.map((role) => {
     const businessUnitName = role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
     const inheritedText = role.inheritedCount ? `${role.inheritedCount} inherited business-unit cop${role.inheritedCount === 1 ? 'y' : 'ies'}` : 'root role';
     return `
@@ -769,6 +810,17 @@ async function loadRoles() {
     button.addEventListener('click', () => selectRole(button));
   });
   filterRoles();
+}
+
+async function ensureRolesLoaded() {
+  if (state.roles.length) {
+    renderRoleAssignmentList();
+    return;
+  }
+  el.roleAssignmentRoles.innerHTML = empty('Loading roles...');
+  const roles = await api('/api/roles');
+  setRoles(roles || []);
+  renderRoleList();
 }
 
 async function createRole(event) {
@@ -833,6 +885,19 @@ function clearBusinessUnits() {
   renderBusinessUnits();
 }
 
+function clearEnvironmentData() {
+  clearBusinessUnits();
+  state.users = [];
+  state.teams = [];
+  state.roles = [];
+  state.selectedTeamId = '';
+  state.roleAssignmentPrincipal = null;
+  renderUsers();
+  renderTeams();
+  closeRoleAssignmentModal();
+  clearRoleSelection();
+}
+
 function toggleCreateRoleForm() {
   el.createRoleForm.hidden = !el.createRoleForm.hidden;
   el.toggleCreateRoleButton.textContent = el.createRoleForm.hidden ? 'Create role' : 'Hide create role';
@@ -860,6 +925,9 @@ async function loadUsersAndTeams() {
   renderUsers();
   renderTeams();
   renderTeamMembersPanel();
+  await ensureRolesLoaded().catch((error) => {
+    console.error(error);
+  });
   if (!state.businessUnitsLoaded) {
     await loadBusinessUnits().catch((error) => {
       console.error(error);
@@ -880,12 +948,13 @@ function renderUsers() {
     return;
   }
   el.usersList.innerHTML = users.map((user) => `
-    <div class="list-item user-row" data-id="${escapeAttr(user.systemuserid)}">
+    <button class="list-item principal-row user-row" type="button" data-principal-action="assign-role" data-principal-type="systemuser" data-principal-id="${escapeAttr(user.systemuserid)}"${user.isdisabled ? ' disabled' : ''}>
       <span class="role-name">${escapeHtml(user.fullname || user.internalemailaddress || user.domainname || user.systemuserid)}</span>
       <span class="role-id">${escapeHtml(user.internalemailaddress || user.domainname || '')}</span>
       <span class="role-id">${user.isdisabled ? 'Disabled' : 'Enabled'} | ${escapeHtml(user.businessUnitName || 'No business unit')}</span>
       <span class="role-id">${escapeHtml(user.azureactivedirectoryobjectid || '')}</span>
-    </div>
+      <span class="role-id row-action-text">${user.isdisabled ? 'Disabled users cannot receive roles' : 'Assign role'}</span>
+    </button>
   `).join('');
   renderTeamMembersPanel();
 }
@@ -900,14 +969,20 @@ function renderTeams() {
     el.teamsList.innerHTML = empty(state.teams.length ? 'No teams match the filter.' : 'Load users and teams.');
     return;
   }
-  el.teamsList.innerHTML = teams.map((team) => `
-    <button class="list-item team-row${team.teamid === state.selectedTeamId ? ' selected' : ''}" type="button" data-id="${escapeAttr(team.teamid)}">
-      <span class="role-name">${escapeHtml(team.name || team.teamid)}</span>
-      <span class="role-id">${escapeHtml(team.teamTypeLabel || '')}${team.emailaddress ? ` | ${escapeHtml(team.emailaddress)}` : ''}</span>
-      <span class="role-id">${escapeHtml(team.businessUnitName || 'No business unit')}</span>
-      <span class="role-id">${escapeHtml(team.azureactivedirectoryobjectid || '')}</span>
-    </button>
-  `).join('');
+  el.teamsList.innerHTML = teams.map((team) => {
+    const canAssignRoles = Number(team.teamtype) !== 1;
+    return `
+    <div class="list-item team-row${team.teamid === state.selectedTeamId ? ' selected' : ''}">
+      <button class="principal-row-main" type="button" data-team-select data-id="${escapeAttr(team.teamid)}">
+        <span class="role-name">${escapeHtml(team.name || team.teamid)}</span>
+        <span class="role-id">${escapeHtml(team.teamTypeLabel || '')}${team.emailaddress ? ` | ${escapeHtml(team.emailaddress)}` : ''}</span>
+        <span class="role-id">${escapeHtml(team.businessUnitName || 'No business unit')}</span>
+        <span class="role-id">${escapeHtml(team.azureactivedirectoryobjectid || '')}</span>
+      </button>
+      <button class="secondary row-action-button" type="button" data-principal-action="assign-role" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}"${canAssignRoles ? '' : ' disabled'}>${canAssignRoles ? 'Assign role' : 'Access team'}</button>
+    </div>
+  `;
+  }).join('');
 }
 
 async function syncEnvironmentUser(event) {
@@ -965,6 +1040,100 @@ async function refreshUsers() {
 async function refreshTeams() {
   state.teams = await api('/api/teams');
   renderTeams();
+}
+
+async function openRoleAssignmentModal(principalType, principalId) {
+  const principal = getAssignmentPrincipal(principalType, principalId);
+  if (!principal) {
+    toast('Select a loaded user or team first.', 'error');
+    return;
+  }
+  state.roleAssignmentPrincipal = principal;
+  el.roleAssignmentTitle.textContent = `Assign Role to ${principal.type === 'team' ? 'Team' : 'User'}`;
+  el.roleAssignmentMeta.textContent = principal.detail
+    ? `${principal.label} | ${principal.detail}`
+    : principal.label;
+  el.roleAssignmentSearch.value = '';
+  el.roleAssignmentModal.hidden = false;
+  el.roleAssignmentRoles.innerHTML = empty('Loading roles...');
+  await ensureRolesLoaded();
+  renderRoleAssignmentList();
+  el.roleAssignmentSearch.focus();
+}
+
+function closeRoleAssignmentModal() {
+  state.roleAssignmentPrincipal = null;
+  el.roleAssignmentModal.hidden = true;
+  el.roleAssignmentRoles.innerHTML = '';
+  el.roleAssignmentSearch.value = '';
+}
+
+function getAssignmentPrincipal(type, id) {
+  if (type === 'team') {
+    const team = state.teams.find((item) => item.teamid === id);
+    if (!team || Number(team.teamtype) === 1) {
+      return null;
+    }
+    return team ? {
+      id: team.teamid,
+      type: 'team',
+      label: team.name || team.emailaddress || team.teamid,
+      detail: [team.teamTypeLabel, team.businessUnitName].filter(Boolean).join(' | '),
+    } : null;
+  }
+
+  const user = state.users.find((item) => item.systemuserid === id);
+  if (!user || user.isdisabled) {
+    return null;
+  }
+  return {
+    id: user.systemuserid,
+    type: 'systemuser',
+    label: user.fullname || user.internalemailaddress || user.domainname || user.systemuserid,
+    detail: [user.internalemailaddress || user.domainname, user.businessUnitName].filter(Boolean).join(' | '),
+  };
+}
+
+function renderRoleAssignmentList() {
+  const query = el.roleAssignmentSearch.value.trim().toLowerCase();
+  const roles = state.roles.filter((role) => {
+    const businessUnitName = role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
+    const text = `${role.name || ''} ${businessUnitName}`.toLowerCase();
+    return !query || text.includes(query);
+  });
+  if (!roles.length) {
+    el.roleAssignmentRoles.innerHTML = empty(state.roles.length ? 'No roles match the filter.' : 'Load roles first.');
+    return;
+  }
+  el.roleAssignmentRoles.innerHTML = roles.map((role) => {
+    const businessUnitName = role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
+    return `
+      <button class="list-item role-assignment-row" type="button" data-role-assignment-id="${escapeAttr(role.roleid)}">
+        <span class="role-name">${escapeHtml(role.name)}</span>
+        ${businessUnitName ? `<span class="role-id">Root business unit: ${escapeHtml(businessUnitName)}</span>` : ''}
+        <span class="role-id">Assign this role</span>
+      </button>
+    `;
+  }).join('');
+}
+
+async function assignSecurityRole(roleId, button) {
+  const principal = state.roleAssignmentPrincipal;
+  if (!principal) {
+    throw new Error('Select a user or team first.');
+  }
+  await withBusy(button, async () => {
+    const result = await api('/api/role-assignments', {
+      method: 'POST',
+      body: {
+        principalType: principal.type,
+        principalId: principal.id,
+        roleId,
+      },
+    });
+    toast(`Assigned ${result.roleName || 'role'} to ${result.principalName || 'principal'}.`);
+    closeRoleAssignmentModal();
+  }, 'Assigning');
 }
 
 function selectTeam(teamId) {
@@ -1029,6 +1198,21 @@ function selectRole(button) {
   el.downloadMiscButton.disabled = false;
   el.csvFile.disabled = false;
   el.uploadButton.disabled = false;
+}
+
+function clearRoleSelection() {
+  document.querySelectorAll('.role-row').forEach((item) => item.classList.remove('selected'));
+  el.selectedRoleId.value = '';
+  el.selectedRoleName.textContent = 'No role selected';
+  el.roleNameInput.value = '';
+  el.roleNameInput.disabled = true;
+  el.renameButton.disabled = true;
+  el.downloadButton.disabled = true;
+  el.downloadMiscButton.disabled = true;
+  el.csvFile.disabled = true;
+  el.csvFile.value = '';
+  el.uploadButton.disabled = true;
+  updateRoleFileFormatUi();
 }
 
 async function renameRole() {

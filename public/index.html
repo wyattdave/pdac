@@ -201,6 +201,7 @@
               <div id="teamMembersPanel" class="guide"></div>
             </div>
           </div>
+
         </section>
       </section>
 
@@ -437,6 +438,23 @@
           <button id="componentModalClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
         </div>
         <div id="componentModalBody" class="component-modal-body"></div>
+      </section>
+    </div>
+
+    <div id="roleAssignmentModal" class="modal-backdrop" hidden>
+      <section class="modal role-assignment-modal" role="dialog" aria-modal="true" aria-labelledby="roleAssignmentTitle">
+        <div class="section-title compact-title">
+          <div>
+            <h2 id="roleAssignmentTitle">Assign Security Role</h2>
+            <p id="roleAssignmentMeta" class="muted"></p>
+          </div>
+          <button id="roleAssignmentClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+        </div>
+        <label class="search">
+          Search roles
+          <input id="roleAssignmentSearch" placeholder="Type to filter roles" />
+        </label>
+        <div id="roleAssignmentRoles" class="list role-assignment-list"></div>
       </section>
     </div>
 

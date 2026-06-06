@@ -371,6 +371,13 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'POST /api/role-assignments') {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await assignSecurityRole(body));
+    return;
+  }
+
   if (route === 'POST /api/roles') {
     requireOrgUrl();
     const body = await readJson(req);
@@ -1700,7 +1707,7 @@ async function listEnvironmentPrincipals(query) {
 
 async function listEnvironmentUsers(query = '') {
   const filter = userSearchFilter(query);
-  const rows = await dvGetAll(`systemusers?$select=systemuserid,fullname,internalemailaddress,domainname,isdisabled,accessmode,azureactivedirectoryobjectid,_businessunitid_value&$filter=${filter}&$orderby=fullname&$top=250`);
+  const rows = await dvGetAll(`systemusers?$select=systemuserid,fullname,internalemailaddress,domainname,isdisabled,accessmode,azureactivedirectoryobjectid,_businessunitid_value&$expand=businessunitid($select=name)&$filter=${filter}&$orderby=fullname&$top=250`);
   return rows.map((user) => ({
     systemuserid: user.systemuserid,
     fullname: user.fullname || '',
@@ -1710,14 +1717,14 @@ async function listEnvironmentUsers(query = '') {
     accessmode: user.accessmode,
     azureactivedirectoryobjectid: user.azureactivedirectoryobjectid || '',
     businessUnitId: user._businessunitid_value || '',
-    businessUnitName: user['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
+    businessUnitName: user.businessunitid?.name || user['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
   }));
 }
 
 async function listEnvironmentTeams(query = '') {
   const normalized = String(query || '').trim();
   const filter = normalized ? `&$filter=${principalContainsFilter(['name', 'emailaddress'], normalized)}` : '';
-  const rows = await dvGetAll(`teams?$select=teamid,name,teamtype,emailaddress,description,azureactivedirectoryobjectid,_businessunitid_value${filter}&$orderby=name&$top=250`);
+  const rows = await dvGetAll(`teams?$select=teamid,name,teamtype,emailaddress,description,azureactivedirectoryobjectid,_businessunitid_value&$expand=businessunitid($select=name)${filter}&$orderby=name&$top=250`);
   return rows.map((team) => ({
     teamid: team.teamid,
     name: team.name || '',
@@ -1727,7 +1734,7 @@ async function listEnvironmentTeams(query = '') {
     description: team.description || '',
     azureactivedirectoryobjectid: team.azureactivedirectoryobjectid || '',
     businessUnitId: team._businessunitid_value || '',
-    businessUnitName: team['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
+    businessUnitName: team.businessunitid?.name || team['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
   }));
 }
 
@@ -1785,6 +1792,84 @@ async function addTeamMembers(teamId, userIds) {
     Members: ids,
   });
   return { added: ids.length };
+}
+
+async function assignSecurityRole(body) {
+  const principalType = normalizePrincipalType(body.principalType || body.type);
+  const principalId = normalizeGuid(body.principalId || body.id);
+  const selectedRoleId = normalizeGuid(body.roleId);
+  if (!principalId) {
+    throw new HttpError(400, 'Choose a user or team.');
+  }
+  if (!selectedRoleId) {
+    throw new HttpError(400, 'Choose a security role.');
+  }
+
+  const principal = await getRoleAssignmentPrincipal(principalType, principalId);
+  const role = await resolveRoleForBusinessUnit(selectedRoleId, principal.businessUnitId);
+  const association = principalType === 'systemuser' ? 'systemuserroles_association' : 'teamroles_association';
+  try {
+    await dvPost(`${principal.collection}(${principalId})/${association}/$ref`, {
+      '@odata.id': `${selected.orgUrl}/api/data/v9.2/roles(${role.roleid})`,
+    });
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) {
+      throw new HttpError(404, `Could not assign '${role.name || 'role'}' to ${principal.name}. Dataverse could not find the resolved role or principal association. Refresh users, teams, and roles, then try again.`);
+    }
+    throw error;
+  }
+
+  return {
+    principalId,
+    principalType,
+    principalName: principal.name,
+    roleid: role.roleid,
+    roleName: role.name || '',
+    assignedRoleBusinessUnitId: normalizeGuid(role._businessunitid_value),
+  };
+}
+
+function normalizePrincipalType(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (['user', 'systemuser', 'systemusers'].includes(text)) {
+    return 'systemuser';
+  }
+  if (['team', 'teams'].includes(text)) {
+    return 'team';
+  }
+  throw new HttpError(400, 'Principal type must be user or team.');
+}
+
+async function getRoleAssignmentPrincipal(type, id) {
+  if (type === 'systemuser') {
+    const user = await dvGet(`systemusers(${id})?$select=systemuserid,fullname,internalemailaddress,domainname,isdisabled,_businessunitid_value&$expand=businessunitid($select=name)`);
+    if (user.isdisabled) {
+      throw new HttpError(400, 'Disabled users cannot receive security roles.');
+    }
+    const businessUnitId = normalizeGuid(user._businessunitid_value);
+    if (!businessUnitId) {
+      throw new HttpError(400, `User '${user.fullname || user.internalemailaddress || id}' does not have a business unit in Dataverse.`);
+    }
+    return {
+      collection: 'systemusers',
+      businessUnitId,
+      name: user.fullname || user.internalemailaddress || user.domainname || user.systemuserid || id,
+    };
+  }
+
+  const team = await dvGet(`teams(${id})?$select=teamid,name,teamtype,_businessunitid_value&$expand=businessunitid($select=name)`);
+  if (Number(team.teamtype) === 1) {
+    throw new HttpError(400, 'Access teams cannot receive security roles. Choose an owner team or group-backed team.');
+  }
+  const businessUnitId = normalizeGuid(team._businessunitid_value);
+  if (!businessUnitId) {
+    throw new HttpError(400, `Team '${team.name || id}' does not have a business unit in Dataverse.`);
+  }
+  return {
+    collection: 'teams',
+    businessUnitId,
+    name: team.name || team.teamid || id,
+  };
 }
 
 function userSearchFilter(query) {
@@ -2621,6 +2706,27 @@ async function getWritableRole(role) {
     return getRole(rootId);
   }
   return role;
+}
+
+async function resolveRoleForBusinessUnit(roleId, businessUnitId) {
+  const role = await getRole(roleId);
+  if (!role) {
+    throw new HttpError(404, 'Role not found.');
+  }
+
+  const normalizedBusinessUnitId = normalizeGuid(businessUnitId);
+  if (!normalizedBusinessUnitId || normalizeGuid(role._businessunitid_value) === normalizedBusinessUnitId) {
+    return role;
+  }
+
+  const rootRoleId = normalizeGuid(role._parentrootroleid_value) || roleId;
+  const escapedName = odataString(role.name || '');
+  const inherited = await dvGet(`roles?$select=roleid,name,_businessunitid_value,_parentrootroleid_value,_parentroleid_value&$filter=_businessunitid_value eq ${normalizedBusinessUnitId} and (_parentrootroleid_value eq ${rootRoleId} or roleid eq ${rootRoleId} or name eq '${escapedName}')&$top=1`);
+  const match = inherited.value?.[0];
+  if (!match) {
+    throw new HttpError(404, `No copy of role '${role.name || roleId}' was found in the selected principal's business unit.`);
+  }
+  return match;
 }
 
 async function getRolePrivileges(roleId) {

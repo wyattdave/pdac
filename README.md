@@ -33,7 +33,7 @@ npm start
 
 - **Home**: quick guide for each admin function.
 - **Environment and Auth**: sign in, switch accounts, load environments, choose the active environment, and copy the selected environment details.
-- **Users and Teams**: list environment users and teams, force-sync an Entra user into Dataverse, create Dataverse teams, and add loaded users to a selected team.
+- **Users and Teams**: list environment users and teams, force-sync an Entra user into Dataverse, create Dataverse teams, add loaded users to a selected team, and assign security roles to users or teams.
 - **Roles**: create roles, download editable permission workbooks or CSVs, upload edited permissions, and rename editable root roles.
 - **Solutions**: list and filter solutions, filter publishers, open the solution in Power Automate, list components, export as managed or unmanaged, and stage a deployment.
 - **Solution component actions**: manage supported components from the solution component list.
@@ -47,8 +47,11 @@ npm start
 4. Use **Add user** with the user's Microsoft Entra object ID to request Dataverse user sync.
 5. Use **Create team** to create an owner, access, security group, or Office group team.
 6. Select a team, then add loaded enabled users as members.
+7. Select **Assign role** from a loaded user or team row, then search for and choose the security role in the popup.
 
 Adding a user uses the supported Power Platform admin force-sync pattern. The user must already exist in Microsoft Entra ID and must meet the environment requirements such as license, sign-in status, and environment security group membership.
+
+Role assignment uses the Dataverse user-role and team-role associations. When you choose a root role, PDAC assigns the matching inherited role copy for the selected user's or team's business unit.
 
 ## Roles
 

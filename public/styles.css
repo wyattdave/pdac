@@ -274,6 +274,7 @@ h3 {
 
 .compact-list {
   max-height: 420px;
+  overflow: auto;
 }
 
 .user-row {
@@ -622,11 +623,54 @@ select:disabled {
 }
 
 .editor {
+  align-content: start;
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
   gap: 12px;
   padding: 14px;
+}
+
+.principal-row {
+  cursor: pointer;
+}
+
+.principal-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.principal-row-main {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: grid;
+  gap: 3px;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.row-action-text {
+  color: var(--primary);
+  font-weight: 650;
+}
+
+.row-action-button {
+  justify-self: start;
+  margin-top: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.role-assignment-list {
+  max-height: min(520px, calc(100vh - 230px));
+  overflow: auto;
+}
+
+.role-assignment-row {
+  min-height: 74px;
 }
 
 .solution-filters {
