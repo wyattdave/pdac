@@ -39,10 +39,11 @@
 
     <nav class="tabs" aria-label="App sections">
       <button class="tab active" type="button" data-tab="home">Home</button>
-      <button class="tab" type="button" data-tab="auth">Environment and Auth</button>
       <button class="tab" type="button" data-tab="roles">Roles</button>
-      <button class="tab" type="button" data-tab="solutions">Solution</button>
-      <button class="tab" type="button" data-tab="import">Import</button>
+      <button class="tab" type="button" data-tab="solutions">Solutions</button>
+      <button class="tab" type="button" data-tab="import">Imports</button>
+      <button class="tab" type="button" data-tab="users">Users and Teams</button>
+      <button class="tab" type="button" data-tab="auth">Environment and Auth</button>
     </nav>
 
     <main>
@@ -53,18 +54,30 @@
             <img src="/icon.png" alt="" class="home-logo" />
             <p class="lead">Settings by function not by environment. Connect once, then work by admin function across roles, solutions, and environment tools.</p>
           </div>
-          <div class="home-grid">
+          <div class="home-grid function-grid">
             <div class="mini-card">
-              <h3>1. Connect</h3>
-              <p>Sign in, load environments, then choose the current environment from the header.</p>
+              <h3>Connect</h3>
+              <p>Sign in, load environments, and choose the current Dataverse environment from the header.</p>
             </div>
             <div class="mini-card">
-              <h3>2. Roles</h3>
+              <h3>Users and Teams</h3>
+              <p>View environment users and teams, force-sync an Entra user, create Dataverse teams, and add users to teams.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Roles</h3>
               <p>Download role permissions, edit scopes in Excel, and upload the edited file.</p>
             </div>
             <div class="mini-card">
-              <h3>3. Solutions</h3>
-              <p>Filter solutions, view components, and export a solution ZIP.</p>
+              <h3>Solutions</h3>
+              <p>Filter solutions, inspect components, export ZIPs, and manage supported component settings.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Import</h3>
+              <p>Analyze a solution ZIP, map connection references and environment variables, then import.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Component Actions</h3>
+              <p>Update environment variables, switch connection references, turn flows on or off, and share apps, flows, and agents.</p>
             </div>
           </div>
         </div>
@@ -107,11 +120,98 @@
         </section>
       </section>
 
+      <section id="usersTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Users and Teams</h2>
+            <div class="actions">
+              <button id="loadUsersTeamsButton" type="button">Load users and teams</button>
+              <button id="toggleCreateUserButton" type="button" class="secondary">Add user</button>
+              <button id="toggleCreateTeamButton" type="button" class="secondary">Create team</button>
+            </div>
+          </div>
+
+          <div id="createUserPanel" class="editor create-toggle-panel" hidden>
+            <h3>Add user</h3>
+            <form id="syncUserForm" class="compact-form full-width-form">
+              <label>
+                Entra user object ID
+                <input name="principalObjectId" placeholder="00000000-0000-0000-0000-000000000000" />
+              </label>
+              <button type="submit">Add user</button>
+            </form>
+            <p class="muted">Add user force-syncs an existing licensed Entra user into this Dataverse environment. The user must still meet tenant, license, and environment security group requirements.</p>
+          </div>
+
+          <div id="createTeamPanel" class="editor create-toggle-panel" hidden>
+            <h3>Create team</h3>
+            <form id="createTeamForm" class="compact-form full-width-form">
+              <label>
+                Team name
+                <input name="name" placeholder="App makers" />
+              </label>
+              <label>
+                Team type
+                <select name="teamType">
+                  <option value="owner">Owner</option>
+                  <option value="access">Access</option>
+                  <option value="security">Security Group</option>
+                  <option value="office">Office Group</option>
+                </select>
+              </label>
+              <label>
+                Business unit
+                <select id="teamBusinessUnit" name="businessUnitId">
+                  <option value="">Current user's business unit</option>
+                </select>
+              </label>
+              <label>
+                Entra group object ID
+                <input name="azureActiveDirectoryObjectId" placeholder="Optional for group-backed teams" />
+              </label>
+              <label>
+                Email
+                <input name="emailaddress" placeholder="Optional" />
+              </label>
+              <label>
+                Description
+                <textarea name="description" placeholder="Optional"></textarea>
+              </label>
+              <button type="submit">Create team</button>
+            </form>
+          </div>
+
+          <div class="import-grid">
+            <div class="editor">
+              <h3>Users</h3>
+              <label class="search">
+                Search users
+                <input id="userSearch" placeholder="Name, email, or domain" />
+              </label>
+              <div id="usersList" class="list compact-list"></div>
+            </div>
+
+            <div class="editor">
+              <h3>Teams</h3>
+              <label class="search">
+                Search teams
+                <input id="teamSearch" placeholder="Name or email" />
+              </label>
+              <div id="teamsList" class="list compact-list"></div>
+              <div id="teamMembersPanel" class="guide"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+
       <section id="rolesTab" class="tab-panel">
         <section class="panel">
           <div class="section-title">
             <h2>Roles</h2>
-            <button id="loadRolesButton" type="button">Load roles</button>
+            <div class="actions">
+              <button id="loadRolesButton" type="button">Load roles</button>
+              <button id="toggleCreateRoleButton" type="button" class="secondary">Create role</button>
+            </div>
           </div>
 
           <label class="search">
@@ -120,7 +220,7 @@
           </label>
           <p class="muted roles-note">Dataverse creates inherited security-role copies per business unit. This list shows only editable root roles and notes how many inherited copies exist.</p>
 
-          <form id="createRoleForm" class="create-role-form compact">
+          <form id="createRoleForm" class="create-role-form compact" hidden>
             <label>
               New role name
               <input name="name" placeholder="Managed Role" />
@@ -326,6 +426,19 @@
       <span>|</span>
       <span>2026</span>
     </footer>
+
+    <div id="componentModal" class="modal-backdrop" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="componentModalTitle">
+        <div class="section-title compact-title">
+          <div>
+            <h2 id="componentModalTitle">Component</h2>
+            <p id="componentModalMeta" class="muted"></p>
+          </div>
+          <button id="componentModalClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+        </div>
+        <div id="componentModalBody" class="component-modal-body"></div>
+      </section>
+    </div>
 
     <div id="toast"></div>
     <script src="/app.js" type="module"></script>

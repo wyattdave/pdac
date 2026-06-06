@@ -11,8 +11,22 @@ const el = {
   signInDifferentButton: document.querySelector('#signInDifferentButton'),
   logoutButton: document.querySelector('#logoutButton'),
   loadEnvironmentsButton: document.querySelector('#loadEnvironmentsButton'),
+  loadUsersTeamsButton: document.querySelector('#loadUsersTeamsButton'),
+  toggleCreateUserButton: document.querySelector('#toggleCreateUserButton'),
+  toggleCreateTeamButton: document.querySelector('#toggleCreateTeamButton'),
+  createUserPanel: document.querySelector('#createUserPanel'),
+  createTeamPanel: document.querySelector('#createTeamPanel'),
+  userSearch: document.querySelector('#userSearch'),
+  usersList: document.querySelector('#usersList'),
+  syncUserForm: document.querySelector('#syncUserForm'),
+  teamSearch: document.querySelector('#teamSearch'),
+  teamsList: document.querySelector('#teamsList'),
+  createTeamForm: document.querySelector('#createTeamForm'),
+  teamBusinessUnit: document.querySelector('#teamBusinessUnit'),
+  teamMembersPanel: document.querySelector('#teamMembersPanel'),
   loadRolesButton: document.querySelector('#loadRolesButton'),
   createRoleForm: document.querySelector('#createRoleForm'),
+  toggleCreateRoleButton: document.querySelector('#toggleCreateRoleButton'),
   createRoleBusinessUnit: document.querySelector('#createRoleBusinessUnit'),
   renameButton: document.querySelector('#renameButton'),
   downloadButton: document.querySelector('#downloadButton'),
@@ -49,6 +63,11 @@ const el = {
   solutionVersionInput: document.querySelector('#solutionVersionInput'),
   exportManaged: document.querySelector('#exportManaged'),
   solutionComponents: document.querySelector('#solutionComponents'),
+  componentModal: document.querySelector('#componentModal'),
+  componentModalTitle: document.querySelector('#componentModalTitle'),
+  componentModalMeta: document.querySelector('#componentModalMeta'),
+  componentModalBody: document.querySelector('#componentModalBody'),
+  componentModalClose: document.querySelector('#componentModalClose'),
   solutionZipFile: document.querySelector('#solutionZipFile'),
   solutionZipText: document.querySelector('#solutionZipText'),
   importPackageSummary: document.querySelector('#importPackageSummary'),
@@ -79,8 +98,13 @@ const state = {
   },
   businessUnits: [],
   businessUnitsLoaded: false,
+  users: [],
+  teams: [],
+  selectedTeamId: '',
   solutions: [],
   selectedSolutionId: '',
+  selectedComponent: null,
+  componentPrincipals: [],
   importEnvironments: [],
   importPackage: null,
   importTarget: null,
@@ -114,9 +138,41 @@ el.signInButton.addEventListener('click', () => withBusy(el.signInButton, signIn
 el.signInDifferentButton.addEventListener('click', () => withBusy(el.signInDifferentButton, signInDifferent));
 el.logoutButton.addEventListener('click', () => withBusy(el.logoutButton, logout));
 el.loadEnvironmentsButton.addEventListener('click', () => withBusy(el.loadEnvironmentsButton, loadEnvironments));
+el.loadUsersTeamsButton.addEventListener('click', () => withBusy(el.loadUsersTeamsButton, loadUsersAndTeams));
+el.toggleCreateUserButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('user'));
+el.toggleCreateTeamButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('team'));
+el.userSearch.addEventListener('input', renderUsers);
+el.teamSearch.addEventListener('input', renderTeams);
+el.syncUserForm.addEventListener('submit', syncEnvironmentUser);
+el.createTeamForm.addEventListener('submit', createEnvironmentTeam);
+el.teamsList.addEventListener('click', (event) => {
+  const button = event.target.closest('.team-row');
+  if (button) {
+    selectTeam(button.dataset.id || '');
+  }
+});
+el.teamMembersPanel.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-team-action]');
+  if (!button) {
+    return;
+  }
+  handleTeamAction(button.dataset.teamAction || '', button).catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
 el.loadRolesButton.addEventListener('click', () => withBusy(el.loadRolesButton, loadRoles));
+el.toggleCreateRoleButton.addEventListener('click', toggleCreateRoleForm);
 el.createRoleForm.addEventListener('submit', createRole);
 el.createRoleBusinessUnit.addEventListener('focus', () => {
+  if (!state.businessUnitsLoaded && state.selectedEnvironment.orgUrl) {
+    loadBusinessUnits().catch((error) => {
+      toast(error.message);
+      console.error(error);
+    });
+  }
+});
+el.teamBusinessUnit.addEventListener('focus', () => {
   if (!state.businessUnitsLoaded && state.selectedEnvironment.orgUrl) {
     loadBusinessUnits().catch((error) => {
       toast(error.message);
@@ -149,6 +205,29 @@ document.addEventListener('click', (event) => {
   }
 });
 el.loadComponentsButton.addEventListener('click', () => withBusy(el.loadComponentsButton, loadSolutionComponents));
+el.solutionComponents.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-component-action="manage"]');
+  if (!button) {
+    return;
+  }
+  openComponentManager(Number(button.dataset.type), button.dataset.id || '').catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.componentModalClose.addEventListener('click', closeComponentManager);
+el.componentModalBody.addEventListener('input', handleComponentModalInput);
+el.componentModalBody.addEventListener('click', (event) => {
+  const actionElement = event.target.closest('[data-modal-action]');
+  const action = actionElement?.dataset.modalAction || '';
+  if (!action) {
+    return;
+  }
+  handleComponentModalAction(action, actionElement).catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
 el.exportSolutionButton.addEventListener('click', () => withBusy(el.exportSolutionButton, exportSolutionZip));
 el.deploySolutionButton.addEventListener('click', () => withBusy(el.deploySolutionButton, deploySolution, 'Deploying'));
 el.solutionZipFile.addEventListener('change', async () => {
@@ -618,6 +697,9 @@ async function loadEnvironments(options = {}) {
   state.environmentsLoaded = true;
   loadEnvironmentVisibility();
   setSelectedEnvironmentFromPayload(data);
+  if (await reconcileSelectedEnvironment(options)) {
+    return;
+  }
   if (state.selectedEnvironment.environmentName && !isEnvironmentVisible({ name: state.selectedEnvironment.environmentName })) {
     await clearSelectedEnvironment();
     return;
@@ -633,6 +715,29 @@ async function loadEnvironments(options = {}) {
   }
   renderEnvironmentPicker();
   renderEnvironmentList();
+}
+
+async function reconcileSelectedEnvironment(options = {}) {
+  if (!state.selectedEnvironment.environmentName && !state.selectedEnvironment.orgUrl) {
+    return false;
+  }
+  const exact = state.environments.find((environment) => environment.name === state.selectedEnvironment.environmentName);
+  if (exact) {
+    return false;
+  }
+  const byUrl = state.selectedEnvironment.orgUrl
+    ? state.environments.find((environment) => environment.orgUrl === state.selectedEnvironment.orgUrl)
+    : null;
+  if (!byUrl || byUrl.name === state.selectedEnvironment.environmentName) {
+    return false;
+  }
+  await selectEnvironment(byUrl, {
+    loadBusinessUnits: false,
+    silent: options.silentAutoSelect,
+  });
+  renderEnvironmentPicker();
+  renderEnvironmentList();
+  return true;
 }
 
 async function loadRoles() {
@@ -686,6 +791,8 @@ async function createRole(event) {
       },
     });
     form.reset();
+    el.createRoleForm.hidden = true;
+    el.toggleCreateRoleButton.textContent = 'Create role';
     renderBusinessUnits();
     toast(`Created ${role.name}`);
     await loadRoles();
@@ -703,9 +810,17 @@ async function loadBusinessUnits() {
 }
 
 function renderBusinessUnits() {
-  const selected = el.createRoleBusinessUnit.value;
-  el.createRoleBusinessUnit.innerHTML = [
-    '<option value="">Current user\'s business unit</option>',
+  renderBusinessUnitSelect(el.createRoleBusinessUnit, 'Current user\'s business unit');
+  renderBusinessUnitSelect(el.teamBusinessUnit, 'Current user\'s business unit');
+}
+
+function renderBusinessUnitSelect(select, placeholder) {
+  if (!select) {
+    return;
+  }
+  const selected = select.value;
+  select.innerHTML = [
+    `<option value="">${escapeHtml(placeholder)}</option>`,
     ...state.businessUnits.map((unit) => `
       <option value="${escapeAttr(unit.businessunitid)}"${unit.businessunitid === selected ? ' selected' : ''}>
         ${escapeHtml(unit.name)}
@@ -718,6 +833,189 @@ function clearBusinessUnits() {
   state.businessUnits = [];
   state.businessUnitsLoaded = false;
   renderBusinessUnits();
+}
+
+function toggleCreateRoleForm() {
+  el.createRoleForm.hidden = !el.createRoleForm.hidden;
+  el.toggleCreateRoleButton.textContent = el.createRoleForm.hidden ? 'Create role' : 'Hide create role';
+}
+
+function toggleUsersTeamsCreatePanel(panel) {
+  const showUser = panel === 'user' && el.createUserPanel.hidden;
+  const showTeam = panel === 'team' && el.createTeamPanel.hidden;
+  el.createUserPanel.hidden = !showUser;
+  el.createTeamPanel.hidden = !showTeam;
+  el.toggleCreateUserButton.textContent = showUser ? 'Hide add user' : 'Add user';
+  el.toggleCreateTeamButton.textContent = showTeam ? 'Hide create team' : 'Create team';
+}
+
+async function loadUsersAndTeams() {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  const [users, teams] = await Promise.all([
+    api('/api/users'),
+    api('/api/teams'),
+  ]);
+  state.users = users || [];
+  state.teams = teams || [];
+  renderUsers();
+  renderTeams();
+  renderTeamMembersPanel();
+  if (!state.businessUnitsLoaded) {
+    await loadBusinessUnits().catch((error) => {
+      console.error(error);
+    });
+  }
+  toast('Users and teams loaded.');
+}
+
+function renderUsers() {
+  const query = el.userSearch.value.trim().toLowerCase();
+  const users = state.users.filter((user) => {
+    const text = `${user.fullname || ''} ${user.internalemailaddress || ''} ${user.domainname || ''} ${user.businessUnitName || ''}`.toLowerCase();
+    return !query || text.includes(query);
+  });
+  if (!users.length) {
+    el.usersList.innerHTML = empty(state.users.length ? 'No users match the filter.' : 'Load users and teams.');
+    renderTeamMembersPanel();
+    return;
+  }
+  el.usersList.innerHTML = users.map((user) => `
+    <div class="list-item user-row" data-id="${escapeAttr(user.systemuserid)}">
+      <span class="role-name">${escapeHtml(user.fullname || user.internalemailaddress || user.domainname || user.systemuserid)}</span>
+      <span class="role-id">${escapeHtml(user.internalemailaddress || user.domainname || '')}</span>
+      <span class="role-id">${user.isdisabled ? 'Disabled' : 'Enabled'} | ${escapeHtml(user.businessUnitName || 'No business unit')}</span>
+      <span class="role-id">${escapeHtml(user.azureactivedirectoryobjectid || '')}</span>
+    </div>
+  `).join('');
+  renderTeamMembersPanel();
+}
+
+function renderTeams() {
+  const query = el.teamSearch.value.trim().toLowerCase();
+  const teams = state.teams.filter((team) => {
+    const text = `${team.name || ''} ${team.emailaddress || ''} ${team.teamTypeLabel || ''} ${team.businessUnitName || ''}`.toLowerCase();
+    return !query || text.includes(query);
+  });
+  if (!teams.length) {
+    el.teamsList.innerHTML = empty(state.teams.length ? 'No teams match the filter.' : 'Load users and teams.');
+    return;
+  }
+  el.teamsList.innerHTML = teams.map((team) => `
+    <button class="list-item team-row${team.teamid === state.selectedTeamId ? ' selected' : ''}" type="button" data-id="${escapeAttr(team.teamid)}">
+      <span class="role-name">${escapeHtml(team.name || team.teamid)}</span>
+      <span class="role-id">${escapeHtml(team.teamTypeLabel || '')}${team.emailaddress ? ` | ${escapeHtml(team.emailaddress)}` : ''}</span>
+      <span class="role-id">${escapeHtml(team.businessUnitName || 'No business unit')}</span>
+      <span class="role-id">${escapeHtml(team.azureactivedirectoryobjectid || '')}</span>
+    </button>
+  `).join('');
+}
+
+async function syncEnvironmentUser(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  await withBusy(button, async () => {
+    const formData = new FormData(form);
+    const result = await api('/api/users/sync', {
+      method: 'POST',
+      body: {
+        principalObjectId: formData.get('principalObjectId'),
+      },
+    });
+    form.reset();
+    toggleUsersTeamsCreatePanel('');
+    toast(result.message || 'User sync requested.');
+    await refreshUsers();
+  }, 'Adding user');
+}
+
+async function createEnvironmentTeam(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button');
+  await withBusy(button, async () => {
+    const formData = new FormData(form);
+    const team = await api('/api/teams', {
+      method: 'POST',
+      body: {
+        name: formData.get('name'),
+        teamType: formData.get('teamType'),
+        businessUnitId: formData.get('businessUnitId'),
+        azureActiveDirectoryObjectId: formData.get('azureActiveDirectoryObjectId'),
+        emailaddress: formData.get('emailaddress'),
+        description: formData.get('description'),
+      },
+    });
+    form.reset();
+    renderBusinessUnits();
+    toggleUsersTeamsCreatePanel('');
+    toast(`Created ${team.name || 'team'}.`);
+    await refreshTeams();
+    state.selectedTeamId = team.teamid || state.selectedTeamId;
+    renderTeams();
+    renderTeamMembersPanel();
+  }, 'Creating team');
+}
+
+async function refreshUsers() {
+  state.users = await api('/api/users');
+  renderUsers();
+}
+
+async function refreshTeams() {
+  state.teams = await api('/api/teams');
+  renderTeams();
+}
+
+function selectTeam(teamId) {
+  state.selectedTeamId = teamId;
+  renderTeams();
+  renderTeamMembersPanel();
+}
+
+function renderTeamMembersPanel() {
+  const team = state.teams.find((item) => item.teamid === state.selectedTeamId);
+  if (!team) {
+    el.teamMembersPanel.innerHTML = '<p class="muted">Select a team to add loaded environment users as members.</p>';
+    return;
+  }
+  const availableUsers = state.users.filter((user) => !user.isdisabled);
+  el.teamMembersPanel.innerHTML = `
+    <h4>Add users to ${escapeHtml(team.name || 'team')}</h4>
+    <label>
+      Loaded users
+      <select id="teamMemberUserSelect" multiple size="6">
+        ${availableUsers.map((user) => `
+          <option value="${escapeAttr(user.systemuserid)}">
+            ${escapeHtml(user.fullname || user.internalemailaddress || user.domainname || user.systemuserid)}
+          </option>
+        `).join('')}
+      </select>
+    </label>
+    <div class="actions">
+      <button type="button" data-team-action="add-members">Add selected users</button>
+    </div>
+  `;
+}
+
+async function handleTeamAction(action, button) {
+  if (action !== 'add-members') {
+    return;
+  }
+  if (!state.selectedTeamId) {
+    throw new Error('Select a team first.');
+  }
+  await withBusy(button, async () => {
+    const select = document.querySelector('#teamMemberUserSelect');
+    const userIds = [...(select?.selectedOptions || [])].map((option) => option.value);
+    const result = await api(`/api/teams/${encodeURIComponent(state.selectedTeamId)}/members`, {
+      method: 'POST',
+      body: { userIds },
+    });
+    toast(`Added ${result.added} user${result.added === 1 ? '' : 's'} to team.`);
+  }, 'Adding');
 }
 
 function selectRole(button) {
@@ -958,12 +1256,440 @@ async function loadSolutionComponents() {
   }
 
   el.solutionComponents.innerHTML = components.map((component) => `
-    <div class="component-row">
+    <div class="component-row${component.manageable ? ' manageable' : ''}">
       <span class="component-type">${escapeHtml(component.typeLabel)}</span>
       <span class="component-name">${escapeHtml(component.displayName || component.objectid)}</span>
-      <span class="role-id">${escapeHtml(component.logicalName || component.objectid || '')}</span>
+      <span class="role-id">${escapeHtml(component.recordLogicalName || component.logicalName || component.objectid || '')}</span>
+      <span class="component-actions">
+        ${component.manageable ? `<button class="secondary" type="button" data-component-action="manage" data-type="${escapeAttr(component.componenttype)}" data-id="${escapeAttr(component.objectid)}">Manage</button>` : ''}
+      </span>
     </div>
   `).join('');
+}
+
+async function openComponentManager(componentType, objectId) {
+  if (!componentType || !objectId) {
+    throw new Error('Component details are missing.');
+  }
+  el.componentModal.hidden = false;
+  el.componentModalTitle.textContent = 'Loading component';
+  el.componentModalMeta.textContent = '';
+  el.componentModalBody.innerHTML = empty('Loading component actions...');
+  const details = await api(`/api/components/${encodeURIComponent(componentType)}/${encodeURIComponent(objectId)}/manage`);
+  state.selectedComponent = { componentType, objectId, details };
+  state.componentPrincipals = [];
+  renderComponentManager(details);
+}
+
+function closeComponentManager() {
+  el.componentModal.hidden = true;
+  state.selectedComponent = null;
+  state.componentPrincipals = [];
+  el.componentModalBody.innerHTML = '';
+}
+
+function renderComponentManager(details) {
+  el.componentModalTitle.textContent = details.displayName || 'Component';
+  el.componentModalMeta.textContent = componentKindLabel(details);
+  if (details.kind === 'environmentVariable') {
+    renderEnvironmentVariableManager(details);
+  } else if (details.kind === 'connectionReference') {
+    renderConnectionReferenceManager(details);
+  } else if (details.kind === 'workflow') {
+    renderWorkflowManager(details);
+  } else if (['canvasApp', 'codeApp', 'bot', 'botComponent'].includes(details.kind)) {
+    renderShareableComponentManager(details);
+  } else {
+    el.componentModalBody.innerHTML = `<div class="guide"><p>${escapeHtml(details.message || 'No supported action is available.')}</p></div>`;
+  }
+}
+
+function renderEnvironmentVariableManager(details) {
+  el.componentModalBody.innerHTML = `
+    <div class="component-form">
+      <label>
+        Schema name
+        <input value="${escapeAttr(details.schemaName || '')}" disabled />
+      </label>
+      <label>
+        Current value
+        <textarea id="componentEnvValue">${escapeHtml(details.valueId ? details.value : details.defaultValue || '')}</textarea>
+      </label>
+      <div class="component-summary">
+        <span>Type: ${escapeHtml(details.type || 'string')}</span>
+        <span>Source: ${escapeHtml(details.source || '')}</span>
+      </div>
+      ${details.defaultValue ? `<div class="guide"><p>Default: ${escapeHtml(details.defaultValue)}</p></div>` : ''}
+      ${renderNotes(details.notes)}
+      <div class="actions">
+        <button type="button" data-modal-action="save-env-var">Save value</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderConnectionReferenceManager(details) {
+  const selectedId = details.connectionId || '';
+  const connections = details.connections || [];
+  const options = connections.length
+    ? connections.map((connection) => `
+        <option value="${escapeAttr(connection.connectionId)}"${connection.connectionId === selectedId ? ' selected' : ''}>
+          ${escapeHtml(connection.displayName || connection.connectionId)}
+        </option>
+      `).join('')
+    : '<option value="">No matching connections found</option>';
+  const createName = `${details.displayName || details.logicalName || 'Connection'} connection`;
+  el.componentModalBody.innerHTML = `
+    <div class="component-form">
+      <label>
+        Logical name
+        <input value="${escapeAttr(details.logicalName || '')}" disabled />
+      </label>
+      <label>
+        Connection
+        <select id="componentConnectionSelect">${options}</select>
+      </label>
+      <div class="component-summary">
+        <span>Connector: ${escapeHtml(details.connectorId || '')}</span>
+        <span>Current: ${escapeHtml(details.connectionId || 'Not set')}</span>
+        <span>Matching connections: ${escapeHtml(details.matchingConnectionCount ?? connections.length)} of ${escapeHtml(details.totalConnectionCount ?? connections.length)}</span>
+      </div>
+      <div class="role-id">Match keys: ${escapeHtml((details.connectorKeys || []).join(' | ') || 'none')}</div>
+      <div class="role-id">Current connection found: ${details.currentConnectionFound ? 'yes' : 'no'}</div>
+      ${connections.length ? '' : '<div class="guide"><p>No existing connections match this connection reference connector. Create a connection, then refresh or switch to the new matching connection.</p></div>'}
+      ${connections.length ? '' : renderConnectionDebug(details.connectionDebug || [])}
+      <label>
+        New connection name
+        <input id="componentConnectionNameInput" value="${escapeAttr(createName)}" />
+      </label>
+      <div id="componentConnectionStatus" class="guide" hidden></div>
+      ${renderNotes(details.notes)}
+      <div class="actions">
+        <button type="button" data-modal-action="save-connection-ref"${connections.length ? '' : ' disabled'}>Switch connection</button>
+        <button class="secondary" type="button" data-modal-action="create-connection-ref">Create connection</button>
+        <button class="secondary" type="button" data-modal-action="refresh-component">Refresh</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderConnectionDebug(debugRows) {
+  if (!debugRows.length) {
+    return '';
+  }
+  return `
+    <details class="guide">
+      <summary>Connection debug sample</summary>
+      ${debugRows.map((row) => `
+        <p>${escapeHtml(row.displayName || row.name || row.id || 'Connection')} | ${escapeHtml(row.connectorId || 'no connectorId')} | ${escapeHtml((row.keys || []).slice(0, 5).join(' / ') || 'no keys')}</p>
+      `).join('')}
+    </details>
+  `;
+}
+
+function renderWorkflowManager(details) {
+  el.componentModalBody.innerHTML = `
+    <div class="component-form">
+      <div class="component-summary">
+        <span>State: ${escapeHtml(details.stateLabel || '')}</span>
+        <span>${details.isManual ? 'Manual trigger detected' : 'No manual trigger detected'}</span>
+      </div>
+      <div class="actions">
+        <button type="button" data-modal-action="${details.stateCode === 1 ? 'turn-flow-off' : 'turn-flow-on'}">
+          Turn ${details.stateCode === 1 ? 'off' : 'on'}
+        </button>
+      </div>
+      ${renderSharePanel(details)}
+      ${details.isManual ? renderFlowConnectionModePanel(details) : ''}
+      ${renderNotes([...(details.notes || []), ...(details.unsupported || [])])}
+    </div>
+  `;
+}
+
+function renderShareableComponentManager(details) {
+  el.componentModalBody.innerHTML = `
+    <div class="component-form">
+      ${renderSharePanel(details)}
+      ${renderNotes(details.notes)}
+    </div>
+  `;
+}
+
+function renderSharePanel(details) {
+  if (!details.share?.supported) {
+    return '<div class="guide"><p>Sharing is not available for this component.</p></div>';
+  }
+  return `
+    <div class="share-panel">
+      <h3>Share</h3>
+      <div class="share-grid">
+        <label>
+          Role
+          <select id="componentShareRole">
+            <option value="user">User</option>
+            <option value="coowner">Co-owner</option>
+          </select>
+        </label>
+        <label>
+          Find users or teams
+          <input id="componentPrincipalSearch" placeholder="Search environment users and teams" autocomplete="off" />
+        </label>
+      </div>
+      <div id="componentPrincipalResults" class="principal-results"></div>
+      <div id="componentPrincipalChips" class="principal-chips">${renderPrincipalChips()}</div>
+      <div class="actions">
+        <button type="button" data-modal-action="share-component">Share</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderFlowConnectionModePanel(details) {
+  if (!details.connectionReferences?.length) {
+    return '<div class="guide"><p>No connection references were found in the flow definition.</p></div>';
+  }
+  return `
+    <div class="share-panel">
+      <h3>Manual trigger connections</h3>
+      <div class="readonly-list">
+        ${details.connectionReferences.map((connection) => `
+          <div class="readonly-row">
+            <span class="role-name">${escapeHtml(connection.displayName || connection.logicalName)}</span>
+            <span class="role-id">${escapeHtml(connection.logicalName || connection.key)}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderNotes(notes = []) {
+  if (!notes.length) {
+    return '';
+  }
+  return `
+    <div class="guide">
+      ${notes.map((note) => `<p>${escapeHtml(note)}</p>`).join('')}
+    </div>
+  `;
+}
+
+function componentKindLabel(details) {
+  return {
+    environmentVariable: 'Environment variable',
+    connectionReference: 'Connection reference',
+    workflow: 'Flow',
+    canvasApp: 'Canvas app',
+    codeApp: 'Code app',
+    bot: 'Agent',
+    botComponent: 'Agent component',
+  }[details.kind] || details.typeLabel || 'Component';
+}
+
+let principalSearchTimer = 0;
+
+function handleComponentModalInput(event) {
+  if (event.target.id !== 'componentPrincipalSearch') {
+    return;
+  }
+  clearTimeout(principalSearchTimer);
+  principalSearchTimer = setTimeout(() => {
+    searchPrincipals(event.target.value).catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+  }, 220);
+}
+
+async function handleComponentModalAction(action, target) {
+  if (!state.selectedComponent) {
+    return;
+  }
+  if (action === 'refresh-component') {
+    await refreshComponentManager();
+  } else if (action === 'save-env-var') {
+    await saveComponentEnvironmentVariable(target);
+  } else if (action === 'save-connection-ref') {
+    await saveComponentConnectionReference(target);
+  } else if (action === 'create-connection-ref') {
+    await createComponentConnection(target);
+  } else if (action === 'turn-flow-on' || action === 'turn-flow-off') {
+    await saveComponentWorkflowState(action === 'turn-flow-on' ? 'on' : 'off', target);
+  } else if (action === 'select-principal') {
+    addSelectedPrincipal(target);
+  } else if (action === 'remove-principal') {
+    removeSelectedPrincipal(target.dataset.id || '', target.dataset.type || '');
+  } else if (action === 'share-component') {
+    await shareSelectedComponent(target);
+  }
+}
+
+async function refreshComponentManager() {
+  const { componentType, objectId } = state.selectedComponent;
+  const details = await api(`/api/components/${encodeURIComponent(componentType)}/${encodeURIComponent(objectId)}/manage`);
+  state.selectedComponent.details = details;
+  renderComponentManager(details);
+  toast('Component refreshed.');
+}
+
+async function saveComponentEnvironmentVariable(target) {
+  const button = target.closest('button') || target;
+  await withBusy(button, async () => {
+    const value = document.querySelector('#componentEnvValue')?.value || '';
+    const details = await api(`/api/environment-variables/${encodeURIComponent(state.selectedComponent.details.objectId)}/value`, {
+      method: 'POST',
+      body: { value },
+    });
+    state.selectedComponent.details = details;
+    renderComponentManager(details);
+    toast('Environment variable saved.');
+  }, 'Saving');
+}
+
+async function saveComponentConnectionReference(target) {
+  const button = target.closest('button') || target;
+  await withBusy(button, async () => {
+    const connectionId = document.querySelector('#componentConnectionSelect')?.value || '';
+    if (!connectionId) {
+      throw new Error('Choose a connection first.');
+    }
+    const details = await api(`/api/connection-references/${encodeURIComponent(state.selectedComponent.details.objectId)}/connection`, {
+      method: 'POST',
+      body: { connectionId },
+    });
+    state.selectedComponent.details = details;
+    renderComponentManager(details);
+    toast('Connection reference updated.');
+  }, 'Saving');
+}
+
+async function createComponentConnection(target) {
+  const button = target.closest('button') || target;
+  await withBusy(button, async () => {
+    setConnectionCreationStatus('Creating connection...');
+    const displayName = document.querySelector('#componentConnectionNameInput')?.value || '';
+    const result = await api(`/api/connection-references/${encodeURIComponent(state.selectedComponent.details.objectId)}/connections`, {
+      method: 'POST',
+      body: {
+        displayName,
+      },
+    });
+    const details = result.details || await api(`/api/components/${encodeURIComponent(state.selectedComponent.componentType)}/${encodeURIComponent(state.selectedComponent.objectId)}/manage`);
+    state.selectedComponent.details = details;
+    renderComponentManager(details);
+    const createdName = result.connection?.displayName || result.connection?.name || result.connection?.id || result.requestedDisplayName || displayName || 'connection';
+    const message = result.connection?.status === 'created'
+      ? `Connection created: ${createdName}. Matching connections found: ${details.matchingConnectionCount ?? details.connections?.length ?? 0}.`
+      : `Connection flow started for ${createdName}. Complete the browser flow, then refresh this panel.`;
+    setConnectionCreationStatus(message);
+    toast(result.connection?.status === 'created' ? 'Connection created.' : 'Connection flow started.');
+  }, 'Creating connection');
+}
+
+function setConnectionCreationStatus(message) {
+  const status = document.querySelector('#componentConnectionStatus');
+  if (!status) {
+    return;
+  }
+  status.hidden = !message;
+  status.innerHTML = message ? `<p>${escapeHtml(message)}</p>` : '';
+}
+
+async function saveComponentWorkflowState(stateValue, target) {
+  const button = target.closest('button') || target;
+  await withBusy(button, async () => {
+    const details = await api(`/api/workflows/${encodeURIComponent(state.selectedComponent.details.objectId)}/state`, {
+      method: 'POST',
+      body: { state: stateValue },
+    });
+    state.selectedComponent.details = details;
+    renderComponentManager(details);
+    toast(`Flow turned ${stateValue}.`);
+  }, stateValue === 'on' ? 'Turning on' : 'Turning off');
+}
+
+async function searchPrincipals(query) {
+  const resultsEl = document.querySelector('#componentPrincipalResults');
+  if (!resultsEl) {
+    return;
+  }
+  const value = String(query || '').trim();
+  if (value.length < 2) {
+    resultsEl.innerHTML = '<div class="role-id">Type at least 2 characters.</div>';
+    return;
+  }
+  resultsEl.innerHTML = '<div class="role-id">Searching...</div>';
+  const principals = await api(`/api/principals?q=${encodeURIComponent(value)}`, { quiet: true });
+  if (!principals.length) {
+    resultsEl.innerHTML = '<div class="role-id">No users or teams found.</div>';
+    return;
+  }
+  resultsEl.innerHTML = principals.map((principal) => `
+    <button class="principal-result" type="button" data-modal-action="select-principal" data-id="${escapeAttr(principal.id)}" data-type="${escapeAttr(principal.type)}" data-label="${escapeAttr(principal.label)}" data-detail="${escapeAttr(principal.detail || '')}">
+      <span class="role-name">${escapeHtml(principal.label)}</span>
+      <span class="role-id">${escapeHtml(principal.type === 'team' ? 'Team' : 'User')}${principal.detail ? ` | ${escapeHtml(principal.detail)}` : ''}</span>
+    </button>
+  `).join('');
+}
+
+function addSelectedPrincipal(target) {
+  const id = target.dataset.id || '';
+  const type = target.dataset.type || '';
+  if (!id || !type || state.componentPrincipals.some((principal) => principal.id === id && principal.type === type)) {
+    return;
+  }
+  state.componentPrincipals.push({
+    id,
+    type,
+    label: target.dataset.label || id,
+    detail: target.dataset.detail || '',
+  });
+  renderSelectedPrincipals();
+}
+
+function removeSelectedPrincipal(id, type) {
+  state.componentPrincipals = state.componentPrincipals.filter((principal) => principal.id !== id || principal.type !== type);
+  renderSelectedPrincipals();
+}
+
+function renderSelectedPrincipals() {
+  const chips = document.querySelector('#componentPrincipalChips');
+  if (chips) {
+    chips.innerHTML = renderPrincipalChips();
+  }
+}
+
+function renderPrincipalChips() {
+  if (!state.componentPrincipals.length) {
+    return '<span class="role-id">No users or teams selected.</span>';
+  }
+  return state.componentPrincipals.map((principal) => `
+    <span class="principal-chip">
+      ${escapeHtml(principal.label)}
+      <button type="button" data-modal-action="remove-principal" data-id="${escapeAttr(principal.id)}" data-type="${escapeAttr(principal.type)}" aria-label="Remove ${escapeAttr(principal.label)}">x</button>
+    </span>
+  `).join('');
+}
+
+async function shareSelectedComponent(target) {
+  const button = target.closest('button') || target;
+  await withBusy(button, async () => {
+    if (!state.componentPrincipals.length) {
+      throw new Error('Choose at least one user or team.');
+    }
+    const role = document.querySelector('#componentShareRole')?.value || 'user';
+    const { componentType, objectId } = state.selectedComponent;
+    const result = await api(`/api/components/${encodeURIComponent(componentType)}/${encodeURIComponent(objectId)}/share`, {
+      method: 'POST',
+      body: {
+        role,
+        principals: state.componentPrincipals.map(({ id, type }) => ({ id, type })),
+      },
+    });
+    toast(`Shared with ${result.shared} principal${result.shared === 1 ? '' : 's'}.`);
+    state.componentPrincipals = [];
+    renderSelectedPrincipals();
+  }, 'Sharing');
 }
 
 async function exportSolutionZip() {

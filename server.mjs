@@ -7,14 +7,27 @@ import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
+import {
+  createConnectionAsync,
+  getConnectorAsync,
+  initializePlayerServices,
+  isSsoOnlyConnector,
+  listConnectionsAsync,
+  updateEnvironmentName,
+} from '@microsoft/power-apps-actions';
+import { createMaafConnectionUrl } from '@microsoft/power-apps-common/services';
 import { NodeMsalAuthenticationProvider } from '@microsoft/power-apps-cli/dist/Authentication/NodeMsalAuthenticationProvider.js';
+import { initializeCliSettings, setCliLogger } from '@microsoft/power-apps-cli/dist/CliSettings.js';
 import { CliHttpClient } from '@microsoft/power-apps-cli/dist/HttpClient/CliHttpClient.js';
+import open from 'open';
 
 const PORT = Number(process.env.SECURITY_ROLES_PORT || process.env.PORT || 4280);
 const REGION = process.env.PP_REGION || 'prod';
 const SERVICE_RESOURCE = process.env.PP_SERVICE_RESOURCE || 'https://service.powerapps.com/';
 const POWER_PLATFORM_RESOURCE = process.env.PP_API_RESOURCE || 'https://api.powerplatform.com';
 const PUBLIC_DIR = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
+const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
+const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
 
 const DEPTHS = new Set(['None', 'Basic', 'Local', 'Deep', 'Global', 'RecordFilter']);
 const CSV_SCOPE_TO_DEPTH = {
@@ -84,6 +97,25 @@ const SOLUTION_COMPONENT_TYPES = {
   380: 'Environment Variable Definition',
   381: 'Environment Variable Value',
 };
+const MANAGEABLE_LOGICAL_NAMES = new Set([
+  'environmentvariabledefinition',
+  'environmentvariablevalue',
+  'connectionreference',
+  'workflow',
+  'canvasapp',
+  'bot',
+  'botcomponent',
+]);
+const SHAREABLE_COMPONENTS = {
+  workflow: { collection: 'workflows', idName: 'workflowid', odataType: 'Microsoft.Dynamics.CRM.workflow' },
+  canvasapp: { collection: 'canvasapps', idName: 'canvasappid', odataType: 'Microsoft.Dynamics.CRM.canvasapp' },
+  bot: { collection: 'bots', idName: 'botid', odataType: 'Microsoft.Dynamics.CRM.bot' },
+  botcomponent: { collection: 'botcomponents', idName: 'botcomponentid', odataType: 'Microsoft.Dynamics.CRM.botcomponent' },
+};
+const SHARE_ROLE_ACCESS = {
+  user: 'ReadAccess',
+  coowner: 'ReadAccess, WriteAccess, ShareAccess',
+};
 const selected = {
   environmentName: process.env.PP_ENVIRONMENT_ID || '',
   orgUrl: normalizeOrgUrl(process.env.PP_ORG_URL || ''),
@@ -96,12 +128,44 @@ const xmlParser = new XMLParser({
   attributeNamePrefix: '',
   textNodeName: 'text',
 });
+const logger = {
+  trackActivityEvent() {},
+  trackErrorEvent(eventName, eventData) {
+    console.error(eventName, eventData || '');
+  },
+  trackScenario() {
+    return {
+      scenarioId: randomUUID(),
+      complete() {},
+      failure() {},
+      completeWithError() {},
+    };
+  },
+  stringifyError(error) {
+    return error instanceof Error ? error.message : String(error);
+  },
+};
 
 const authProvider = new NodeMsalAuthenticationProvider();
 await authProvider.initAsync(REGION);
+await initializeCliSettings({
+  source: 'standalone',
+  interactive: isBrowserConnectionEnabled(),
+});
+setCliLogger(logger);
 const httpClient = new CliHttpClient({
   getAccessTokenForResource: getAccessTokenForSelectedAccount,
   getUserTenantId: () => authProvider.getUserTenantId(),
+});
+const actionAuthProvider = {
+  getAccessTokenForResource: getAccessTokenForSelectedAccount,
+};
+initializePlayerServices({
+  logger,
+  authProvider: actionAuthProvider,
+  httpClient,
+  region: REGION,
+  environmentName: selected.environmentName,
 });
 
 const server = http.createServer(async (req, res) => {
@@ -273,6 +337,40 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/users') {
+    requireOrgUrl();
+    sendJson(res, 200, await listEnvironmentUsers(url.searchParams.get('q') || ''));
+    return;
+  }
+
+  if (route === 'POST /api/users/sync') {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await syncEnvironmentUser(requireString(body.principalObjectId, 'principalObjectId')));
+    return;
+  }
+
+  if (route === 'GET /api/teams') {
+    requireOrgUrl();
+    sendJson(res, 200, await listEnvironmentTeams(url.searchParams.get('q') || ''));
+    return;
+  }
+
+  if (route === 'POST /api/teams') {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 201, await createEnvironmentTeam(body));
+    return;
+  }
+
+  const teamMembersMatch = url.pathname.match(/^\/api\/teams\/([0-9a-fA-F-]+)\/members$/);
+  if (req.method === 'POST' && teamMembersMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await addTeamMembers(teamMembersMatch[1], body.userIds || body.members || []));
+    return;
+  }
+
   if (route === 'POST /api/roles') {
     requireOrgUrl();
     const body = await readJson(req);
@@ -352,6 +450,59 @@ async function handleApi(req, res) {
   if (req.method === 'GET' && componentsMatch) {
     requireOrgUrl();
     sendJson(res, 200, await listSolutionComponents(componentsMatch[1]));
+    return;
+  }
+
+  if (route === 'GET /api/principals') {
+    requireOrgUrl();
+    sendJson(res, 200, await listEnvironmentPrincipals(url.searchParams.get('q') || ''));
+    return;
+  }
+
+  const componentManageMatch = url.pathname.match(/^\/api\/components\/(\d+)\/([0-9a-fA-F-]+)\/manage$/);
+  if (req.method === 'GET' && componentManageMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await getComponentManagementDetails(Number(componentManageMatch[1]), componentManageMatch[2]));
+    return;
+  }
+
+  const envVarSaveMatch = url.pathname.match(/^\/api\/environment-variables\/([0-9a-fA-F-]+)\/value$/);
+  if (req.method === 'POST' && envVarSaveMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await saveEnvironmentVariableValue(envVarSaveMatch[1], String(body.value ?? '')));
+    return;
+  }
+
+  const connectionReferenceSaveMatch = url.pathname.match(/^\/api\/connection-references\/([0-9a-fA-F-]+)\/connection$/);
+  if (req.method === 'POST' && connectionReferenceSaveMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await saveConnectionReferenceConnection(connectionReferenceSaveMatch[1], requireString(body.connectionId, 'connectionId')));
+    return;
+  }
+
+  const connectionReferenceCreateMatch = url.pathname.match(/^\/api\/connection-references\/([0-9a-fA-F-]+)\/connections$/);
+  if (req.method === 'POST' && connectionReferenceCreateMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 201, await createConnectionForReference(connectionReferenceCreateMatch[1], body.displayName));
+    return;
+  }
+
+  const workflowStateMatch = url.pathname.match(/^\/api\/workflows\/([0-9a-fA-F-]+)\/state$/);
+  if (req.method === 'POST' && workflowStateMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await saveWorkflowState(workflowStateMatch[1], body.state));
+    return;
+  }
+
+  const shareComponentMatch = url.pathname.match(/^\/api\/components\/(\d+)\/([0-9a-fA-F-]+)\/share$/);
+  if (req.method === 'POST' && shareComponentMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await shareComponent(Number(shareComponentMatch[1]), shareComponentMatch[2], body));
     return;
   }
 
@@ -858,6 +1009,7 @@ function environmentFromBody(body, fallback = {}) {
 function setSelectedEnvironment(environment) {
   selected.environmentName = String(environment.environmentName || '').trim();
   selected.orgUrl = normalizeOrgUrl(environment.orgUrl || '');
+  updateEnvironmentName(selected.environmentName);
 }
 
 function saveSelectedEnvironmentForAccount() {
@@ -937,13 +1089,17 @@ async function enrichSolutionComponent(component) {
   const componentType = Number(component.componenttype);
   const typeLabel = SOLUTION_COMPONENT_TYPES[componentType] || component[`componenttype@OData.Community.Display.V1.FormattedValue`] || `Type ${componentType}`;
   const display = await lookupComponentDisplayName(componentType, component.objectid);
+  const logicalName = display.logicalName || '';
+  const effectiveTypeLabel = display.typeLabel || typeLabel;
   return {
     solutioncomponentid: component.solutioncomponentid,
     componenttype: componentType,
-    typeLabel: display.typeLabel || typeLabel,
+    typeLabel: display.canvasAppTypeLabel || effectiveTypeLabel,
     objectid: component.objectid,
     displayName: display.displayName || component.objectid,
-    logicalName: display.logicalName || '',
+    logicalName,
+    recordLogicalName: display.recordLogicalName || '',
+    manageable: isManageableComponent(componentType, logicalName),
   };
 }
 
@@ -983,12 +1139,15 @@ function componentDisplayAttempts(componentType, objectId) {
     1: [{ path: `EntityDefinitions(${id})?$select=LogicalName,SchemaName,DisplayName`, map: entityMetadataMap }],
     2: [{ path: `entities?$filter=objecttypecode eq ${componentType}`, map: (data) => entityBackedComponentMap(data, id) }],
     10: [{ path: `savedqueries(${id})?$select=name,returnedtypecode`, map: namedRowMap('name') }],
-    29: [{ path: `workflows(${id})?$select=name,uniquename`, map: namedRowMap('name', 'uniquename') }],
+    29: [{ path: `workflows(${id})?$select=name,uniquename`, map: (data) => ({ ...namedRowMap('name', 'uniquename')(data), logicalName: 'workflow' }) }],
+    300: [{ path: `canvasapps(${id})?$select=name,displayname,canvasapptype`, map: (data) => ({ displayName: pickDisplayName(data), logicalName: 'canvasapp', canvasAppTypeLabel: Number(data.canvasapptype) === 4 ? 'Code App' : 'Canvas App' }) }],
     60: [{ path: `systemforms(${id})?$select=name,objecttypecode,type`, map: namedRowMap('name') }],
     61: [{ path: `webresourceset(${id})?$select=name,displayname`, map: namedRowMap('displayname', 'name') }],
     62: [{ path: `sitemaps(${id})?$select=sitemapname`, map: namedRowMap('sitemapname') }],
     91: [{ path: `pluginassemblies(${id})?$select=name`, map: namedRowMap('name') }],
     92: [{ path: `sdkmessageprocessingsteps(${id})?$select=name`, map: namedRowMap('name') }],
+    380: [{ path: `environmentvariabledefinitions(${id})?$select=schemaname,displayname`, map: namedRowMap('displayname', 'schemaname') }],
+    381: [{ path: `environmentvariablevalues(${id})?$select=schemaname,value,_environmentvariabledefinitionid_value`, map: namedRowMap('schemaname', 'value') }],
   }[componentType] || [
     { path: `entities?$filter=objecttypecode eq ${componentType}`, map: (data) => entityBackedComponentMap(data, id) },
   ];
@@ -1007,12 +1166,13 @@ async function entityBackedComponentMap(data, id) {
     row.logicalname ||
     row.entitysetname ||
     '';
+  const entityLogicalName = row.logicalname || row.name || row.entitysetname || '';
   const collection = row.collectionname || row.entitysetname || row.entitysetnameplural || '';
   if (!collection) {
     return {
       typeLabel,
       displayName: typeLabel,
-      logicalName: row.logicalname || row.name || row.entitysetname || '',
+      logicalName: entityLogicalName,
     };
   }
 
@@ -1021,13 +1181,14 @@ async function entityBackedComponentMap(data, id) {
     return {
       typeLabel,
       displayName: pickDisplayName(component) || typeLabel,
-      logicalName: pickLogicalName(component) || row.logicalname || row.name || row.entitysetname || '',
+      logicalName: entityLogicalName,
+      recordLogicalName: pickLogicalName(component),
     };
   } catch {
     return {
       typeLabel,
       displayName: typeLabel,
-      logicalName: row.logicalname || row.name || row.entitysetname || '',
+      logicalName: entityLogicalName,
     };
   }
 }
@@ -1065,6 +1226,618 @@ function pickLogicalName(row) {
     }
   }
   return '';
+}
+
+function isManageableComponent(componentType, logicalName) {
+  if ([29, 300, 380, 381].includes(Number(componentType))) {
+    return true;
+  }
+  return MANAGEABLE_LOGICAL_NAMES.has(String(logicalName || '').toLowerCase());
+}
+
+async function getComponentManagementDetails(componentType, objectId) {
+  const resolved = await resolveComponentRecord(componentType, objectId);
+  const logicalName = resolved.logicalName;
+  if (!isManageableComponent(componentType, logicalName)) {
+    return {
+      kind: 'unsupported',
+      objectId,
+      componentType,
+      displayName: resolved.displayName || objectId,
+      typeLabel: resolved.typeLabel || SOLUTION_COMPONENT_TYPES[componentType] || `Type ${componentType}`,
+      message: 'This component type does not expose a supported management action in PDAC yet.',
+    };
+  }
+
+  if (logicalName === 'environmentvariabledefinition' || componentType === 380) {
+    return getEnvironmentVariableDetails(objectId);
+  }
+
+  if (logicalName === 'environmentvariablevalue' || componentType === 381) {
+    const value = await dvGet(`environmentvariablevalues(${objectId})?$select=environmentvariablevalueid,value,_environmentvariabledefinitionid_value`);
+    const definitionId = normalizeGuid(value._environmentvariabledefinitionid_value);
+    return getEnvironmentVariableDetails(definitionId || objectId);
+  }
+
+  if (logicalName === 'connectionreference') {
+    return getConnectionReferenceDetails(objectId);
+  }
+
+  if (logicalName === 'workflow' || componentType === 29) {
+    return getWorkflowDetails(objectId);
+  }
+
+  if (logicalName === 'canvasapp' || componentType === 300) {
+    return getCanvasAppDetails(objectId);
+  }
+
+  if (logicalName === 'bot' || logicalName === 'botcomponent') {
+    return getBotDetails(objectId, logicalName, resolved);
+  }
+
+  return {
+    kind: 'unsupported',
+    objectId,
+    componentType,
+    displayName: resolved.displayName || objectId,
+    typeLabel: resolved.typeLabel || `Type ${componentType}`,
+    message: 'This component was recognized, but PDAC does not have a supported action for it yet.',
+  };
+}
+
+async function resolveComponentRecord(componentType, objectId) {
+  const known = {
+    29: { collection: 'workflows', logicalName: 'workflow', select: 'name,uniquename' },
+    300: { collection: 'canvasapps', logicalName: 'canvasapp', select: 'name,displayname,canvasapptype' },
+    380: { collection: 'environmentvariabledefinitions', logicalName: 'environmentvariabledefinition', select: 'schemaname,displayname' },
+    381: { collection: 'environmentvariablevalues', logicalName: 'environmentvariablevalue', select: 'schemaname,value' },
+  }[Number(componentType)];
+  if (known) {
+    const row = await dvGet(`${known.collection}(${objectId})?$select=${known.select}`);
+    return {
+      collection: known.collection,
+      logicalName: known.logicalName,
+      displayName: pickDisplayName(row) || pickLogicalName(row),
+      typeLabel: Number(componentType) === 300 && Number(row.canvasapptype) === 4 ? 'Code App' : SOLUTION_COMPONENT_TYPES[componentType],
+      row,
+    };
+  }
+
+  const entity = await resolveEntityForComponentType(componentType);
+  if (!entity.collection || !entity.logicalName) {
+    return { logicalName: '', displayName: '', typeLabel: SOLUTION_COMPONENT_TYPES[componentType] || `Type ${componentType}` };
+  }
+
+  const row = await dvGet(`${entity.collection}(${objectId})`);
+  return {
+    ...entity,
+    displayName: pickDisplayName(row) || entity.typeLabel,
+    row,
+  };
+}
+
+async function resolveEntityForComponentType(componentType) {
+  const data = await dvGet(`entities?$filter=objecttypecode eq ${Number(componentType)}`);
+  const row = Array.isArray(data?.value) ? data.value[0] : data;
+  if (!row) {
+    return {};
+  }
+  return {
+    logicalName: row.logicalname || row.name || row.entitysetname || '',
+    collection: row.collectionname || row.entitysetname || row.entitysetnameplural || '',
+    typeLabel: row.originallocalizedname || row.localizedname || row.displayname || row.name || row.logicalname || '',
+  };
+}
+
+async function getEnvironmentVariableDetails(definitionId) {
+  const data = await dvGet(`environmentvariabledefinitions(${definitionId})?$select=environmentvariabledefinitionid,schemaname,displayname,type,defaultvalue&$expand=environmentvariabledefinition_environmentvariablevalue($select=environmentvariablevalueid,value,schemaname,modifiedon)`);
+  const values = data.environmentvariabledefinition_environmentvariablevalue || [];
+  const current = values[0] || null;
+  return {
+    kind: 'environmentVariable',
+    objectId: data.environmentvariabledefinitionid,
+    displayName: data.displayname || data.schemaname,
+    schemaName: data.schemaname || '',
+    type: normalizeEnvironmentVariableType(data.type),
+    defaultValue: data.defaultvalue || '',
+    valueId: current?.environmentvariablevalueid || '',
+    value: current?.value || '',
+    source: current ? 'Current environment value' : 'Default value',
+    effectiveValue: current?.value || data.defaultvalue || '',
+    notes: ['Environment variable values are stored in Dataverse and can be read and updated with the Environment Variable Value table.'],
+  };
+}
+
+async function saveEnvironmentVariableValue(definitionId, value) {
+  const details = await getEnvironmentVariableDetails(definitionId);
+  if (details.valueId) {
+    await dvPatch(`environmentvariablevalues(${details.valueId})`, { value });
+  } else {
+    await dvPost('environmentvariablevalues', {
+      value,
+      schemaname: details.schemaName,
+      'EnvironmentVariableDefinitionId@odata.bind': `/environmentvariabledefinitions(${definitionId})`,
+    });
+  }
+  return getEnvironmentVariableDetails(definitionId);
+}
+
+async function getConnectionReferenceDetails(connectionReferenceId) {
+  const reference = await dvGet(`connectionreferences(${connectionReferenceId})?$select=connectionreferenceid,connectionreferencedisplayname,connectionreferencelogicalname,connectorid,connectionid`);
+  const allConnections = await listTargetConnections(selected.environmentName);
+  const connectorKeys = connectorMatchKeys(reference.connectorid);
+  const currentConnection = findConnectionById(allConnections, reference.connectionid);
+  const effectiveConnectorKeys = currentConnection
+    ? new Set([...connectorKeys, ...(currentConnection.connectorKeys || [])])
+    : connectorKeys;
+  const connections = allConnections.filter((connection) =>
+    hasConnectorMatch(effectiveConnectorKeys, connection.connectorKeys) ||
+    connectionLooksLikeConnector(connection, effectiveConnectorKeys) ||
+    connectionMatchesId(connection, reference.connectionid)
+  );
+  return {
+    kind: 'connectionReference',
+    objectId: reference.connectionreferenceid,
+    displayName: reference.connectionreferencedisplayname || reference.connectionreferencelogicalname || connectionReferenceId,
+    logicalName: reference.connectionreferencelogicalname || '',
+    connectorId: reference.connectorid || '',
+    connectorKeys: [...effectiveConnectorKeys],
+    connectionId: reference.connectionid || '',
+    connections,
+    totalConnectionCount: allConnections.length,
+    matchingConnectionCount: connections.length,
+    currentConnectionFound: Boolean(currentConnection),
+    connectionDebug: connectionDebugRows(allConnections, effectiveConnectorKeys),
+    createUrl: makeConnectionCreateUrl(selected.environmentName, reference.connectorid),
+    notes: ['PDAC only lists existing connections whose connector matches this connection reference. Create connection starts the Microsoft Power Apps connection flow, then refreshes this panel.'],
+  };
+}
+
+async function saveConnectionReferenceConnection(connectionReferenceId, connectionId) {
+  await dvPatch(`connectionreferences(${connectionReferenceId})`, { connectionid: connectionId });
+  return getConnectionReferenceDetails(connectionReferenceId);
+}
+
+async function createConnectionForReference(connectionReferenceId, displayName) {
+  const reference = await dvGet(`connectionreferences(${connectionReferenceId})?$select=connectionreferenceid,connectionreferencedisplayname,connectorid`);
+  const requestedDisplayName = String(displayName || reference.connectionreferencedisplayname || '').trim();
+  const connection = await createPowerPlatformConnection(
+    reference.connectorid,
+    requestedDisplayName,
+  );
+  return {
+    connection,
+    requestedDisplayName,
+    details: await getConnectionReferenceDetails(connectionReferenceId),
+  };
+}
+
+async function createPowerPlatformConnection(connectorIdRaw, displayName) {
+  const connectorId = normalizeActionConnectorId(requireString(connectorIdRaw, 'connectorId'));
+  const connector = await getConnectorAsync(connectorId, logger);
+  if (!connector) {
+    throw new HttpError(404, `Connector '${connectorId}' was not found.`);
+  }
+
+  if (isSsoOnlyConnector(connector)) {
+    try {
+      return await createConnectionAsync(actionContext({ connectorId, displayName }));
+    } catch (error) {
+      if (!isBrowserConnectionEnabled()) {
+        throw error;
+      }
+      console.warn(`Silent connection creation failed; falling back to browser flow: ${String(error)}`);
+    }
+  } else if (!isBrowserConnectionEnabled()) {
+    throw new HttpError(
+      400,
+      `Connector '${connectorId}' needs an interactive browser flow. Restart with POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION=true or create it in make.powerapps.com.`,
+    );
+  }
+
+  return startConnectionServer({
+    connectorName: connectorId,
+    environmentId: environmentUrlName(selected.environmentName),
+    region: REGION,
+  });
+}
+
+function startConnectionServer(config) {
+  const nonce = randomUUID();
+  return new Promise((resolve, reject) => {
+    const callbackServer = http.createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://localhost');
+      if (url.pathname !== '/callback') {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
+
+      if (url.searchParams.get('nonce') !== nonce) {
+        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<h2>Connection request verification failed. Please try again.</h2>');
+        cleanup();
+        resolve({ status: 'cancelled' });
+        return;
+      }
+
+      const status = url.searchParams.get('status');
+      const message = url.searchParams.get('message') || undefined;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(status === 'created'
+        ? '<h2>Connection created. You can close this tab.</h2>'
+        : `<h2>Connection creation ${escapeHtml(status || 'cancelled')}.</h2><p>${escapeHtml(message || '')}</p>`);
+      cleanup();
+
+      if (status === 'created') {
+        resolve({
+          status: 'created',
+          name: url.searchParams.get('connectionName') || url.searchParams.get('connectionId'),
+          id: url.searchParams.get('connectionId'),
+          displayName: url.searchParams.get('displayName'),
+        });
+      } else if (status === 'error') {
+        reject(new HttpError(400, message || 'Connection creation failed in the browser.'));
+      } else {
+        reject(new HttpError(400, 'Connection creation was cancelled.'));
+      }
+    });
+
+    callbackServer.listen(0, 'localhost', async () => {
+      const address = callbackServer.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      const callbackUrl = `http://localhost:${port}/callback`;
+      const playerUrl = createMaafConnectionUrl(config.region, config.environmentId, {
+        connector: config.connectorName,
+        callbackUrl,
+        nonce,
+        protocolVersion: CONNECTION_CALLBACK_PROTOCOL_VERSION,
+      });
+
+      try {
+        await open(playerUrl, { wait: false });
+      } catch {
+        console.log(`Open this URL to create the connection:\n${playerUrl}`);
+      }
+    });
+
+    callbackServer.on('error', (error) => {
+      cleanup();
+      reject(error);
+    });
+
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new HttpError(408, 'Connection creation timed out after 10 minutes.'));
+    }, CONNECTION_CREATION_TIMEOUT_MS);
+
+    function cleanup() {
+      clearTimeout(timeoutId);
+      callbackServer.close();
+    }
+  });
+}
+
+async function getWorkflowDetails(workflowId) {
+  const workflow = await dvGet(`workflows(${workflowId})?$select=workflowid,name,uniquename,category,type,statecode,statuscode,clientdata`);
+  const clientData = parsePossiblyJson(workflow.clientdata);
+  const triggerEntries = Object.entries(clientData?.definition?.triggers || {});
+  const connectionReferences = Object.entries(clientData?.connectionReferences || {}).map(([key, value]) => ({
+    key,
+    logicalName: value?.connectionReferenceLogicalName || value?.connectionName || key,
+    displayName: value?.displayName || value?.api?.name || key,
+    connectorId: value?.api?.id || value?.apiId || '',
+    source: value?.source || value?.connectionSource || '',
+  }));
+  const isManual = triggerEntries.some(([, trigger]) => isManualFlowTrigger(trigger));
+  return {
+    kind: 'workflow',
+    objectId: workflow.workflowid,
+    displayName: workflow.name || workflow.uniquename || workflowId,
+    uniqueName: workflow.uniquename || '',
+    stateCode: Number(workflow.statecode),
+    stateLabel: Number(workflow.statecode) === 1 ? 'On' : Number(workflow.statecode) === 0 ? 'Off' : 'Suspended',
+    isCloudFlow: Number(workflow.category) === 5,
+    isManual,
+    triggers: triggerEntries.map(([name, trigger]) => ({
+      name,
+      type: trigger?.type || '',
+      kind: trigger?.kind || '',
+    })),
+    connectionReferences,
+    share: shareCapability('workflow'),
+    unsupported: [
+      'Run-only users and the manual-trigger connection mode are supported by the Power Automate Management connector. PDAC does not call the unsupported api.flow.microsoft.com endpoints, so those settings are shown here as read-only.',
+    ],
+    notes: ['Solution-aware cloud flows are stored as Dataverse workflow rows. Turning a flow on or off is done by updating workflow.statecode.'],
+  };
+}
+
+async function saveWorkflowState(workflowId, state) {
+  const workflowState = normalizeWorkflowState(state);
+  await dvPatch(`workflows(${workflowId})`, workflowState);
+  return getWorkflowDetails(workflowId);
+}
+
+function normalizeWorkflowState(state) {
+  const text = String(state ?? '').toLowerCase();
+  if (text === 'on' || text === '1' || text === 'true') {
+    return {
+      statecode: 1,
+      statuscode: 2,
+    };
+  }
+  if (text === 'off' || text === '0' || text === 'false') {
+    return {
+      statecode: 0,
+      statuscode: 1,
+    };
+  }
+  throw new HttpError(400, 'Flow state must be "on" or "off".');
+}
+
+function isManualFlowTrigger(trigger) {
+  const text = JSON.stringify(trigger || {}).toLowerCase();
+  return text.includes('"kind":"button"') ||
+    text.includes('"type":"request"') ||
+    text.includes('manual') ||
+    text.includes('powerapp');
+}
+
+async function getCanvasAppDetails(canvasAppId) {
+  const app = await dvGet(`canvasapps(${canvasAppId})?$select=canvasappid,name,displayname,canvasapptype,status`);
+  const isCodeApp = Number(app.canvasapptype) === 4;
+  return {
+    kind: isCodeApp ? 'codeApp' : 'canvasApp',
+    objectId: app.canvasappid,
+    displayName: app.displayname || app.name || canvasAppId,
+    name: app.name || '',
+    canvasAppType: Number(app.canvasapptype),
+    share: shareCapability('canvasapp'),
+    notes: [`${isCodeApp ? 'Code apps' : 'Canvas apps'} are stored in the Dataverse Canvas App table. PDAC uses supported Dataverse sharing actions for users and teams.`],
+  };
+}
+
+async function getBotDetails(objectId, logicalName, resolved) {
+  const config = SHAREABLE_COMPONENTS[logicalName];
+  const row = resolved.row || await dvGet(`${config.collection}(${objectId})`);
+  return {
+    kind: logicalName === 'botcomponent' ? 'botComponent' : 'bot',
+    objectId,
+    displayName: pickDisplayName(row) || resolved.displayName || objectId,
+    logicalName,
+    share: shareCapability(logicalName),
+    notes: ['Copilot Studio agents and bot components are Dataverse user-owned records that support GrantAccess. Channel-specific publishing and authentication settings may still be required in Copilot Studio.'],
+  };
+}
+
+function shareCapability(logicalName) {
+  return {
+    supported: Boolean(SHAREABLE_COMPONENTS[logicalName]),
+    roles: [
+      { value: 'user', label: 'User' },
+      { value: 'coowner', label: 'Co-owner' },
+    ],
+  };
+}
+
+async function shareComponent(componentType, objectId, body) {
+  const resolved = await resolveComponentRecord(componentType, objectId);
+  const logicalName = resolved.logicalName;
+  const config = SHAREABLE_COMPONENTS[logicalName];
+  if (!config) {
+    throw new HttpError(400, 'This component does not support Dataverse record sharing from PDAC.');
+  }
+
+  const role = String(body.role || 'user').toLowerCase();
+  const accessMask = SHARE_ROLE_ACCESS[role];
+  if (!accessMask) {
+    throw new HttpError(400, 'Share role must be user or coowner.');
+  }
+
+  const principals = Array.isArray(body.principals) ? body.principals : [];
+  if (!principals.length) {
+    throw new HttpError(400, 'Choose at least one user or team.');
+  }
+
+  let shared = 0;
+  for (const principal of principals) {
+    const principalType = String(principal.type || '').toLowerCase();
+    const principalId = normalizeGuid(principal.id);
+    if (!principalId || !['systemuser', 'team'].includes(principalType)) {
+      continue;
+    }
+    await dvPost('GrantAccess', {
+      Target: {
+        [config.idName]: objectId,
+        '@odata.type': config.odataType,
+      },
+      PrincipalAccess: {
+        Principal: {
+          [principalType === 'systemuser' ? 'systemuserid' : 'teamid']: principalId,
+          '@odata.type': `Microsoft.Dynamics.CRM.${principalType}`,
+        },
+        AccessMask: accessMask,
+      },
+    });
+    shared++;
+  }
+
+  return {
+    shared,
+    role,
+    accessMask,
+    displayName: resolved.displayName || objectId,
+  };
+}
+
+async function listEnvironmentPrincipals(query) {
+  const normalized = String(query || '').trim();
+  const top = 25;
+  const userFilter = normalized
+    ? ` and (${principalContainsFilter(['fullname', 'internalemailaddress', 'domainname'], normalized)})`
+    : '';
+  const teamFilter = normalized ? `&$filter=${principalContainsFilter(['name'], normalized)}` : '';
+  const [users, teams] = await Promise.all([
+    dvGetAll(`systemusers?$select=systemuserid,fullname,internalemailaddress,domainname,azureactivedirectoryobjectid&$filter=isdisabled eq false${userFilter}&$orderby=fullname&$top=${top}`),
+    dvGetAll(`teams?$select=teamid,name,teamtype,azureactivedirectoryobjectid${teamFilter}&$orderby=name&$top=${top}`),
+  ]);
+
+  return [
+    ...users.slice(0, top).map((user) => ({
+      id: user.systemuserid,
+      type: 'systemuser',
+      label: user.fullname || user.internalemailaddress || user.domainname || user.systemuserid,
+      detail: user.internalemailaddress || user.domainname || '',
+    })),
+    ...teams.slice(0, top).map((team) => ({
+      id: team.teamid,
+      type: 'team',
+      label: userSafeTeamName(team),
+      detail: `Team${team.azureactivedirectoryobjectid ? ' | Entra group backed' : ''}`,
+    })),
+  ].sort((left, right) => left.label.localeCompare(right.label)).slice(0, 40);
+}
+
+async function listEnvironmentUsers(query = '') {
+  const filter = userSearchFilter(query);
+  const rows = await dvGetAll(`systemusers?$select=systemuserid,fullname,internalemailaddress,domainname,isdisabled,accessmode,azureactivedirectoryobjectid,_businessunitid_value&$filter=${filter}&$orderby=fullname&$top=250`);
+  return rows.map((user) => ({
+    systemuserid: user.systemuserid,
+    fullname: user.fullname || '',
+    internalemailaddress: user.internalemailaddress || '',
+    domainname: user.domainname || '',
+    isdisabled: Boolean(user.isdisabled),
+    accessmode: user.accessmode,
+    azureactivedirectoryobjectid: user.azureactivedirectoryobjectid || '',
+    businessUnitId: user._businessunitid_value || '',
+    businessUnitName: user['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
+  }));
+}
+
+async function listEnvironmentTeams(query = '') {
+  const normalized = String(query || '').trim();
+  const filter = normalized ? `&$filter=${principalContainsFilter(['name', 'emailaddress'], normalized)}` : '';
+  const rows = await dvGetAll(`teams?$select=teamid,name,teamtype,emailaddress,description,azureactivedirectoryobjectid,_businessunitid_value${filter}&$orderby=name&$top=250`);
+  return rows.map((team) => ({
+    teamid: team.teamid,
+    name: team.name || '',
+    teamtype: team.teamtype,
+    teamTypeLabel: team['teamtype@OData.Community.Display.V1.FormattedValue'] || teamTypeLabel(team.teamtype),
+    emailaddress: team.emailaddress || '',
+    description: team.description || '',
+    azureactivedirectoryobjectid: team.azureactivedirectoryobjectid || '',
+    businessUnitId: team._businessunitid_value || '',
+    businessUnitName: team['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
+  }));
+}
+
+async function syncEnvironmentUser(principalObjectId) {
+  const principalId = normalizeGuid(principalObjectId);
+  if (!principalId) {
+    throw new HttpError(400, 'Enter a valid Entra user object ID.');
+  }
+
+  const environmentName = environmentUrlName(selected.environmentName);
+  const url = `https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/${encodeURIComponent(environmentName)}/syncUser?api-version=2019-05-01`;
+  const response = await apiHttpRequest('POST', url, {
+    authResource: SERVICE_RESOURCE,
+    body: { id: principalId },
+  });
+  return {
+    principalObjectId: principalId,
+    result: response.data,
+    message: 'User sync requested. Refresh users after the Power Platform service finishes provisioning the SystemUser row.',
+  };
+}
+
+async function createEnvironmentTeam(body) {
+  const name = requireString(body.name, 'name');
+  const teamType = normalizeTeamType(body.teamType);
+  const businessUnitId = normalizeGuid(body.businessUnitId) || await getCurrentBusinessUnitId();
+  const teamBody = {
+    name,
+    teamtype: teamType,
+    'businessunitid@odata.bind': `/businessunits(${businessUnitId})`,
+  };
+
+  const aadObjectId = normalizeGuid(body.azureActiveDirectoryObjectId || body.azureactivedirectoryobjectid);
+  if (aadObjectId) {
+    teamBody.azureactivedirectoryobjectid = aadObjectId;
+  }
+  for (const [key, value] of [
+    ['description', body.description],
+    ['emailaddress', body.emailaddress],
+  ]) {
+    if (value !== undefined && String(value).trim()) {
+      teamBody[key] = String(value).trim();
+    }
+  }
+
+  return dvPost('teams', teamBody, { returnRepresentation: true });
+}
+
+async function addTeamMembers(teamId, userIds) {
+  const ids = Array.isArray(userIds) ? userIds.map(normalizeGuid).filter(Boolean) : [];
+  if (!ids.length) {
+    throw new HttpError(400, 'Choose at least one user to add.');
+  }
+  await dvPost(`teams(${teamId})/Microsoft.Dynamics.CRM.AddMembersTeam`, {
+    Members: ids,
+  });
+  return { added: ids.length };
+}
+
+function userSearchFilter(query) {
+  const base = 'systemuserid ne null';
+  const normalized = String(query || '').trim();
+  if (!normalized) {
+    return base;
+  }
+  return `${base} and (${principalContainsFilter(['fullname', 'internalemailaddress', 'domainname'], normalized)})`;
+}
+
+function normalizeTeamType(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (text === 'access' || text === '1') {
+    return 1;
+  }
+  if (text === 'security' || text === 'securitygroup' || text === 'security group' || text === '2') {
+    return 2;
+  }
+  if (text === 'office' || text === 'officegroup' || text === 'office group' || text === '3') {
+    return 3;
+  }
+  return 0;
+}
+
+function teamTypeLabel(value) {
+  return {
+    0: 'Owner',
+    1: 'Access',
+    2: 'Security Group',
+    3: 'Office Group',
+  }[Number(value)] || `Type ${value}`;
+}
+
+function principalContainsFilter(columns, query) {
+  const value = odataString(query);
+  return columns.map((column) => `contains(${column},'${value}')`).join(' or ');
+}
+
+function userSafeTeamName(team) {
+  return team.name || team.teamid;
+}
+
+function parsePossiblyJson(value) {
+  if (!value || typeof value !== 'string') {
+    return {};
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
 }
 
 async function exportSolution(solutionId, options = {}) {
@@ -1135,15 +1908,16 @@ function importPackagePayload(item) {
 
 async function prepareImportTarget(item, target) {
   const connections = await listTargetConnections(target.environmentName);
-  const connectionReferences = item.analysis.connectionReferences.map((reference) => {
-    const matches = connections.filter((connection) => normalizeConnectorId(connection.connectorId) === normalizeConnectorId(reference.connectorId));
+  const connectionReferences = await Promise.all(item.analysis.connectionReferences.map(async (reference) => {
+    const connectorKeys = connectorMatchKeys(reference.connectorId);
+    const matches = connections.filter((connection) => hasConnectorMatch(connectorKeys, connection.connectorKeys));
     return {
       ...reference,
       matches,
       selectedConnectionId: matches[0]?.connectionId || '',
-      createUrl: `https://make.powerapps.com/environments/${encodeURIComponent(target.environmentName)}/connections/available/${connectorName(reference.connectorId)}`,
+      createUrl: makeConnectionCreateUrl(target.environmentName, reference.connectorId),
     };
-  });
+  }));
   const environmentVariables = await hydrateTargetEnvironmentVariables(item.analysis.environmentVariables, target);
   return {
     package: importPackagePayload(item),
@@ -1423,18 +2197,140 @@ function normalizeEnvironmentVariableType(type) {
 
 async function listTargetConnections(environmentName) {
   const url = `https://api.powerplatform.com/connectivity/environments/${encodeURIComponent(environmentName)}/connections?api-version=2024-10-01`;
-  const response = await apiHttpRequest('GET', url, { authResource: POWER_PLATFORM_RESOURCE });
-  return (response.data.value || []).map((connection) => {
-    const connectorId = connection.properties?.apiId || connection.properties?.apiid || connectorIdFromConnection(connection);
-    return {
-      id: connection.id || '',
-      name: connection.name || '',
-      displayName: connection.properties?.displayName || connection.name || '',
+  const sources = [];
+
+  try {
+    const rows = await powerPlatformGetAll(url);
+    sources.push(...rows.map(normalizeConnectivityConnection));
+  } catch (error) {
+    console.warn(`Connectivity connection list failed: ${errorMessage(error)}`);
+  }
+
+  try {
+    const actionConnections = await listConnectionsAsync(actionContext({}));
+    const values = Array.isArray(actionConnections) ? actionConnections : actionConnections?.value || [];
+    sources.push(...values.map(normalizeActionConnection));
+  } catch (error) {
+    console.warn(`Power Apps action connection list failed: ${errorMessage(error)}`);
+  }
+
+  return uniqueConnections(sources).filter((connection) => connection.connectionId);
+}
+
+async function powerPlatformGetAll(initialUrl) {
+  const rows = [];
+  let next = initialUrl;
+  while (next) {
+    const response = await apiHttpRequest('GET', next, { authResource: POWER_PLATFORM_RESOURCE });
+    rows.push(...(response.data.value || []));
+    next = response.data['@odata.nextLink'] || response.data.nextLink || '';
+  }
+  return rows;
+}
+
+function normalizeConnectivityConnection(connection) {
+  const connectorId = connection.properties?.apiId ||
+    connection.properties?.apiid ||
+    connection.properties?.api?.id ||
+    connection.properties?.api?.name ||
+    connection.api?.id ||
+    connection.api?.name ||
+    connection.properties?.connectorId ||
+    connectorIdFromConnection(connection);
+  return normalizeConnectionPayload(connection, connectorId, 'connectivity');
+}
+
+function normalizeActionConnection(connection) {
+  const connectorId = connection.properties?.apiId ||
+    connection.properties?.apiid ||
+    connection.properties?.api?.id ||
+    connection.properties?.api?.name ||
+    connection.api?.id ||
+    connection.api?.name ||
+    connection.properties?.connectorId ||
+    connection.apiId ||
+    connection.apiName ||
+    connection.connectorId ||
+    connection.connectorName ||
+    connectorIdFromConnection(connection);
+  return normalizeConnectionPayload(connection, connectorId, 'actions');
+}
+
+function normalizeConnectionPayload(connection, connectorId, source) {
+  const pathConnectionId = String(connection.id || '').match(/\/connections\/([^/?#]+)/i)?.[1] || '';
+  const connectionId = connection.connectionId || pathConnectionId || connection.name || connection.connectionName || lastPathPart(connection.id);
+  return {
+    id: connection.id || '',
+    name: connection.name || connection.connectionName || '',
+    displayName: connection.properties?.displayName || connection.displayName || connection.name || connectionId || '',
+    connectorId,
+    connectorKeys: [...connectorMatchKeys([
       connectorId,
-      connectionId: connection.name || lastPathPart(connection.id),
-      status: connection.properties?.statuses?.[0]?.status || connection.properties?.connectionRuntimeUrl || '',
-    };
-  }).filter((connection) => connection.connectionId);
+      connection.properties?.apiId,
+      connection.properties?.apiid,
+      connection.properties?.api?.id,
+      connection.properties?.api?.name,
+      connection.api?.id,
+      connection.api?.name,
+      connection.properties?.connectorId,
+      connection.apiId,
+      connection.apiName,
+      connection.connectorId,
+      connection.connectorName,
+      connection.id,
+      connection.name,
+      connection.connectionName,
+      connection.connectionId,
+      connectorIdFromConnection(connection),
+    ])],
+    connectionId,
+    status: connection.properties?.statuses?.[0]?.status || connection.properties?.connectionRuntimeUrl || connection.status || '',
+    source,
+  };
+}
+
+function uniqueConnections(connections) {
+  const byId = new Map();
+  for (const connection of connections) {
+    const key = connection.connectionId || connection.id || connection.name;
+    if (!key) {
+      continue;
+    }
+    const existing = byId.get(key);
+    if (!existing) {
+      byId.set(key, connection);
+      continue;
+    }
+    byId.set(key, {
+      ...existing,
+      ...connection,
+      connectorKeys: [...new Set([...(existing.connectorKeys || []), ...(connection.connectorKeys || [])])],
+      source: `${existing.source},${connection.source}`,
+    });
+  }
+  return [...byId.values()];
+}
+
+function findConnectionById(connections, connectionId) {
+  return connections.find((connection) => connectionMatchesId(connection, connectionId)) || null;
+}
+
+function connectionMatchesId(connection, connectionId) {
+  const needle = normalizeConnectionIdentifier(connectionId);
+  if (!needle) {
+    return false;
+  }
+  return [
+    connection.connectionId,
+    connection.id,
+    connection.name,
+  ].some((value) => normalizeConnectionIdentifier(value).includes(needle));
+}
+
+function normalizeConnectionIdentifier(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
 }
 
 async function hydrateTargetEnvironmentVariables(environmentVariables, target) {
@@ -1507,7 +2403,15 @@ function validateEnvironmentVariableValue(variable, value) {
 }
 
 function connectorIdFromConnection(connection) {
-  const apiName = String(connection.id || '').match(/\/apis\/([^/]+)/)?.[1] || '';
+  const source = [
+    connection.id,
+    connection.name,
+    connection.connectionName,
+    connection.connectionId,
+    connection.properties?.connectionRuntimeUrl,
+    connection.properties?.testLinks?.requestUri,
+  ].filter(Boolean).join('/');
+  const apiName = String(source || '').match(/\/(?:apis|connectors)\/([^/?#]+)/)?.[1] || '';
   return apiName ? `/providers/Microsoft.PowerApps/apis/${apiName}` : '';
 }
 
@@ -1515,13 +2419,133 @@ function connectorName(connectorId) {
   return String(connectorId || '').split('/').filter(Boolean).pop() || '';
 }
 
+function normalizeActionConnectorId(connectorId) {
+  const name = connectorName(connectorId);
+  return name.startsWith('shared_') ? name : `shared_${name}`;
+}
+
 function normalizeConnectorId(connectorId) {
   const name = connectorName(connectorId);
   return name ? `/providers/microsoft.powerapps/apis/${name.toLowerCase()}` : '';
 }
 
+function connectorMatchKeys(values) {
+  const inputs = Array.isArray(values) ? values : [values];
+  const keys = new Set();
+  for (const value of inputs) {
+    const text = String(value || '').trim();
+    if (!text) {
+      continue;
+    }
+    const lower = text.toLowerCase();
+    keys.add(lower);
+
+    const apiMatch = lower.match(/\/apis\/([^/?#]+)/);
+    const providerMatch = lower.match(/\/providers\/microsoft\.powerapps\/apis\/([^/?#]+)/);
+    const rawName = decodeURIComponent((providerMatch?.[1] || apiMatch?.[1] || connectorName(lower) || '').trim());
+    if (rawName) {
+      keys.add(rawName);
+      keys.add(rawName.replace(/^shared_/, ''));
+      keys.add(rawName.startsWith('shared_') ? rawName : `shared_${rawName}`);
+      keys.add(`/providers/microsoft.powerapps/apis/${rawName}`);
+      keys.add(`/providers/microsoft.powerapps/apis/${rawName.startsWith('shared_') ? rawName : `shared_${rawName}`}`);
+    }
+  }
+  return keys;
+}
+
+function hasConnectorMatch(referenceKeys, connectionKeys = []) {
+  const keys = connectionKeys instanceof Set ? connectionKeys : new Set(connectionKeys);
+  for (const key of referenceKeys) {
+    if (keys.has(key)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function connectionLooksLikeConnector(connection, connectorKeys) {
+  const haystack = [
+    connection.connectionId,
+    connection.id,
+    connection.name,
+    connection.displayName,
+  ].map(normalizeConnectionIdentifier).join('|');
+  if (!haystack) {
+    return false;
+  }
+  for (const key of connectorKeys) {
+    const normalized = normalizeConnectionIdentifier(key);
+    if (normalized && normalized.length > 5 && haystack.includes(normalized)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function connectionDebugRows(connections, connectorKeys) {
+  const related = connections.filter((connection) => connectionLooksLikeConnector(connection, connectorKeys));
+  const rows = related.length ? related : connections.slice(0, 8);
+  return rows.slice(0, 12).map((connection) => ({
+    id: connection.connectionId,
+    name: connection.name,
+    displayName: connection.displayName,
+    connectorId: connection.connectorId,
+    keys: connection.connectorKeys || [],
+    source: connection.source,
+  }));
+}
+
+function makeConnectionCreateUrl(environmentName, connectorId) {
+  const environmentId = environmentUrlName(environmentName);
+  const connector = connectorName(connectorId);
+  if (!environmentId || !connector) {
+    return '';
+  }
+  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/connections/available/${encodeURIComponent(connector)}`;
+}
+
+function environmentUrlName(environmentName) {
+  const value = String(environmentName || '').trim();
+  if (!value) {
+    return '';
+  }
+  return lastPathPart(value);
+}
+
+function isBrowserConnectionEnabled() {
+  return String(process.env.POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION || '').toLowerCase() === 'true';
+}
+
+function actionContext(actionsParams) {
+  return {
+    vfs: {},
+    authProvider: actionAuthProvider,
+    region: REGION,
+    environmentName: environmentUrlName(selected.environmentName),
+    actionsParams,
+    localFilePaths: {
+      powerConfigPath: 'power.config.json',
+      schemaPath: '.power/schemas',
+      codeGenPath: 'src/generated',
+    },
+    logger,
+    httpClient,
+  };
+}
+
 function lastPathPart(value) {
   return String(value || '').split('/').filter(Boolean).pop() || '';
+}
+
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
 }
 
 function odataString(value) {
@@ -1651,14 +2675,25 @@ function normalizeEnvironments(data) {
   return values.map((item) => {
     const properties = item.properties || {};
     const linked = properties.linkedEnvironmentMetadata || properties.linkedEnvironment || {};
+    const environmentName = pickEnvironmentName(item, properties);
     return {
-      name: item.name || properties.name || properties.environmentName || '',
+      name: environmentName,
       displayName: properties.displayName || properties.friendlyName || item.displayName || item.name || '',
       orgUrl: normalizeOrgUrl(linked.instanceUrl || properties.instanceUrl || ''),
       region: properties.azureRegion || properties.location || item.location || '',
       type: properties.environmentType || properties.environmentSku || '',
+      resourceId: item.id || '',
     };
   }).filter((env) => env.name);
+}
+
+function pickEnvironmentName(item, properties = {}) {
+  const namedValue = environmentUrlName(item.name || properties.name || properties.environmentName || '');
+  const resourceValue = environmentUrlName(item.id || '');
+  if (namedValue && namedValue.toLowerCase() !== 'default') {
+    return namedValue;
+  }
+  return resourceValue || namedValue;
 }
 
 function rootRolesWithInheritedCount(roles) {

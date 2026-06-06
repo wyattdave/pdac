@@ -32,6 +32,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -209,6 +213,10 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.function-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .mini-card {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -245,6 +253,39 @@ h3 {
   gap: 12px;
   grid-template-columns: repeat(2, minmax(260px, 1fr));
   margin-bottom: 14px;
+}
+
+.compact-form {
+  display: grid;
+  gap: 10px;
+}
+
+.full-width-form {
+  grid-template-columns: 1fr;
+}
+
+.compact-form button {
+  justify-self: start;
+}
+
+.create-toggle-panel {
+  margin-bottom: 16px;
+}
+
+.compact-list {
+  max-height: 420px;
+}
+
+.user-row {
+  min-height: 94px;
+}
+
+.team-row {
+  min-height: 104px;
+}
+
+select[multiple] {
+  min-height: 140px;
 }
 
 .create-role-form button {
@@ -684,7 +725,7 @@ select:disabled {
   border-bottom: 1px solid var(--line);
   display: grid;
   gap: 4px;
-  grid-template-columns: 150px minmax(0, 1fr) minmax(0, 0.8fr);
+  grid-template-columns: 150px minmax(0, 1fr) minmax(0, 0.8fr) auto;
   padding: 10px 12px;
 }
 
@@ -700,6 +741,173 @@ select:disabled {
 
 .component-name {
   overflow-wrap: anywhere;
+}
+
+.component-actions {
+  align-items: center;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.component-actions button {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.modal-backdrop {
+  align-items: center;
+  background: rgba(5, 7, 13, 0.62);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 18px;
+  position: fixed;
+  z-index: 50;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+  display: grid;
+  gap: 12px;
+  max-height: min(760px, calc(100vh - 36px));
+  max-width: 820px;
+  overflow: auto;
+  padding: 18px;
+  width: min(820px, calc(100vw - 36px));
+}
+
+.component-modal-body,
+.component-form,
+.share-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.component-summary {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  gap: 8px 14px;
+  padding: 10px;
+}
+
+.share-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.share-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(160px, 0.4fr) minmax(240px, 1fr);
+}
+
+.principal-results {
+  background: var(--input);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.principal-result {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  display: grid;
+  gap: 2px;
+  min-height: unset;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.principal-result:hover {
+  background: var(--soft);
+  border-color: var(--soft-line);
+}
+
+.principal-chips {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.principal-chip {
+  align-items: center;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  display: inline-flex;
+  font-size: 13px;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 8px 5px 10px;
+}
+
+.principal-chip button {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  height: 22px;
+  justify-content: center;
+  min-height: 0;
+  padding: 0;
+  width: 22px;
+}
+
+.readonly-list {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: grid;
+  overflow: hidden;
+}
+
+.readonly-row {
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+}
+
+.readonly-row:last-child {
+  border-bottom: 0;
+}
+
+.button-link {
+  align-items: center;
+  border-radius: 6px;
+  display: inline-flex;
+  font-size: 14px;
+  font-weight: 650;
+  justify-content: center;
+  min-height: 38px;
+  padding: 8px 14px;
+  text-decoration: none;
+}
+
+.button-link.secondary {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  color: var(--text);
 }
 
 .upload {
@@ -794,8 +1002,13 @@ select:disabled {
   .create-role-form,
   .import-grid,
   .solution-filters,
+  .share-grid,
   .selected-environment-bar,
   .component-row {
     grid-template-columns: 1fr;
+  }
+
+  .component-actions {
+    justify-content: flex-start;
   }
 }
