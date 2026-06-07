@@ -158,6 +158,7 @@ const state = {
   connections: [],
   connectionsLoaded: false,
   connectionUser: null,
+  connectionWarnings: [],
   pendingConnectionDeleteId: '',
   roles: [],
   selectedTeamId: '',
@@ -208,7 +209,7 @@ el.signInDifferentButton.addEventListener('click', () => withBusy(el.signInDiffe
 el.logoutButton.addEventListener('click', () => withBusy(el.logoutButton, logout));
 el.loadEnvironmentsButton.addEventListener('click', () => withBusy(el.loadEnvironmentsButton, loadEnvironments));
 el.loadUsersTeamsButton.addEventListener('click', () => withBusy(el.loadUsersTeamsButton, loadUsersAndTeams));
-el.loadConnectionsButton.addEventListener('click', () => withBusy(el.loadConnectionsButton, loadConnections));
+el.loadConnectionsButton.addEventListener('click', () => withBusy(el.loadConnectionsButton, loadConnections, 'Loading connections'));
 el.toggleCreateUserButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('user'));
 el.toggleCreateTeamButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('team'));
 el.userSearch.addEventListener('input', renderUsers);
@@ -1048,6 +1049,7 @@ function clearEnvironmentData() {
   state.connections = [];
   state.connectionsLoaded = false;
   state.connectionUser = null;
+  state.connectionWarnings = [];
   state.pendingConnectionDeleteId = '';
   state.roles = [];
   state.selectedTeamId = '';
@@ -1155,7 +1157,7 @@ function renderTeams() {
         <span class="role-id">${escapeHtml(team.businessUnitName || 'No business unit')}</span>
         <span class="role-id">${escapeHtml(team.azureactivedirectoryobjectid || '')}</span>
       </button>
-      <button class="secondary row-action-button" type="button" data-principal-action="assign-role" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}"${canAssignRoles ? '' : ' disabled'}>${canAssignRoles ? 'Assign role' : 'Access team'}</button>
+      <button class="role-id row-action-text row-action-link" type="button" data-principal-action="assign-role" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}"${canAssignRoles ? '' : ' disabled'}>${canAssignRoles ? 'Assign role' : 'Access team'}</button>
     </div>
   `;
   }).join('');
@@ -1222,12 +1224,31 @@ async function loadConnections() {
   if (!state.selectedEnvironment.environmentName) {
     throw new Error('Select an environment first.');
   }
-  const data = await api('/api/connections');
+  state.connectionsLoaded = false;
+  state.connections = [];
+  state.connectionUser = null;
+  state.connectionWarnings = [];
+  el.connectionSummary.textContent = '';
+  el.connectionsList.innerHTML = empty('Loading connections...');
+  let data;
+  try {
+    data = await api('/api/connections');
+  } catch (error) {
+    state.connectionsLoaded = false;
+    el.connectionSummary.textContent = '';
+    el.connectionsList.innerHTML = empty(`Connections could not be loaded. ${error.message}`);
+    throw error;
+  }
   state.connections = data.connections || [];
   state.connectionUser = data.currentUser || null;
+  state.connectionWarnings = data.warnings || [];
   state.connectionsLoaded = true;
   renderConnections();
-  toast('Connections loaded.');
+  if (data.warnings?.length) {
+    toast(`Connections loaded with warnings: ${data.warnings.join(' | ')}`);
+  } else {
+    toast('Connections loaded.');
+  }
 }
 
 function renderConnections() {
@@ -1251,8 +1272,11 @@ function renderConnections() {
   const total = state.connections.length;
   const broken = state.connections.filter((connection) => connection.health === 'broken').length;
   const mine = state.connections.filter((connection) => connection.isCurrentUserConnection).length;
-  el.connectionSummary.textContent = total
-    ? `${total} connection${total === 1 ? '' : 's'} loaded | ${broken} broken | ${mine} owned by ${state.connectionUser?.displayName || state.connectionUser?.email || 'the selected account'}`
+  const warningText = state.connectionWarnings.length
+    ? ` | ${state.connectionWarnings.length} source warning${state.connectionWarnings.length === 1 ? '' : 's'}`
+    : '';
+  el.connectionSummary.textContent = total || state.connectionsLoaded
+    ? `${total} connection${total === 1 ? '' : 's'} loaded | ${broken} broken | ${mine} owned by ${state.connectionUser?.displayName || state.connectionUser?.email || 'the selected account'}${warningText}`
     : '';
 
   if (!filtered.length) {

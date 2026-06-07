@@ -3014,13 +3014,38 @@ async function listEnvironmentConnections() {
     throw new HttpError(400, 'Selected environment has no environment ID. Choose it from the loaded environment list, then try again.');
   }
   const currentUser = await getCurrentConnectionUser();
-  const adminConnections = await listAdminConnections(selected.environmentName);
-  const sources = [...adminConnections];
+  const sources = [];
+  const warnings = [];
+
+  try {
+    sources.push(...await listAdminConnections(selected.environmentName));
+  } catch (error) {
+    const message = `Power Apps admin connection list failed: ${errorMessage(error)}`;
+    console.warn(message);
+    warnings.push(message);
+  }
+
+  try {
+    const url = `https://api.powerplatform.com/connectivity/environments/${encodeURIComponent(selected.environmentName)}/connections?api-version=2024-10-01`;
+    const rows = await powerPlatformGetAll(url);
+    sources.push(...rows.map(normalizeConnectivityConnection));
+  } catch (error) {
+    const message = `Connectivity connection list failed: ${errorMessage(error)}`;
+    console.warn(message);
+    warnings.push(message);
+  }
+
   try {
     const actionConnections = await listUserConnections();
     sources.push(...actionConnections);
   } catch (error) {
-    console.warn(`Power Apps action connection enrichment failed: ${errorMessage(error)}`);
+    const message = `Power Apps action connection list failed: ${errorMessage(error)}`;
+    console.warn(message);
+    warnings.push(message);
+  }
+
+  if (!sources.length && warnings.length) {
+    throw new HttpError(502, `Could not list connections. ${warnings.join(' | ')}`);
   }
 
   const connections = uniqueConnections(sources)
@@ -3033,7 +3058,8 @@ async function listEnvironmentConnections() {
     environmentName: selected.environmentName,
     orgUrl: selected.orgUrl,
     currentUser,
-    source: 'admin',
+    source: warnings.length ? 'partial' : 'all',
+    warnings,
     connections,
   };
 }

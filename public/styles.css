@@ -805,6 +805,25 @@ select:disabled {
   padding: 6px 10px;
 }
 
+.row-action-link {
+  background: transparent;
+  border: 0;
+  justify-self: start;
+  margin-top: 6px;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.row-action-link:hover:not(:disabled) {
+  color: var(--primary-hover);
+  text-decoration: underline;
+}
+
+.row-action-link:disabled {
+  color: var(--muted);
+}
+
 .role-assignment-list {
   max-height: min(520px, calc(100vh - 230px));
   overflow: auto;
