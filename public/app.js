@@ -78,9 +78,46 @@ const el = {
   loadComponentsButton: document.querySelector('#loadComponentsButton'),
   exportSolutionButton: document.querySelector('#exportSolutionButton'),
   deploySolutionButton: document.querySelector('#deploySolutionButton'),
+  solutionTableActions: document.querySelector('#solutionTableActions'),
+  createSolutionDiagramButton: document.querySelector('#createSolutionDiagramButton'),
+  createSolutionTableButton: document.querySelector('#createSolutionTableButton'),
   solutionVersionInput: document.querySelector('#solutionVersionInput'),
   exportManaged: document.querySelector('#exportManaged'),
   solutionComponents: document.querySelector('#solutionComponents'),
+  loadTablesButton: document.querySelector('#loadTablesButton'),
+  tableSearch: document.querySelector('#tableSearch'),
+  tableScopes: document.querySelectorAll('input[name="tableScope"]'),
+  tableSummary: document.querySelector('#tableSummary'),
+  tablesList: document.querySelector('#tablesList'),
+  selectedTableName: document.querySelector('#selectedTableName'),
+  selectedTableMeta: document.querySelector('#selectedTableMeta'),
+  selectedTableDescription: document.querySelector('#selectedTableDescription'),
+  columnScopes: document.querySelectorAll('input[name="columnScope"]'),
+  columnsList: document.querySelector('#columnsList'),
+  createTableDiagramButton: document.querySelector('#createTableDiagramButton'),
+  createTableDocumentButton: document.querySelector('#createTableDocumentButton'),
+  tableDiagramPanel: document.querySelector('#tableDiagramPanel'),
+  tableDiagramMeta: document.querySelector('#tableDiagramMeta'),
+  tableDiagramCanvas: document.querySelector('#tableDiagramCanvas'),
+  tableDiagramSource: document.querySelector('#tableDiagramSource'),
+  copyDiagramButton: document.querySelector('#copyDiagramButton'),
+  diagramModal: document.querySelector('#diagramModal'),
+  diagramModalTitle: document.querySelector('#diagramModalTitle'),
+  diagramModalMeta: document.querySelector('#diagramModalMeta'),
+  diagramExternalLegend: document.querySelector('#diagramExternalLegend'),
+  diagramModalCanvas: document.querySelector('#diagramModalCanvas'),
+  diagramZoomOutButton: document.querySelector('#diagramZoomOutButton'),
+  diagramZoomInButton: document.querySelector('#diagramZoomInButton'),
+  downloadDiagramSvgButton: document.querySelector('#downloadDiagramSvgButton'),
+  downloadDiagramPngButton: document.querySelector('#downloadDiagramPngButton'),
+  copyDiagramModalButton: document.querySelector('#copyDiagramModalButton'),
+  diagramModalClose: document.querySelector('#diagramModalClose'),
+  tableDocumentModal: document.querySelector('#tableDocumentModal'),
+  tableDocumentTitle: document.querySelector('#tableDocumentTitle'),
+  tableDocumentMeta: document.querySelector('#tableDocumentMeta'),
+  tableDocumentBody: document.querySelector('#tableDocumentBody'),
+  exportTableDocumentButton: document.querySelector('#exportTableDocumentButton'),
+  tableDocumentClose: document.querySelector('#tableDocumentClose'),
   componentModal: document.querySelector('#componentModal'),
   componentModalTitle: document.querySelector('#componentModalTitle'),
   componentModalMeta: document.querySelector('#componentModalMeta'),
@@ -127,6 +164,16 @@ const state = {
   roleAssignmentPrincipal: null,
   solutions: [],
   selectedSolutionId: '',
+  solutionComponents: [],
+  solutionTableCount: 0,
+  tables: [],
+  tablesLoaded: false,
+  selectedTableLogicalName: '',
+  selectedTableDetails: null,
+  selectedTableDiagram: null,
+  activeDiagram: null,
+  diagramZoom: 1,
+  activeTableDocument: null,
   selectedComponent: null,
   componentPrincipals: [],
   importPackage: null,
@@ -258,6 +305,67 @@ el.loadSolutionsButton.addEventListener('click', () => withBusy(el.loadSolutions
 el.solutionSearch.addEventListener('input', renderSolutions);
 el.unmanagedOnly.addEventListener('change', renderSolutions);
 el.publisherFilter.addEventListener('change', renderSolutions);
+el.loadTablesButton.addEventListener('click', () => withBusy(el.loadTablesButton, loadTables));
+el.tableSearch.addEventListener('input', renderTables);
+el.tableScopes.forEach((input) => input.addEventListener('change', () => {
+  state.tablesLoaded = false;
+  state.tables = [];
+  state.selectedTableLogicalName = '';
+  state.selectedTableDetails = null;
+  state.selectedTableDiagram = null;
+  renderTables();
+  clearTableSelection();
+}));
+el.columnScopes.forEach((input) => input.addEventListener('change', () => {
+  if (state.selectedTableLogicalName) {
+    loadSelectedTableDetails().catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+  }
+}));
+el.tablesList.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-table-logical-name]');
+  if (!button) {
+    return;
+  }
+  selectTable(button.dataset.tableLogicalName || '').catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.createTableDiagramButton.addEventListener('click', () => withBusy(el.createTableDiagramButton, loadTableDiagram, 'Creating diagram'));
+el.createTableDocumentButton.addEventListener('click', () => withBusy(el.createTableDocumentButton, loadTableDocument, 'Creating table'));
+el.copyDiagramButton.addEventListener('click', () => {
+  const source = state.selectedTableDiagram?.mermaid || '';
+  if (!source) {
+    toast('Create a diagram first.', 'error');
+    return;
+  }
+  writeClipboard(source).then(() => toast('Mermaid source copied.')).catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.createSolutionDiagramButton.addEventListener('click', () => withBusy(el.createSolutionDiagramButton, loadSolutionTableDiagram, 'Creating diagram'));
+el.createSolutionTableButton.addEventListener('click', () => withBusy(el.createSolutionTableButton, loadSolutionTableDocument, 'Creating table'));
+el.diagramZoomOutButton.addEventListener('click', () => setDiagramZoom(state.diagramZoom - 0.15));
+el.diagramZoomInButton.addEventListener('click', () => setDiagramZoom(state.diagramZoom + 0.15));
+el.downloadDiagramSvgButton.addEventListener('click', downloadActiveDiagramSvg);
+el.downloadDiagramPngButton.addEventListener('click', () => downloadActiveDiagramPng().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+}));
+el.copyDiagramModalButton.addEventListener('click', () => copyActiveMermaid().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+}));
+el.diagramModalClose.addEventListener('click', closeDiagramModal);
+el.tableDocumentClose.addEventListener('click', closeTableDocumentModal);
+el.exportTableDocumentButton.addEventListener('click', () => exportActiveTableDocument().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+}));
 el.publisherDropdownButton.addEventListener('click', () => {
   el.environmentDropdown.hidden = true;
   el.publisherDropdown.hidden = !el.publisherDropdown.hidden;
@@ -269,7 +377,14 @@ document.addEventListener('click', (event) => {
   }
 });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !el.connectionDeleteModal.hidden) {
+  if (event.key !== 'Escape') {
+    return;
+  }
+  if (!el.diagramModal.hidden) {
+    closeDiagramModal();
+  } else if (!el.tableDocumentModal.hidden) {
+    closeTableDocumentModal();
+  } else if (!el.connectionDeleteModal.hidden) {
     closeConnectionDeleteModal();
   }
 });
@@ -331,6 +446,7 @@ el.importSolutionButton.addEventListener('click', () => withBusy(el.importSoluti
 
 initTheme();
 updateRoleFileFormatUi();
+clearTableSelection();
 await loadStatus();
 
 async function loadStatus() {
@@ -936,11 +1052,25 @@ function clearEnvironmentData() {
   state.roles = [];
   state.selectedTeamId = '';
   state.roleAssignmentPrincipal = null;
+  state.solutionComponents = [];
+  state.solutionTableCount = 0;
+  state.tables = [];
+  state.tablesLoaded = false;
+  state.selectedTableLogicalName = '';
+  state.selectedTableDetails = null;
+  state.selectedTableDiagram = null;
+  state.activeDiagram = null;
+  state.diagramZoom = 1;
+  state.activeTableDocument = null;
   renderUsers();
   renderTeams();
   renderConnections();
+  renderTables();
+  clearTableSelection();
   closeConnectionDeleteModal();
   closeRoleAssignmentModal();
+  closeDiagramModal();
+  closeTableDocumentModal();
   clearRoleSelection();
 }
 
@@ -1601,12 +1731,18 @@ function selectSolution(solutionId) {
   el.solutionVersionInput.value = solution?.version || '';
   el.exportManaged.checked = Boolean(solution?.ismanaged);
   el.solutionComponents.innerHTML = '';
+  state.solutionComponents = [];
+  state.solutionTableCount = 0;
+  renderSolutionTableActions();
 }
 
 async function loadSolutionComponents() {
   const solutionId = requireSelectedSolution();
   el.solutionComponents.innerHTML = empty('Loading components...');
   const components = await api(`/api/solutions/${encodeURIComponent(solutionId)}/components`);
+  state.solutionComponents = components || [];
+  state.solutionTableCount = state.solutionComponents.filter((component) => Number(component.componenttype) === 1).length;
+  renderSolutionTableActions();
   if (!components.length) {
     el.solutionComponents.innerHTML = empty('No components found.');
     return;
@@ -1622,6 +1758,413 @@ async function loadSolutionComponents() {
       </span>
     </div>
   `).join('');
+}
+
+function renderSolutionTableActions() {
+  if (!el.solutionTableActions) {
+    return;
+  }
+  const hasTables = Boolean(state.selectedSolutionId && state.solutionTableCount);
+  el.solutionTableActions.hidden = !hasTables;
+  el.createSolutionDiagramButton.disabled = !hasTables;
+  el.createSolutionTableButton.disabled = !hasTables;
+  if (hasTables) {
+    el.createSolutionDiagramButton.title = `${state.solutionTableCount} table${state.solutionTableCount === 1 ? '' : 's'} in this solution`;
+    el.createSolutionTableButton.title = el.createSolutionDiagramButton.title;
+  }
+}
+
+async function loadTables() {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  el.tablesList.innerHTML = empty('Loading tables...');
+  clearTableSelection();
+  const data = await api(`/api/tables?scope=${encodeURIComponent(getTableScope())}&includeCounts=false`);
+  state.tables = data.tables || [];
+  state.tablesLoaded = true;
+  state.selectedTableLogicalName = '';
+  state.selectedTableDetails = null;
+  state.selectedTableDiagram = null;
+  el.tableSummary.dataset.countMessage = '';
+  renderTables();
+  toast('Tables loaded.');
+}
+
+function renderTables() {
+  if (!el.tablesList) {
+    return;
+  }
+  const query = el.tableSearch.value.trim().toLowerCase();
+  const filtered = state.tables.filter((table) => !query || tableSearchText(table).includes(query));
+  const countMessage = el.tableSummary.dataset.countMessage || '';
+  el.tableSummary.textContent = state.tables.length
+    ? `${state.tables.length} ${getTableScope() === 'all' ? 'table' : 'custom table'}${state.tables.length === 1 ? '' : 's'} loaded${countMessage ? ` | ${countMessage}` : ''}`
+    : '';
+
+  if (!filtered.length) {
+    el.tablesList.innerHTML = empty(state.tablesLoaded ? 'No tables match the filter.' : 'Load tables.');
+    return;
+  }
+
+  el.tablesList.innerHTML = filtered.map((table) => `
+      <button class="list-item table-row${table.logicalName === state.selectedTableLogicalName ? ' selected' : ''}" type="button" data-table-logical-name="${escapeAttr(table.logicalName)}">
+        <span class="role-name">${escapeHtml(table.displayName || table.schemaName || table.logicalName)}</span>
+        <span class="role-id">${escapeHtml(table.schemaName || '')} | ${escapeHtml(table.logicalName || '')}</span>
+        <span class="role-id">${table.isCustom ? 'custom' : 'standard'} | ${escapeHtml(table.ownership || 'no ownership')}</span>
+      </button>
+    `).join('');
+}
+
+function tableSearchText(table) {
+  return [
+    table.displayName,
+    table.displayCollectionName,
+    table.schemaName,
+    table.logicalName,
+    table.entitySetName,
+    table.description,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+async function selectTable(logicalName) {
+  state.selectedTableLogicalName = logicalName;
+  state.selectedTableDiagram = null;
+  renderTables();
+  await loadSelectedTableDetails();
+}
+
+async function loadSelectedTableDetails() {
+  if (!state.selectedTableLogicalName) {
+    clearTableSelection();
+    return;
+  }
+  el.columnsList.innerHTML = empty('Loading columns...');
+  el.tableDiagramPanel.hidden = true;
+  const details = await api(`/api/tables/${encodeURIComponent(state.selectedTableLogicalName)}?columns=${encodeURIComponent(getColumnScope())}`);
+  state.selectedTableDetails = details;
+  renderTableDetails();
+}
+
+function renderTableDetails() {
+  const details = state.selectedTableDetails;
+  const table = details?.table;
+  if (!table) {
+    clearTableSelection();
+    return;
+  }
+
+  el.selectedTableName.textContent = table.displayName || table.schemaName || table.logicalName;
+  el.selectedTableMeta.textContent = `${table.schemaName || ''} | ${table.logicalName || ''} | ${table.isCustom ? 'custom' : 'standard'}`;
+  el.selectedTableDescription.textContent = table.description || '';
+  el.createTableDiagramButton.disabled = false;
+  el.createTableDocumentButton.disabled = false;
+  renderColumns(details.columns || []);
+}
+
+function renderColumns(columns) {
+  if (!columns.length) {
+    el.columnsList.innerHTML = empty(getColumnScope() === 'all' ? 'No columns found.' : 'No custom columns found.');
+    return;
+  }
+
+  el.columnsList.innerHTML = columns.map((column) => {
+    const tags = [
+      column.type || 'Unknown',
+      column.isCustom ? 'custom' : 'standard',
+      column.requiredLevel ? `required: ${column.requiredLevel}` : '',
+      column.isPrimaryName ? 'primary name' : '',
+      column.isPrimaryId ? 'primary id' : '',
+      column.targets?.length ? `targets: ${column.targets.join(', ')}` : '',
+    ].filter(Boolean).join(' | ');
+    return `
+      <div class="column-row">
+        <div>
+          <span class="role-name">${escapeHtml(column.displayName || column.schemaName || column.logicalName)}</span>
+          <span class="role-id">${escapeHtml(column.schemaName || '')} | ${escapeHtml(column.logicalName || '')}</span>
+          <span class="role-id">${escapeHtml(tags)}</span>
+          ${column.description ? `<span class="role-id">${escapeHtml(column.description)}</span>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function clearTableSelection() {
+  if (!el.selectedTableName) {
+    return;
+  }
+  el.selectedTableName.textContent = 'No table selected';
+  el.selectedTableMeta.textContent = '';
+  el.selectedTableDescription.textContent = '';
+  el.columnsList.innerHTML = empty('Select a table.');
+  el.createTableDiagramButton.disabled = true;
+  el.createTableDocumentButton.disabled = true;
+  el.tableDiagramPanel.hidden = true;
+  el.tableDiagramMeta.textContent = '';
+  el.tableDiagramCanvas.innerHTML = '';
+  el.tableDiagramSource.textContent = '';
+}
+
+async function loadTableDiagram() {
+  if (!state.selectedTableLogicalName) {
+    throw new Error('Select a table first.');
+  }
+  const diagram = await api(`/api/tables/${encodeURIComponent(state.selectedTableLogicalName)}/diagram?columns=${encodeURIComponent(getColumnScope())}`);
+  state.selectedTableDiagram = diagram;
+  const table = state.selectedTableDetails?.table || diagram.table || {};
+  await openDiagramModal(diagram, {
+    title: `${table.displayName || table.logicalName || 'Table'} Diagram`,
+    filename: safeFilename(`${table.displayName || table.logicalName || 'table'}-diagram`),
+  });
+}
+
+async function loadSolutionTableDiagram() {
+  const solution = requireSelectedSolution();
+  const diagram = await api(`/api/solutions/${encodeURIComponent(solution)}/tables/diagram`);
+  const selected = getSelectedSolution();
+  await openDiagramModal(diagram, {
+    title: `${selected?.friendlyname || selected?.uniquename || 'Solution'} Diagram`,
+    filename: safeFilename(`${selected?.uniquename || selected?.friendlyname || 'solution'}-diagram`),
+  });
+}
+
+async function loadTableDocument() {
+  if (!state.selectedTableLogicalName) {
+    throw new Error('Select a table first.');
+  }
+  const document = await api(`/api/tables/${encodeURIComponent(state.selectedTableLogicalName)}/document?columns=${encodeURIComponent(getColumnScope())}`);
+  openTableDocumentModal(document, {
+    title: `${document.table?.displayName || document.table?.logicalName || 'Table'} Design Table`,
+    meta: `${document.columns?.length || 0} column${document.columns?.length === 1 ? '' : 's'}`,
+    filename: safeFilename(`${document.table?.displayName || document.table?.logicalName || 'table'}-table-design`),
+  });
+}
+
+async function loadSolutionTableDocument() {
+  const solution = requireSelectedSolution();
+  const document = await api(`/api/solutions/${encodeURIComponent(solution)}/tables/document`);
+  const selected = getSelectedSolution();
+  openTableDocumentModal(document, {
+    title: `${selected?.friendlyname || selected?.uniquename || 'Solution'} Design Table`,
+    meta: `${document.tableCount || 0} table${document.tableCount === 1 ? '' : 's'} | ${document.columns?.length || 0} column${document.columns?.length === 1 ? '' : 's'}`,
+    filename: safeFilename(`${selected?.uniquename || selected?.friendlyname || 'solution'}-table-design`),
+  });
+}
+
+async function renderTableDiagram(diagram) {
+  el.tableDiagramPanel.hidden = false;
+  el.tableDiagramMeta.textContent = `${diagram.relationshipCount || 0} relationship${diagram.relationshipCount === 1 ? '' : 's'} | ${diagram.relatedTableCount || 0} related table${diagram.relatedTableCount === 1 ? '' : 's'}`;
+  el.tableDiagramSource.textContent = diagram.mermaid || '';
+  el.tableDiagramCanvas.innerHTML = '';
+  if (!window.mermaid || !diagram.mermaid) {
+    el.tableDiagramCanvas.innerHTML = empty('Mermaid renderer unavailable. Source is shown below.');
+    return;
+  }
+
+  try {
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'default',
+    });
+    const id = `tableDiagram${Date.now()}`;
+    const { svg } = await window.mermaid.render(id, diagram.mermaid);
+    el.tableDiagramCanvas.innerHTML = svg;
+  } catch (error) {
+    console.error(error);
+    el.tableDiagramCanvas.innerHTML = empty('Diagram could not be rendered. Mermaid source is shown below.');
+  }
+}
+
+async function openDiagramModal(diagram, options = {}) {
+  state.activeDiagram = {
+    ...diagram,
+    filename: options.filename || 'dataverse-diagram',
+  };
+  state.diagramZoom = 1;
+  el.diagramModalTitle.textContent = options.title || 'Design Diagram';
+  el.diagramModalMeta.textContent = [
+    `${diagram.relationshipCount || 0} relationship${diagram.relationshipCount === 1 ? '' : 's'}`,
+    `${diagram.tables?.length || 0} table${diagram.tables?.length === 1 ? '' : 's'}`,
+    diagram.externalDependencyCount ? `${diagram.externalDependencyCount} external dependenc${diagram.externalDependencyCount === 1 ? 'y' : 'ies'}` : '',
+  ].filter(Boolean).join(' | ');
+  el.diagramExternalLegend.hidden = !diagram.externalDependencyCount;
+  el.diagramModalCanvas.innerHTML = empty('Rendering diagram...');
+  el.diagramModal.hidden = false;
+  await renderMermaidInto(el.diagramModalCanvas, diagram.mermaid || '', 'diagramModalRender');
+  highlightExternalDiagramTables(el.diagramModalCanvas, diagram.externalDependencies || []);
+  setDiagramZoom(1);
+}
+
+function closeDiagramModal() {
+  if (!el.diagramModal) {
+    return;
+  }
+  el.diagramModal.hidden = true;
+  el.diagramModalCanvas.innerHTML = '';
+}
+
+async function renderMermaidInto(container, mermaidSource, idPrefix) {
+  container.innerHTML = '';
+  if (!window.mermaid || !mermaidSource) {
+    container.innerHTML = empty('Mermaid renderer unavailable.');
+    return;
+  }
+  window.mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'default',
+  });
+  const id = `${idPrefix}${Date.now()}`;
+  const { svg } = await window.mermaid.render(id, mermaidSource);
+  container.innerHTML = svg;
+}
+
+function setDiagramZoom(value) {
+  state.diagramZoom = Math.max(0.35, Math.min(2.5, value));
+  const svg = el.diagramModalCanvas.querySelector('svg');
+  if (svg) {
+    const width = Number(svg.dataset.baseWidth || 0) || svg.viewBox?.baseVal?.width || svg.getBoundingClientRect().width || 960;
+    const height = Number(svg.dataset.baseHeight || 0) || svg.viewBox?.baseVal?.height || svg.getBoundingClientRect().height || 640;
+    svg.dataset.baseWidth = String(width);
+    svg.dataset.baseHeight = String(height);
+    svg.style.width = `${Math.ceil(width * state.diagramZoom)}px`;
+    svg.style.height = `${Math.ceil(height * state.diagramZoom)}px`;
+    svg.style.maxWidth = 'none';
+  }
+  el.diagramModalCanvas.style.setProperty('--diagram-zoom', state.diagramZoom);
+}
+
+async function copyActiveMermaid() {
+  const source = state.activeDiagram?.mermaid || '';
+  if (!source) {
+    throw new Error('Create a diagram first.');
+  }
+  await writeClipboard(source);
+  toast('Mermaid source copied.');
+}
+
+function downloadActiveDiagramSvg() {
+  const svg = getActiveDiagramSvg();
+  if (!svg) {
+    toast('Create a diagram first.', 'error');
+    return;
+  }
+  const source = new XMLSerializer().serializeToString(svg);
+  downloadBlob(`${state.activeDiagram?.filename || 'dataverse-diagram'}.svg`, new Blob([source], { type: 'image/svg+xml;charset=utf-8' }));
+}
+
+async function downloadActiveDiagramPng() {
+  const svg = getActiveDiagramSvg();
+  if (!svg) {
+    throw new Error('Create a diagram first.');
+  }
+  const source = new XMLSerializer().serializeToString(svg);
+  const url = URL.createObjectURL(new Blob([source], { type: 'image/svg+xml;charset=utf-8' }));
+  try {
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = url;
+    await image.decode();
+    const bounds = svg.getBoundingClientRect();
+    const canvas = document.createElement('canvas');
+    const scale = 2;
+    canvas.width = Math.max(1, Math.ceil(bounds.width * scale));
+    canvas.height = Math.max(1, Math.ceil(bounds.height * scale));
+    const context = canvas.getContext('2d');
+    context.fillStyle = document.documentElement.dataset.theme === 'dark' ? '#0f1720' : '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      throw new Error('PNG export failed.');
+    }
+    downloadBlob(`${state.activeDiagram?.filename || 'dataverse-diagram'}.png`, blob);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function getActiveDiagramSvg() {
+  return el.diagramModalCanvas.querySelector('svg');
+}
+
+function highlightExternalDiagramTables(container, externalDependencies) {
+  const names = new Set((externalDependencies || []).flatMap((table) => [
+    table.logicalName,
+    table.schemaName,
+    table.displayName,
+  ].filter(Boolean).map((value) => String(value).toLowerCase())));
+  if (!names.size) {
+    return;
+  }
+  for (const group of container.querySelectorAll('g')) {
+    const text = (group.textContent || '').trim().toLowerCase();
+    if (!text || ![...names].some((name) => text.includes(name))) {
+      continue;
+    }
+    group.classList.add('external-dependency-node');
+  }
+}
+
+function openTableDocumentModal(document, options = {}) {
+  state.activeTableDocument = {
+    ...document,
+    filename: options.filename || 'table-design',
+  };
+  el.tableDocumentTitle.textContent = options.title || 'Table Design';
+  el.tableDocumentMeta.textContent = options.meta || `${document.columns?.length || 0} column${document.columns?.length === 1 ? '' : 's'}`;
+  renderTableDocumentRows(document.columns || []);
+  el.tableDocumentModal.hidden = false;
+}
+
+function closeTableDocumentModal() {
+  if (!el.tableDocumentModal) {
+    return;
+  }
+  el.tableDocumentModal.hidden = true;
+  el.tableDocumentBody.innerHTML = '';
+}
+
+function renderTableDocumentRows(rows) {
+  if (!rows.length) {
+    el.tableDocumentBody.innerHTML = empty('No columns found.');
+    return;
+  }
+  const columns = Object.hasOwn(rows[0], 'Table Display Name')
+    ? ['Table Display Name', 'Display Name', 'Unique Name', 'Data Type', 'Description', 'Type']
+    : ['Display Name', 'Unique Name', 'Data Type', 'Description', 'Type'];
+  el.tableDocumentBody.innerHTML = `
+    <table class="metadata-table">
+      <thead>
+        <tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}</tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `
+          <tr>
+            ${columns.map((column) => `<td>${escapeHtml(row[column] || '')}</td>`).join('')}
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+async function exportActiveTableDocument() {
+  const document = state.activeTableDocument;
+  if (!document?.xlsxUrl) {
+    throw new Error('Create a table first.');
+  }
+  await downloadFile(document.xlsxUrl, `${document.filename || 'table-design'}.xlsx`);
+}
+
+function getTableScope() {
+  return [...el.tableScopes].find((input) => input.checked)?.value || 'custom';
+}
+
+function getColumnScope() {
+  return [...el.columnScopes].find((input) => input.checked)?.value || 'custom';
 }
 
 async function openComponentManager(componentType, objectId) {
@@ -2409,6 +2952,10 @@ function applyImportSettings(settings) {
 
 function downloadJsonFile(filename, data) {
   const blob = new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json' });
+  downloadBlob(filename, blob);
+}
+
+function downloadBlob(filename, blob) {
   const href = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = href;
@@ -2417,6 +2964,23 @@ function downloadJsonFile(filename, data) {
   link.click();
   link.remove();
   URL.revokeObjectURL(href);
+}
+
+async function downloadFile(path, fallbackFilename) {
+  const headers = {};
+  if (state.selectedAccountHomeId) {
+    headers['X-PDAC-Account-Home-Id'] = state.selectedAccountHomeId;
+  }
+  const response = await fetch(path, { headers });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new Error(cleanApiErrorMessage(data?.error || data?.message || `Download failed: ${response.status}`));
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  downloadBlob(match?.[1] || fallbackFilename, blob);
+  toast('Excel file downloaded.');
 }
 
 function getImportTargetEnvironment() {
@@ -2573,12 +3137,37 @@ async function api(path, options = {}) {
   const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const message = cleanApiErrorMessage(data?.error || data?.message || `Request failed: ${response.status}`);
+    if (response.status === 401 && options.retryAuth !== false && await refreshAuthStateForRetry()) {
+      return api(path, { ...options, retryAuth: false });
+    }
     if (!options.quiet) {
       toast(message, 'error');
     }
     throw new Error(message);
   }
   return data;
+}
+
+async function refreshAuthStateForRetry() {
+  try {
+    const accountId = state.selectedAccountHomeId || localStorage.getItem(LAST_ACCOUNT_KEY) || '';
+    if (!accountId) {
+      return false;
+    }
+    const response = await fetch('/api/account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ homeAccountId: accountId }),
+    });
+    if (!response.ok) {
+      return false;
+    }
+    applyAuthState(await response.json());
+    return state.selectedAccountHomeId === accountId;
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
 }
 
 async function withBusy(button, task, busyText = '') {

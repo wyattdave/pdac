@@ -1,8 +1,8 @@
 # PDAC - Power DevBox Admin Center
 
 Settings by function not by environment.
-
-PDAC is a small local admin app for working across Power Platform and Dataverse environments. It helps with authentication, users and teams, connections, security roles, solution inspection, solution export/import, and solution component settings.
+![home](screenshots/home.png)
+PDAC is a small local admin app for working across Power Platform and Dataverse environments focusing on a functional hierarchy instead of environment. It helps with authentication, users and teams, connections, security roles, solution inspection, solution export/import, and solution component settings.
 
 ## Run
 
@@ -37,6 +37,7 @@ npm start
 - **Connections**: list environment connections with connector, owner, and health, filter by text or broken state, show only the selected account's connections, open broken owned connections for repair, and delete connections.
 - **Roles**: create roles, download editable permission workbooks or CSVs, upload edited permissions, and rename editable root roles.
 - **Solutions**: list and filter solutions, filter publishers, open the solution in Power Automate, list components, export as managed or unmanaged, and stage a deployment.
+- **Tables**: list Dataverse custom or all tables, inspect custom or all columns, generate Mermaid relationship diagrams, and export table-design workbooks.
 - **Solution component actions**: manage supported components from the solution component list.
 - **Import**: analyze a solution ZIP, map connection references, set environment variable values, download/import settings JSON, and import the solution.
 
@@ -65,6 +66,8 @@ Role assignment uses the Dataverse user-role and team-role associations. When yo
 7. Use **Delete** to remove a connection after confirming. Apps and flows using that connection may stop working.
 
 ## Roles
+
+![excel roles](screenshots/security%20roles.png)
 
 1. Sign in and select an environment.
 2. Open **Roles** and click **Load roles**.
@@ -95,6 +98,22 @@ Rows with `none` are not assigned to the role. Rows with any other scope are sen
 
 The export action calls the Dataverse `ExportSolution` unbound action.
 
+## Tables
+
+![table diagram](screenshots/database%20diagram.png)
+
+1. Open **Tables**.
+2. Choose **Custom** or **All**, then click **Load tables**.
+3. Select a table to load columns.
+4. Choose **Custom columns** or **All columns**.
+5. Click **Create diagram** to open a full-screen Mermaid ER diagram for the selected table and directly related tables through lookup relationships.
+6. Use the diagram toolbar to zoom, download SVG or PNG, copy Mermaid, or close the popup.
+7. Click **Create table** to open a table-design document, then export it to Excel.
+
+Diagrams and table-design documents show custom columns plus the primary name/name column, `createdby`, and `createdon`. The `createdby` relationship to `systemuser` or `team` is intentionally not drawn.
+
+From the **Solutions** tab, load components for a solution. If the solution contains table components, PDAC shows **Create diagram** and **Create table** actions for the solution. The solution diagram includes all solution tables plus directly related lookup-table dependencies outside the solution, with external dependencies highlighted. The solution table document adds the table display name as the first column.
+
 ## Component Actions
 
 Supported actions from the solution component list:
@@ -117,6 +136,8 @@ npm start
 ```
 
 ## Import
+
+![deploy solution](screenshots/import.png)
 
 1. Upload a solution ZIP or use **Deploy** from the Solutions tab.
 2. Select a target environment.

@@ -41,6 +41,7 @@
       <button class="tab active" type="button" data-tab="home">Home</button>
       <button class="tab" type="button" data-tab="roles">Roles</button>
       <button class="tab" type="button" data-tab="solutions">Solutions</button>
+      <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="import">Imports</button>
       <button class="tab" type="button" data-tab="users">Users and Teams</button>
       <button class="tab" type="button" data-tab="connections">Connections</button>
@@ -75,6 +76,10 @@
             <div class="mini-card">
               <h3>Solutions</h3>
               <p>Filter solutions, inspect components, export ZIPs, and manage supported component settings.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Tables</h3>
+              <p>Browse Dataverse tables, inspect columns, view row-count snapshots, and generate relationship diagrams.</p>
             </div>
             <div class="mini-card">
               <h3>Import</h3>
@@ -376,6 +381,10 @@
                   <button id="deploySolutionButton" type="button" disabled>Deploy</button>
                 </div>
               </div>
+              <div id="solutionTableActions" class="actions table-action-row" hidden>
+                <button id="createSolutionDiagramButton" type="button" class="secondary">Create diagram</button>
+                <button id="createSolutionTableButton" type="button" class="secondary">Create table</button>
+              </div>
               <label>
                 Version override
                 <input id="solutionVersionInput" placeholder="1.0.0.0" disabled />
@@ -385,6 +394,77 @@
                 Export as managed
               </label>
               <div id="solutionComponents" class="component-list"></div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="tablesTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Tables</h2>
+            <div class="actions">
+              <button id="loadTablesButton" type="button">Load tables</button>
+            </div>
+          </div>
+
+          <div class="table-filters">
+            <label class="search">
+              Search tables
+              <input id="tableSearch" placeholder="Display, schema, or logical name" />
+            </label>
+            <div class="file-format-toggle table-toggle" role="group" aria-label="Table scope">
+              <label class="checkbox-label">
+                <input name="tableScope" type="radio" value="custom" checked />
+                Custom
+              </label>
+              <label class="checkbox-label">
+                <input name="tableScope" type="radio" value="all" />
+                All
+              </label>
+            </div>
+          </div>
+          <p id="tableSummary" class="muted table-summary"></p>
+
+          <div class="split table-split">
+            <div id="tablesList" class="list table-list"></div>
+            <div class="editor table-detail">
+              <div class="section-title compact-title">
+                <div>
+                  <h3 id="selectedTableName">No table selected</h3>
+                  <p id="selectedTableMeta" class="muted"></p>
+                </div>
+                <div class="actions table-action-row">
+                  <button id="createTableDiagramButton" type="button" disabled>Create diagram</button>
+                  <button id="createTableDocumentButton" type="button" class="secondary" disabled>Create table</button>
+                </div>
+              </div>
+              <p id="selectedTableDescription" class="muted"></p>
+              <div class="file-format-toggle table-toggle" role="group" aria-label="Column scope">
+                <label class="checkbox-label">
+                  <input name="columnScope" type="radio" value="custom" checked />
+                  Custom columns
+                </label>
+                <label class="checkbox-label">
+                  <input name="columnScope" type="radio" value="all" />
+                  All columns
+                </label>
+              </div>
+              <div id="columnsList" class="column-list"></div>
+              <div id="tableDiagramPanel" class="diagram-panel" hidden>
+                <div class="section-title compact-title">
+                  <div>
+                    <h3>Design Diagram</h3>
+                    <p id="tableDiagramMeta" class="muted"></p>
+                  </div>
+                  <button id="copyDiagramButton" type="button" class="secondary">Copy Mermaid</button>
+                </div>
+                <div id="tableDiagramCanvas" class="diagram-canvas"></div>
+                <details class="diagram-source">
+                  <summary>Mermaid source</summary>
+                  <pre id="tableDiagramSource"></pre>
+                </details>
+              </div>
             </div>
           </div>
         </section>
@@ -510,7 +590,54 @@
       </section>
     </div>
 
+    <div id="diagramModal" class="modal-backdrop fullscreen-backdrop" hidden>
+      <section class="modal fullscreen-modal" role="dialog" aria-modal="true" aria-labelledby="diagramModalTitle">
+        <div class="fullscreen-toolbar">
+          <div>
+            <h2 id="diagramModalTitle">Design Diagram</h2>
+            <p id="diagramModalMeta" class="muted"></p>
+          </div>
+          <div class="icon-toolbar" aria-label="Diagram actions">
+            <button id="diagramZoomOutButton" class="icon-button secondary" type="button" title="Zoom out" aria-label="Zoom out">-</button>
+            <button id="diagramZoomInButton" class="icon-button secondary" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+            <button id="downloadDiagramSvgButton" class="icon-button secondary" type="button" title="Download SVG" aria-label="Download SVG">SVG</button>
+            <button id="downloadDiagramPngButton" class="icon-button secondary" type="button" title="Download PNG" aria-label="Download PNG">PNG</button>
+            <button id="copyDiagramModalButton" class="icon-button secondary" type="button" title="Copy Mermaid" aria-label="Copy Mermaid">{}</button>
+            <button id="diagramModalClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+          </div>
+        </div>
+        <div id="diagramExternalLegend" class="diagram-legend" hidden>
+          <span class="external-swatch" aria-hidden="true"></span>
+          <span>External dependency</span>
+        </div>
+        <div id="diagramModalCanvas" class="fullscreen-diagram-canvas"></div>
+      </section>
+    </div>
+
+    <div id="tableDocumentModal" class="modal-backdrop fullscreen-backdrop" hidden>
+      <section class="modal fullscreen-modal" role="dialog" aria-modal="true" aria-labelledby="tableDocumentTitle">
+        <div class="fullscreen-toolbar">
+          <div>
+            <h2 id="tableDocumentTitle">Table Design</h2>
+            <p id="tableDocumentMeta" class="muted"></p>
+          </div>
+          <div class="icon-toolbar" aria-label="Table document actions">
+            <button id="exportTableDocumentButton" class="icon-button secondary" type="button" title="Export Excel" aria-label="Export Excel">
+              <span class="download-icon" aria-hidden="true"></span>
+            </button>
+            <button id="tableDocumentClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+          </div>
+        </div>
+        <div id="tableDocumentBody" class="table-document-body"></div>
+      </section>
+    </div>
+
     <div id="toast"></div>
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+      window.mermaid = mermaid;
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+    </script>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

@@ -456,10 +456,78 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/tables') {
+    requireOrgUrl();
+    sendJson(res, 200, await listDataverseTables({
+      scope: url.searchParams.get('scope') || 'custom',
+      includeCounts: url.searchParams.get('includeCounts') !== 'false',
+    }));
+    return;
+  }
+
+  const tableDocumentXlsxMatch = url.pathname.match(/^\/api\/tables\/([^/]+)\/document\/xlsx$/);
+  if (req.method === 'GET' && tableDocumentXlsxMatch) {
+    requireOrgUrl();
+    const document = await getTableDesignDocument(decodeURIComponent(tableDocumentXlsxMatch[1]), {
+      columnScope: url.searchParams.get('columns') || 'custom',
+    });
+    sendXlsx(res, 200, `${safeFilename(document.table.displayName || document.table.logicalName)}-table-design.xlsx`, await exportDesignDocumentWorkbook(document));
+    return;
+  }
+
+  const tableDocumentMatch = url.pathname.match(/^\/api\/tables\/([^/]+)\/document$/);
+  if (req.method === 'GET' && tableDocumentMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await getTableDesignDocument(decodeURIComponent(tableDocumentMatch[1]), {
+      columnScope: url.searchParams.get('columns') || 'custom',
+    }));
+    return;
+  }
+
+  const tableDetailMatch = url.pathname.match(/^\/api\/tables\/([^/]+)$/);
+  if (req.method === 'GET' && tableDetailMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await getDataverseTableDetails(decodeURIComponent(tableDetailMatch[1]), {
+      columnScope: url.searchParams.get('columns') || 'custom',
+    }));
+    return;
+  }
+
+  const tableDiagramMatch = url.pathname.match(/^\/api\/tables\/([^/]+)\/diagram$/);
+  if (req.method === 'GET' && tableDiagramMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await buildDataverseTableDiagram(decodeURIComponent(tableDiagramMatch[1]), {
+      columnScope: url.searchParams.get('columns') || 'custom',
+    }));
+    return;
+  }
+
   const componentsMatch = url.pathname.match(/^\/api\/solutions\/([0-9a-fA-F-]+)\/components$/);
   if (req.method === 'GET' && componentsMatch) {
     requireOrgUrl();
     sendJson(res, 200, await listSolutionComponents(componentsMatch[1]));
+    return;
+  }
+
+  const solutionTableDocumentXlsxMatch = url.pathname.match(/^\/api\/solutions\/([0-9a-fA-F-]+)\/tables\/document\/xlsx$/);
+  if (req.method === 'GET' && solutionTableDocumentXlsxMatch) {
+    requireOrgUrl();
+    const document = await getSolutionTableDesignDocument(solutionTableDocumentXlsxMatch[1]);
+    sendXlsx(res, 200, `${safeFilename(document.solution.uniquename || document.solution.friendlyname)}-table-design.xlsx`, await exportDesignDocumentWorkbook(document));
+    return;
+  }
+
+  const solutionTableDocumentMatch = url.pathname.match(/^\/api\/solutions\/([0-9a-fA-F-]+)\/tables\/document$/);
+  if (req.method === 'GET' && solutionTableDocumentMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await getSolutionTableDesignDocument(solutionTableDocumentMatch[1]));
+    return;
+  }
+
+  const solutionTableDiagramMatch = url.pathname.match(/^\/api\/solutions\/([0-9a-fA-F-]+)\/tables\/diagram$/);
+  if (req.method === 'GET' && solutionTableDiagramMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await buildSolutionTableDiagram(solutionTableDiagramMatch[1]));
     return;
   }
 
@@ -1116,6 +1184,534 @@ async function listSolutions() {
 
 async function getSolution(solutionId) {
   return dvGet(`solutions(${solutionId})?$select=solutionid,friendlyname,uniquename,version,ismanaged`);
+}
+
+async function listDataverseTables(options = {}) {
+  const scope = options.scope === 'all' ? 'all' : 'custom';
+  const data = await dvGetAll('EntityDefinitions?$select=LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033');
+  const tables = data
+    .filter((item) => item.LogicalName && item.SchemaName && !item.IsIntersect)
+    .filter((item) => scope === 'all' || item.IsCustomEntity)
+    .map(mapEntityDefinition)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+
+  return {
+    scope,
+    tables,
+  };
+}
+
+async function getDataverseTableDetails(logicalName, options = {}) {
+  const entity = await getEntityDefinition(logicalName);
+  const [attributes, lookupTargets] = await Promise.all([
+    listEntityAttributes(logicalName),
+    listLookupAttributeTargets(logicalName).catch(() => new Map()),
+  ]);
+  const columnScope = options.columnScope === 'all' ? 'all' : 'custom';
+  const columns = attributes
+    .map((attribute) => mapAttributeDefinition(attribute, lookupTargets.get(attribute.LogicalName) || []))
+    .filter((column) => columnScope === 'all' || column.isCustom)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+
+  return {
+    table: mapEntityDefinition(entity),
+    columnScope,
+    columns,
+  };
+}
+
+async function buildDataverseTableDiagram(logicalName, options = {}) {
+  const name = requireLogicalName(logicalName, 'table');
+  const diagram = await buildDataverseTablesDiagram([name], {
+    columnScope: options.columnScope === 'all' ? 'all' : 'custom',
+  });
+  return {
+    ...diagram,
+    table: diagram.tables.find((table) => table.logicalName === name) || mapEntityDefinition(await getEntityDefinition(name)),
+  };
+}
+
+async function buildSolutionTableDiagram(solutionId) {
+  const solution = await getSolution(solutionId);
+  const solutionTables = await listSolutionTables(solutionId);
+  if (!solutionTables.length) {
+    return {
+      solution,
+      tableCount: 0,
+      relatedTableCount: 0,
+      relationshipCount: 0,
+      externalDependencyCount: 0,
+      tables: [],
+      externalDependencies: [],
+      relationships: [],
+      mermaid: 'erDiagram\n',
+    };
+  }
+
+  return {
+    solution,
+    tableCount: solutionTables.length,
+    ...await buildDataverseTablesDiagram(solutionTables.map((table) => table.logicalName), {
+      solutionTableNames: new Set(solutionTables.map((table) => table.logicalName)),
+    }),
+  };
+}
+
+async function buildDataverseTablesDiagram(logicalNames, options = {}) {
+  const rootNames = [...new Set(logicalNames.map((name) => requireLogicalName(name, 'table')))];
+  const solutionTableNames = options.solutionTableNames || null;
+  const columnScope = options.columnScope === 'all' ? 'all' : 'custom';
+  let relationships = [];
+  for (const name of rootNames) {
+    relationships.push(...await listDirectLookupRelationships(name));
+  }
+
+  const relationshipByKey = new Map();
+  for (const relationship of relationships) {
+    relationshipByKey.set(`${relationship.referencingEntity}:${relationship.referencingAttribute}:${relationship.referencedEntity}`, relationship);
+  }
+  relationships = [...relationshipByKey.values()];
+
+  const tableNames = new Set(rootNames);
+  for (const relationship of relationships) {
+    tableNames.add(relationship.referencedEntity);
+    tableNames.add(relationship.referencingEntity);
+  }
+
+  const tableEntries = await mapWithConcurrency([...tableNames], 4, async (name) => {
+    const [entity, attributes, lookupTargets] = await Promise.all([
+      getEntityDefinition(name),
+      listEntityAttributes(name),
+      listLookupAttributeTargets(name).catch(() => new Map()),
+    ]);
+    const table = mapEntityDefinition(entity);
+    return [
+      name,
+      {
+        table: {
+          ...table,
+          isExternalDependency: Boolean(solutionTableNames && !solutionTableNames.has(name)),
+        },
+        columns: diagramColumns(table, attributes, lookupTargets, { columnScope }),
+      },
+    ];
+  });
+  const tables = new Map(tableEntries);
+  relationships = relationships.filter((relationship) => isCustomLookupRelationshipForDiagram(relationship, tables));
+
+  const visibleTables = new Set(rootNames);
+  for (const relationship of relationships) {
+    visibleTables.add(relationship.referencedEntity);
+    visibleTables.add(relationship.referencingEntity);
+  }
+  for (const name of [...tables.keys()]) {
+    if (!visibleTables.has(name)) {
+      tables.delete(name);
+    }
+  }
+
+  const mermaid = buildMermaidErDiagram(rootNames[0], tables, relationships, {
+    externalTableNames: solutionTableNames
+      ? [...tables.keys()].filter((name) => !solutionTableNames.has(name))
+      : [],
+  });
+  const externalDependencies = [...tables.values()]
+    .map((entry) => entry.table)
+    .filter((table) => table.isExternalDependency)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName));
+
+  return {
+    relatedTableCount: Math.max(0, tables.size - rootNames.length),
+    relationshipCount: relationships.length,
+    externalDependencyCount: externalDependencies.length,
+    tables: [...tables.values()].map((entry) => entry.table).sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    externalDependencies,
+    relationships,
+    mermaid,
+  };
+}
+
+async function getTableDesignDocument(logicalName, options = {}) {
+  const name = requireLogicalName(logicalName, 'table');
+  const table = mapEntityDefinition(await getEntityDefinition(name));
+  const columnScope = options.columnScope === 'all' ? 'all' : 'custom';
+  const columns = await getDesignDocumentRowsForTable(table, { columnScope });
+  return {
+    kind: 'table',
+    table,
+    columns,
+    xlsxUrl: `/api/tables/${encodeURIComponent(name)}/document/xlsx?columns=${encodeURIComponent(columnScope)}`,
+  };
+}
+
+async function getSolutionTableDesignDocument(solutionId) {
+  const solution = await getSolution(solutionId);
+  const tables = await listSolutionTables(solutionId);
+  const groups = await mapWithConcurrency(tables, 3, async (table) => ({
+    table,
+    columns: await getDesignDocumentRowsForTable(table, { includeTableDisplayName: true }),
+  }));
+  const columns = groups.flatMap((group) => group.columns);
+  return {
+    kind: 'solution',
+    solution,
+    tables,
+    tableCount: tables.length,
+    columns,
+    xlsxUrl: `/api/solutions/${encodeURIComponent(solutionId)}/tables/document/xlsx`,
+  };
+}
+
+async function getDesignDocumentRowsForTable(table, options = {}) {
+  const [attributes, lookupTargets, choiceDetails] = await Promise.all([
+    listEntityAttributes(table.logicalName),
+    listLookupAttributeTargets(table.logicalName).catch(() => new Map()),
+    listChoiceAttributeDetails(table.logicalName).catch(() => new Map()),
+  ]);
+  return attributes
+    .map((attribute) => mapAttributeDefinition(attribute, lookupTargets.get(attribute.LogicalName) || []))
+    .filter((column) => options.columnScope === 'all' || isDesignDocumentColumn(table, column))
+    .sort((left, right) => designColumnSort(table, left, right))
+    .map((column) => designDocumentRow(table, column, choiceDetails.get(column.logicalName), options));
+}
+
+async function listSolutionTables(solutionId) {
+  const data = await dvGetAll(
+    `solutioncomponents?$select=objectid&$filter=_solutionid_value eq ${normalizeGuid(solutionId)} and componenttype eq 1`,
+  );
+  const tables = [];
+  const seen = new Set();
+  for (const component of data) {
+    try {
+      const table = mapEntityDefinition(await getEntityDefinitionByMetadataId(component.objectid));
+      if (table.logicalName && !seen.has(table.logicalName)) {
+        seen.add(table.logicalName);
+        tables.push(table);
+      }
+    } catch (error) {
+      console.error('Could not resolve solution table component:', component.objectid, error);
+    }
+  }
+  return tables.sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+async function getEntityDefinition(logicalName) {
+  const name = requireLogicalName(logicalName, 'table');
+  return dvGet(`EntityDefinitions(LogicalName='${odataString(name)}')?$select=LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033`);
+}
+
+async function getEntityDefinitionByMetadataId(metadataId) {
+  const id = normalizeGuid(metadataId);
+  if (!id) {
+    throw new HttpError(400, 'Table metadata id is required.');
+  }
+  return dvGet(`EntityDefinitions(${id})?$select=LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033`);
+}
+
+async function listEntityAttributes(logicalName) {
+  const name = requireLogicalName(logicalName, 'table');
+  const path = `EntityDefinitions(LogicalName='${odataString(name)}')/Attributes?$select=LogicalName,SchemaName,DisplayName,Description,AttributeType,IsCustomAttribute,IsPrimaryId,IsPrimaryName,IsValidForCreate,IsValidForRead,IsValidForUpdate,RequiredLevel,AttributeOf&LabelLanguages=1033`;
+  const data = await dvGetAll(path);
+  return data.filter((attribute) => attribute.LogicalName && !attribute.AttributeOf);
+}
+
+async function listLookupAttributeTargets(logicalName) {
+  const name = requireLogicalName(logicalName, 'table');
+  const data = await dvGetAll(`EntityDefinitions(LogicalName='${odataString(name)}')/Attributes/Microsoft.Dynamics.CRM.LookupAttributeMetadata?$select=LogicalName,Targets&LabelLanguages=1033`);
+  return new Map(data.filter((item) => item.LogicalName).map((item) => [item.LogicalName, item.Targets || []]));
+}
+
+async function listChoiceAttributeDetails(logicalName) {
+  const name = requireLogicalName(logicalName, 'table');
+  const paths = [
+    `EntityDefinitions(LogicalName='${odataString(name)}')/Attributes/Microsoft.Dynamics.CRM.PicklistAttributeMetadata?$expand=OptionSet,GlobalOptionSet&LabelLanguages=1033`,
+    `EntityDefinitions(LogicalName='${odataString(name)}')/Attributes/Microsoft.Dynamics.CRM.MultiSelectPicklistAttributeMetadata?$expand=OptionSet,GlobalOptionSet&LabelLanguages=1033`,
+  ];
+  const rows = (await Promise.all(paths.map((path) => dvGetAll(path).catch(() => [])))).flat();
+  return new Map(rows.filter((row) => row.LogicalName).map((row) => [row.LogicalName, mapChoiceAttributeDetail(row)]));
+}
+
+async function listDirectLookupRelationships(logicalName) {
+  const name = requireLogicalName(logicalName, 'table');
+  const select = '$select=SchemaName,ReferencedEntity,ReferencedAttribute,ReferencingEntity,ReferencingAttribute,ReferencedEntityNavigationPropertyName,ReferencingEntityNavigationPropertyName,IsCustomRelationship';
+  const [manyToOne, oneToMany] = await Promise.all([
+    dvGetAll(`EntityDefinitions(LogicalName='${odataString(name)}')/ManyToOneRelationships?${select}`),
+    dvGetAll(`EntityDefinitions(LogicalName='${odataString(name)}')/OneToManyRelationships?${select}`),
+  ]);
+  const byKey = new Map();
+  for (const relationship of [...manyToOne, ...oneToMany]) {
+    if (!relationship.ReferencedEntity || !relationship.ReferencingEntity || !relationship.ReferencingAttribute) {
+      continue;
+    }
+    if (isAuditRelationship(relationship)) {
+      continue;
+    }
+    const mapped = mapLookupRelationship(relationship, name);
+    byKey.set(`${mapped.referencingEntity}:${mapped.referencingAttribute}:${mapped.referencedEntity}`, mapped);
+  }
+  return [...byKey.values()].sort((left, right) => `${left.referencingEntity}.${left.referencingAttribute}`.localeCompare(`${right.referencingEntity}.${right.referencingAttribute}`));
+}
+
+function mapEntityDefinition(item) {
+  return {
+    logicalName: item.LogicalName || '',
+    schemaName: item.SchemaName || '',
+    displayName: getLabel(item.DisplayName) || item.SchemaName || item.LogicalName || '',
+    displayCollectionName: getLabel(item.DisplayCollectionName) || '',
+    description: getLabel(item.Description) || '',
+    entitySetName: item.EntitySetName || '',
+    ownership: item.OwnershipType || '',
+    isCustom: Boolean(item.IsCustomEntity),
+    isPrivate: Boolean(item.IsPrivate),
+    primaryIdAttribute: item.PrimaryIdAttribute || '',
+    primaryNameAttribute: item.PrimaryNameAttribute || '',
+  };
+}
+
+function mapAttributeDefinition(attribute, targets = []) {
+  const requiredLevel = attribute.RequiredLevel?.Value || '';
+  return {
+    logicalName: attribute.LogicalName || '',
+    schemaName: attribute.SchemaName || '',
+    displayName: getLabel(attribute.DisplayName) || attribute.SchemaName || attribute.LogicalName || '',
+    description: getLabel(attribute.Description) || '',
+    type: attribute.AttributeType || '',
+    requiredLevel,
+    targets,
+    isCustom: Boolean(attribute.IsCustomAttribute),
+    isPrimaryId: Boolean(attribute.IsPrimaryId),
+    isPrimaryName: Boolean(attribute.IsPrimaryName),
+    isValidForCreate: attribute.IsValidForCreate !== false,
+    isValidForRead: attribute.IsValidForRead !== false,
+    isValidForUpdate: attribute.IsValidForUpdate !== false,
+  };
+}
+
+function mapChoiceAttributeDetail(attribute) {
+  const global = attribute.GlobalOptionSet || null;
+  const local = attribute.OptionSet || null;
+  const optionSet = global || local || {};
+  return {
+    isGlobal: Boolean(global),
+    optionSetName: global?.Name || local?.Name || '',
+    choices: (optionSet.Options || [])
+      .map((option) => ({
+        value: option.Value,
+        label: getLabel(option.Label) || String(option.Value ?? ''),
+      }))
+      .filter((option) => option.label)
+      .sort((left, right) => String(left.label).localeCompare(String(right.label))),
+  };
+}
+
+function mapLookupRelationship(relationship, selectedLogicalName) {
+  return {
+    schemaName: relationship.SchemaName || '',
+    referencedEntity: relationship.ReferencedEntity || '',
+    referencedAttribute: relationship.ReferencedAttribute || '',
+    referencingEntity: relationship.ReferencingEntity || '',
+    referencingAttribute: relationship.ReferencingAttribute || '',
+    referencedNavigation: relationship.ReferencedEntityNavigationPropertyName || '',
+    referencingNavigation: relationship.ReferencingEntityNavigationPropertyName || '',
+    isCustom: Boolean(relationship.IsCustomRelationship),
+    direction: relationship.ReferencingEntity === selectedLogicalName ? 'outgoing' : 'incoming',
+  };
+}
+
+function diagramColumns(table, attributes, lookupTargets, options = {}) {
+  const primaryName = table.primaryNameAttribute || 'name';
+  const include = new Set([primaryName, 'name', 'createdby', 'createdon']);
+  return attributes
+    .map((attribute) => mapAttributeDefinition(attribute, lookupTargets.get(attribute.LogicalName) || []))
+    .filter((column) => options.columnScope === 'all' || column.isCustom || include.has(column.logicalName))
+    .sort((left, right) => {
+      const leftPinned = include.has(left.logicalName) ? 0 : 1;
+      const rightPinned = include.has(right.logicalName) ? 0 : 1;
+      return leftPinned - rightPinned || left.displayName.localeCompare(right.displayName);
+    });
+}
+
+function buildMermaidErDiagram(rootLogicalName, tables, relationships, options = {}) {
+  const lines = ['erDiagram'];
+  for (const relationship of relationships) {
+    const parent = mermaidIdentifier(relationship.referencedEntity);
+    const child = mermaidIdentifier(relationship.referencingEntity);
+    const label = mermaidLabel(relationship.referencingAttribute || relationship.schemaName || 'lookup');
+    lines.push(`  ${parent} ||--o{ ${child} : "${label}"`);
+  }
+  for (const [logicalName, entry] of [...tables.entries()].sort((left, right) => {
+    if (left[0] === rootLogicalName) {
+      return -1;
+    }
+    if (right[0] === rootLogicalName) {
+      return 1;
+    }
+    return left[1].table.displayName.localeCompare(right[1].table.displayName);
+  })) {
+    lines.push(`  ${mermaidIdentifier(logicalName)} {`);
+    for (const column of entry.columns) {
+      lines.push(`    ${mermaidType(column.type)} ${mermaidIdentifier(column.logicalName)} "${mermaidLabel(column.displayName)}"`);
+    }
+    if (!entry.columns.length) {
+      lines.push('    string no_custom_columns "No custom columns"');
+    }
+    lines.push('  }');
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function isDesignDocumentColumn(table, column) {
+  return column.isCustom ||
+    column.logicalName === table.primaryNameAttribute ||
+    column.logicalName === 'name' ||
+    column.logicalName === 'createdby' ||
+    column.logicalName === 'createdon';
+}
+
+function designColumnSort(table, left, right) {
+  const order = new Map([
+    [table.primaryNameAttribute || 'name', 0],
+    ['name', 1],
+    ['createdby', 2],
+    ['createdon', 3],
+  ]);
+  const leftOrder = order.has(left.logicalName) ? order.get(left.logicalName) : 10;
+  const rightOrder = order.has(right.logicalName) ? order.get(right.logicalName) : 10;
+  return leftOrder - rightOrder || left.displayName.localeCompare(right.displayName);
+}
+
+function designDocumentRow(table, column, choiceDetails, options = {}) {
+  const row = {
+    'Display Name': column.displayName || column.schemaName || column.logicalName,
+    'Unique Name': column.schemaName || column.logicalName,
+    'Data Type': designDataType(column),
+    Description: column.description || '',
+    Type: designColumnType(column, choiceDetails),
+  };
+  if (options.includeTableDisplayName) {
+    return {
+      'Table Display Name': table.displayName || table.schemaName || table.logicalName,
+      ...row,
+    };
+  }
+  return row;
+}
+
+function designDataType(column) {
+  const type = String(column.type || 'String');
+  if (type === 'Picklist') {
+    return 'Choice';
+  }
+  if (type === 'MultiSelectPicklist') {
+    return 'Choices';
+  }
+  if (['Integer', 'BigInt'].includes(type)) {
+    return 'Integer';
+  }
+  return type;
+}
+
+function designColumnType(column, choiceDetails) {
+  if (['Lookup', 'Customer', 'Owner'].includes(column.type)) {
+    return column.targets?.length ? `Lookup table: ${column.targets.join(', ')}` : 'Lookup table: unavailable';
+  }
+  if (['Picklist', 'MultiSelectPicklist'].includes(column.type)) {
+    if (choiceDetails?.isGlobal) {
+      return `Global choice: ${choiceDetails.optionSetName || 'unnamed'}`;
+    }
+    const choices = choiceDetails?.choices?.length
+      ? choiceDetails.choices.map((choice) => `${choice.label} (${choice.value})`).join('; ')
+      : 'choices unavailable';
+    return `Local choices: ${choices}`;
+  }
+  return column.isCustom ? 'Custom column' : 'Standard column';
+}
+
+async function exportDesignDocumentWorkbook(document) {
+  const rows = document.columns || [];
+  const columns = document.kind === 'solution'
+    ? ['Table Display Name', 'Display Name', 'Unique Name', 'Data Type', 'Description', 'Type']
+    : ['Display Name', 'Unique Name', 'Data Type', 'Description', 'Type'];
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet('Table Design', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  worksheet.columns = columns.map((header) => ({
+    header,
+    key: header,
+    width: designDocumentColumnWidth(header),
+  }));
+  worksheet.addRows(rows);
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: columns.length },
+  };
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    cell.border = bottomBorder();
+  });
+  for (let rowNumber = 2; rowNumber <= rows.length + 1; rowNumber++) {
+    worksheet.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+  }
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function designDocumentColumnWidth(header) {
+  return {
+    'Table Display Name': 28,
+    'Display Name': 28,
+    'Unique Name': 30,
+    'Data Type': 18,
+    Description: 48,
+    Type: 56,
+  }[header] || 20;
+}
+
+function isAuditRelationship(relationship) {
+  const attribute = String(relationship.ReferencingAttribute || '').toLowerCase();
+  const referenced = String(relationship.ReferencedEntity || '').toLowerCase();
+  return attribute === 'createdby' && ['systemuser', 'team'].includes(referenced);
+}
+
+function isCustomLookupRelationshipForDiagram(relationship, tables) {
+  const referencing = tables.get(relationship.referencingEntity);
+  return Boolean(referencing?.columns?.some((column) =>
+    column.logicalName === relationship.referencingAttribute &&
+    column.isCustom &&
+    ['Lookup', 'Customer', 'Owner'].includes(column.type)
+  ));
+}
+
+function mermaidIdentifier(value) {
+  const text = String(value || 'unknown').replace(/[^A-Za-z0-9_]/g, '_');
+  return /^[A-Za-z_]/.test(text) ? text : `_${text}`;
+}
+
+function mermaidType(value) {
+  const type = String(value || 'string').toLowerCase();
+  if (type.includes('lookup') || type.includes('owner') || type.includes('customer')) {
+    return 'lookup';
+  }
+  if (type.includes('int') || type.includes('decimal') || type.includes('double') || type.includes('money') || type.includes('bigint')) {
+    return 'number';
+  }
+  if (type.includes('date')) {
+    return 'datetime';
+  }
+  if (type.includes('boolean')) {
+    return 'boolean';
+  }
+  return 'string';
+}
+
+function mermaidLabel(value) {
+  return String(value || '').replace(/"/g, '\\"').replace(/\r?\n/g, ' ');
 }
 
 async function listSolutionComponents(solutionId) {
@@ -3708,6 +4304,36 @@ function requireString(value, name) {
     throw new HttpError(400, `Missing required field: ${name}`);
   }
   return value.trim();
+}
+
+function requireLogicalName(value, name) {
+  const text = requireString(value, name).toLowerCase();
+  if (!/^[a-z][a-z0-9_]*$/.test(text)) {
+    throw new HttpError(400, `${name} must be a Dataverse logical name.`);
+  }
+  return text;
+}
+
+function chunkArray(values, size) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function mapWithConcurrency(values, limit, mapper) {
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, values.length) }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function normalizeOrgUrl(value) {
