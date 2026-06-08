@@ -128,6 +128,7 @@ const selected = {
 };
 const accountEnvironmentSelections = new Map();
 const importPackages = new Map();
+let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '',
@@ -466,9 +467,10 @@ async function handleApi(req, res) {
   }
 
   if (route === 'POST /api/solutions/report') {
-    requireOrgUrl();
     const body = await readJson(req);
-    const report = await buildSolutionsReportWorkbook(body.solutionIds || []);
+    await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
+    requireOrgUrl();
+    const report = await buildSolutionsReportWorkbook(body.solutionIds || [], body.solutions || body.solutionSnapshots || []);
     sendXlsx(res, 200, report.filename, report.bytes);
     return;
   }
@@ -1031,13 +1033,17 @@ async function acquireTokenWithAccountPicker(resource) {
   });
   authProvider._tenantId = result.tenantId;
   selected.accountHomeId = result.account?.homeAccountId || '';
+  rememberDataverseAccount(selected.accountHomeId);
   return result;
 }
 
 async function getAccessTokenForSelectedAccount(resource) {
   if (!selected.accountHomeId) {
     const accounts = await getMsalAccounts();
-    if (accounts.length === 1) {
+    const rememberedAccount = accounts.find((account) => account.homeAccountId === lastDataverseAccountHomeId);
+    if (rememberedAccount) {
+      selected.accountHomeId = rememberedAccount.homeAccountId;
+    } else if (accounts.length === 1) {
       selected.accountHomeId = accounts[0].homeAccountId;
     } else if (accounts.length > 1) {
       throw new HttpError(400, 'Multiple accounts found. Select an account in the header first.');
@@ -1061,6 +1067,7 @@ async function getAccessTokenForSelectedAccount(resource) {
     scopes: [`${resource}/.default`],
   });
   authProvider._tenantId = result.tenantId;
+  rememberDataverseAccount(account.homeAccountId);
   return result.accessToken;
 }
 
@@ -1083,10 +1090,12 @@ async function listAccounts() {
 
 function ensureSelectedAccount(accounts) {
   if (selected.accountHomeId && accounts.some((account) => account.homeAccountId === selected.accountHomeId)) {
+    rememberDataverseAccount(selected.accountHomeId);
     return;
   }
 
   selected.accountHomeId = accounts.length === 1 ? accounts[0].homeAccountId : '';
+  rememberDataverseAccount(selected.accountHomeId);
   if (selected.accountHomeId && accountEnvironmentSelections.has(selected.accountHomeId)) {
     applySavedEnvironmentForAccount(selected.accountHomeId);
   } else if (selected.accountHomeId && selected.orgUrl) {
@@ -1107,24 +1116,38 @@ async function selectAccount(homeAccountId) {
   }
 
   selected.accountHomeId = homeAccountId;
+  rememberDataverseAccount(homeAccountId);
   applySavedEnvironmentForAccount(homeAccountId);
 }
 
 async function applyRequestAccount(req) {
   const homeAccountId = String(req.headers['x-pdac-account-home-id'] || '').trim();
-  if (!homeAccountId || selected.accountHomeId === homeAccountId) {
+  await applyAccountHomeId(homeAccountId);
+}
+
+async function applyAccountHomeId(homeAccountId) {
+  const normalizedHomeAccountId = String(homeAccountId || '').trim();
+  if (!normalizedHomeAccountId || selected.accountHomeId === normalizedHomeAccountId) {
     return;
   }
 
   const accounts = await getMsalAccounts();
-  if (!accounts.some((account) => account.homeAccountId === homeAccountId)) {
+  if (!accounts.some((account) => account.homeAccountId === normalizedHomeAccountId)) {
     throw new HttpError(401, 'Selected account is no longer signed in. Sign in again.');
   }
 
-  selected.accountHomeId = homeAccountId;
-  const savedEnvironment = accountEnvironmentSelections.get(homeAccountId);
+  selected.accountHomeId = normalizedHomeAccountId;
+  rememberDataverseAccount(normalizedHomeAccountId);
+  const savedEnvironment = accountEnvironmentSelections.get(normalizedHomeAccountId);
   if (savedEnvironment) {
     setSelectedEnvironment(savedEnvironment);
+  }
+}
+
+function rememberDataverseAccount(homeAccountId) {
+  const normalizedHomeAccountId = String(homeAccountId || '').trim();
+  if (normalizedHomeAccountId) {
+    lastDataverseAccountHomeId = normalizedHomeAccountId;
   }
 }
 
@@ -1209,7 +1232,7 @@ async function listSolutions() {
   }));
 }
 
-async function buildSolutionsReportWorkbook(solutionIds) {
+async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = []) {
   const normalizedIds = [...new Set((Array.isArray(solutionIds) ? solutionIds : [])
     .map((value) => normalizeGuid(value))
     .filter(Boolean))];
@@ -1217,7 +1240,8 @@ async function buildSolutionsReportWorkbook(solutionIds) {
     throw new HttpError(400, 'Select at least one solution to export a report.');
   }
 
-  const allSolutions = await listSolutions();
+  const snapshotSolutions = normalizeSolutionReportSnapshots(solutionSnapshots);
+  const allSolutions = snapshotSolutions.length ? snapshotSolutions : await listSolutions();
   const selectedSolutions = allSolutions.filter((solution) => normalizedIds.includes(normalizeGuid(solution.solutionid)));
   if (!selectedSolutions.length) {
     throw new HttpError(404, 'No matching solutions were found for the requested report.');
@@ -1225,6 +1249,7 @@ async function buildSolutionsReportWorkbook(solutionIds) {
 
   const components = await listSolutionComponentsForSolutions(selectedSolutions.map((solution) => solution.solutionid));
   const rows = await buildSolutionReportRows(selectedSolutions, components);
+  const componentRows = buildSolutionComponentReportRows(selectedSolutions, components);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'PDAC';
   workbook.created = new Date();
@@ -1263,10 +1288,55 @@ async function buildSolutionsReportWorkbook(solutionIds) {
     worksheet.getRow(rowNumber).alignment = { vertical: 'top' };
   }
 
+  const componentWorksheet = workbook.addWorksheet('Components', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  const componentColumns = [
+    ['Solution', 32],
+    ['Type', 26],
+    ['name', 42],
+    ['Id', 38],
+  ];
+  componentWorksheet.columns = componentColumns.map(([header, width]) => ({ header, key: header, width }));
+  componentWorksheet.addRows(componentRows);
+  componentWorksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: componentColumns.length },
+  };
+  const componentHeaderRow = componentWorksheet.getRow(1);
+  componentHeaderRow.height = 22;
+  componentHeaderRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    cell.border = bottomBorder();
+  });
+  for (let rowNumber = 2; rowNumber <= componentRows.length + 1; rowNumber++) {
+    componentWorksheet.getRow(rowNumber).alignment = { vertical: 'top' };
+  }
+
   return {
     filename: `solutions-report-${safeFilename(selected.environmentName || 'environment')}.xlsx`,
     bytes: Buffer.from(await workbook.xlsx.writeBuffer()),
   };
+}
+
+function normalizeSolutionReportSnapshots(solutions) {
+  if (!Array.isArray(solutions)) {
+    return [];
+  }
+
+  return solutions
+    .filter((solution) => normalizeGuid(solution?.solutionid))
+    .map((solution) => ({
+      solutionid: solution.solutionid,
+      friendlyname: solution.friendlyname || '',
+      uniquename: solution.uniquename || '',
+      publisher: {
+        friendlyname: solution.publisher?.friendlyname || '',
+        uniquename: solution.publisher?.uniquename || '',
+      },
+    }));
 }
 
 async function buildSolutionReportRows(solutions, components) {
@@ -1282,27 +1352,13 @@ async function buildSolutionReportRows(solutions, components) {
     componentsBySolution.get(solutionId).push(component);
   }
 
-  const componentTypes = [...new Set(components.map((component) => Number(component.componenttype)).filter((value) => Number.isFinite(value)))];
-  const typeDetails = new Map(await mapWithConcurrency(componentTypes, 4, async (componentType) => {
-    const details = await getSolutionReportTypeDetails(componentType);
-    return [componentType, details];
-  }));
-
-  const canvasAppIds = [...new Set(components
-    .filter((component) => Number(component.componenttype) === 300)
-    .map((component) => normalizeGuid(component.objectid))
-    .filter(Boolean))];
-  const canvasApps = await listCanvasAppsForReport(canvasAppIds);
-
   return solutions.map((solution) => {
     const counts = createSolutionReportCounts();
     const solutionComponents = componentsBySolution.get(normalizeGuid(solution.solutionid)) || [];
     for (const component of solutionComponents) {
       const componentType = Number(component.componenttype);
       const objectId = normalizeGuid(component.objectid) || `${componentType}:${counts.flows.size + counts.tables.size}`;
-      const typeDetail = typeDetails.get(componentType) || {};
-      const logicalName = String(typeDetail.logicalName || '').toLowerCase();
-      const typeLabel = String(typeDetail.typeLabel || '').toLowerCase();
+      const typeLabel = String(component.typeLabel || SOLUTION_COMPONENT_TYPES[componentType] || '').toLowerCase();
 
       if (componentType === 29) {
         counts.flows.add(objectId);
@@ -1314,41 +1370,37 @@ async function buildSolutionReportRows(solutions, components) {
         continue;
       }
 
-      if (componentType === 380 || logicalName === 'environmentvariabledefinition') {
+      if (componentType === 380 || typeLabel.includes('environment variable definition')) {
         counts.environmentVariables.add(objectId);
         continue;
       }
 
-      if (logicalName === 'connectionreference') {
+      if (typeLabel.includes('connection reference')) {
         counts.connectionReferences.add(objectId);
         continue;
       }
 
-      if (logicalName === 'appmodule') {
+      if (typeLabel.includes('model driven app') || typeLabel.includes('model-driven app') || typeLabel.includes('app module')) {
         counts.modelDrivenApps.add(objectId);
         continue;
       }
 
-      if (logicalName === 'bot') {
+      if (typeLabel.includes('copilot') || typeLabel === 'bot' || typeLabel.includes(' bot')) {
         counts.copilotStudioAgents.add(objectId);
         continue;
       }
 
       if (componentType === 300) {
-        const canvasApp = canvasApps.get(objectId);
-        if (Number(canvasApp?.canvasapptype) === 4) {
-          continue;
-        }
         counts.canvasApps.add(objectId);
         continue;
       }
 
-      if (isAiModelComponent(logicalName, typeLabel)) {
+      if (isAiModelComponent('', typeLabel)) {
         counts.aiModels.add(objectId);
         continue;
       }
 
-      if (isDataflowComponent(logicalName, typeLabel)) {
+      if (isDataflowComponent('', typeLabel)) {
         counts.dataflows.add(objectId);
       }
     }
@@ -1384,6 +1436,24 @@ function createSolutionReportCounts() {
   };
 }
 
+function buildSolutionComponentReportRows(solutions, components) {
+  const solutionNameById = new Map(solutions.map((solution) => [
+    normalizeGuid(solution.solutionid),
+    solution.friendlyname || solution.uniquename || solution.solutionid || '',
+  ]));
+
+  const rows = components.map((component) => ({
+    Solution: solutionNameById.get(normalizeGuid(component.solutionid)) || '',
+    Type: component.typeLabel || SOLUTION_COMPONENT_TYPES[Number(component.componenttype)] || `Type ${Number(component.componenttype)}`,
+    name: component.objectid || '',
+    Id: component.objectid || '',
+  }));
+
+  return rows.sort((left, right) =>
+    `${left.Solution} ${left.Type} ${left.name}`.localeCompare(`${right.Solution} ${right.Type} ${right.name}`),
+  );
+}
+
 async function listSolutionComponentsForSolutions(solutionIds) {
   const normalizedIds = [...new Set(solutionIds.map((value) => normalizeGuid(value)).filter(Boolean))];
   if (!normalizedIds.length) {
@@ -1393,11 +1463,14 @@ async function listSolutionComponentsForSolutions(solutionIds) {
   const chunks = chunkArray(normalizedIds, 20);
   const pages = await mapWithConcurrency(chunks, 3, async (chunk) => {
     const filter = chunk.map((solutionId) => `_solutionid_value eq ${solutionId}`).join(' or ');
-    return dvGetAll(`solutioncomponents?$select=_solutionid_value,componenttype,objectid&$filter=${filter}`);
+    return dvGetAll(`solutioncomponents?$select=_solutionid_value,componenttype,objectid&$filter=${filter}`, {
+      Prefer: 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"',
+    });
   });
   return pages.flat().map((component) => ({
     solutionid: component._solutionid_value,
     componenttype: Number(component.componenttype),
+    typeLabel: component['componenttype@OData.Community.Display.V1.FormattedValue'] || '',
     objectid: component.objectid,
   }));
 }
@@ -4216,11 +4289,11 @@ async function getTablePrivilegeIds() {
   );
 }
 
-async function dvGetAll(path) {
+async function dvGetAll(path, extraHeaders = {}) {
   const rows = [];
   let next = `${selected.orgUrl}/api/data/v9.2/${path}`;
   while (next) {
-    const response = await dvRequestUrl('GET', next);
+    const response = await dvRequestUrl('GET', next, undefined, extraHeaders);
     rows.push(...(response.data.value || []));
     next = response.data['@odata.nextLink'] || '';
   }

@@ -69,6 +69,8 @@ const el = {
   downloadSolutionsReportButton: document.querySelector('#downloadSolutionsReportButton'),
   solutionSearch: document.querySelector('#solutionSearch'),
   unmanagedOnly: document.querySelector('#unmanagedOnly'),
+  includeActiveSolution: document.querySelector('#includeActiveSolution'),
+  includeDefaultSolution: document.querySelector('#includeDefaultSolution'),
   publisherDropdownButton: document.querySelector('#publisherDropdownButton'),
   publisherDropdown: document.querySelector('#publisherDropdown'),
   publisherSelectAllButton: document.querySelector('#publisherSelectAllButton'),
@@ -77,7 +79,8 @@ const el = {
   solutions: document.querySelector('#solutions'),
   selectedSolutionName: document.querySelector('#selectedSolutionName'),
   selectedSolutionMeta: document.querySelector('#selectedSolutionMeta'),
-  selectedSolutionLink: document.querySelector('#selectedSolutionLink'),
+  selectedSolutionPowerAppsLink: document.querySelector('#selectedSolutionPowerAppsLink'),
+  selectedSolutionCopilotLink: document.querySelector('#selectedSolutionCopilotLink'),
   loadComponentsButton: document.querySelector('#loadComponentsButton'),
   exportSolutionButton: document.querySelector('#exportSolutionButton'),
   deploySolutionButton: document.querySelector('#deploySolutionButton'),
@@ -340,6 +343,8 @@ el.loadSolutionsButton.addEventListener('click', () => withBusy(el.loadSolutions
 el.downloadSolutionsReportButton.addEventListener('click', () => withBusy(el.downloadSolutionsReportButton, downloadSolutionsReport, 'Creating report'));
 el.solutionSearch.addEventListener('input', renderSolutions);
 el.unmanagedOnly.addEventListener('change', renderSolutions);
+el.includeActiveSolution.addEventListener('change', renderSolutions);
+el.includeDefaultSolution.addEventListener('change', renderSolutions);
 el.publisherFilter.addEventListener('change', handlePublisherFilterChange);
 el.publisherSelectAllButton.addEventListener('click', () => setPublisherSelection(true));
 el.publisherSelectNoneButton.addEventListener('click', () => setPublisherSelection(false));
@@ -1871,15 +1876,33 @@ async function loadSolutions() {
 }
 
 async function downloadSolutionsReport() {
-  const filtered = getFilteredSolutions();
-  if (!filtered.length) {
+  const visibleSolutions = getVisibleSolutionRows();
+  if (!visibleSolutions.length) {
     throw new Error('No solutions match the current filters.');
+  }
+
+  let accountHomeId = resolveRequestAccountId();
+  await ensureSelectedAccountForRequest(accountHomeId);
+  accountHomeId = resolveRequestAccountId(accountHomeId);
+  if (!accountHomeId) {
+    throw new Error('Select an account in the header, then retry.');
   }
 
   const response = await apiFetch('/api/solutions/report', {
     method: 'POST',
+    preferAccountId: accountHomeId,
     body: {
-      solutionIds: filtered.map((solution) => solution.solutionid),
+      accountHomeId,
+      solutionIds: visibleSolutions.map((solution) => solution.solutionid),
+      solutions: visibleSolutions.map((solution) => ({
+        solutionid: solution.solutionid,
+        friendlyname: solution.friendlyname || '',
+        uniquename: solution.uniquename || '',
+        publisher: {
+          friendlyname: solution.publisher?.friendlyname || '',
+          uniquename: solution.publisher?.uniquename || '',
+        },
+      })),
     },
   });
 
@@ -1963,15 +1986,30 @@ function renderSolutions() {
   updatePublisherSummary();
 }
 
+function getVisibleSolutionRows() {
+  const visibleIds = new Set([...el.solutions.querySelectorAll('.solution-row')]
+    .map((button) => normalizeSolutionId(button.dataset.id))
+    .filter(Boolean));
+  return state.solutions.filter((solution) => visibleIds.has(normalizeSolutionId(solution.solutionid)));
+}
+
+function normalizeSolutionId(value) {
+  return String(value || '').trim().replace(/[{}]/g, '').toLowerCase();
+}
+
 function getFilteredSolutions() {
   const query = el.solutionSearch.value.trim().toLowerCase();
   const publisherIds = getSelectedPublishers();
+  const publisherFilterAvailable = Boolean(el.publisherFilter.querySelector('input[type="checkbox"]'));
   return state.solutions.filter((solution) => {
     const text = `${solution.friendlyname || ''} ${solution.uniquename || ''}`.toLowerCase();
+    const uniqueName = String(solution.uniquename || '').trim().toLowerCase();
     const publisherId = solution.publisher?.publisherid || '';
     return (!query || text.includes(query)) &&
       (!el.unmanagedOnly.checked || !solution.ismanaged) &&
-      (!publisherIds.size || publisherIds.has(publisherId));
+      (el.includeActiveSolution.checked || uniqueName !== 'active') &&
+      (el.includeDefaultSolution.checked || uniqueName !== 'default') &&
+      (!publisherFilterAvailable || publisherIds.has(publisherId));
   });
 }
 
@@ -3365,9 +3403,12 @@ function lastEnvironmentKey() {
 }
 
 function renderSolutionLink(solution) {
-  const href = solution ? makePowerAutomateSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
-  el.selectedSolutionLink.hidden = !href;
-  el.selectedSolutionLink.href = href || '#';
+  const powerAppsHref = solution ? makePowerAppsSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
+  const copilotHref = solution ? makeCopilotStudioSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
+  el.selectedSolutionPowerAppsLink.hidden = !powerAppsHref;
+  el.selectedSolutionPowerAppsLink.href = powerAppsHref || '#';
+  el.selectedSolutionCopilotLink.hidden = !copilotHref;
+  el.selectedSolutionCopilotLink.href = copilotHref || '#';
 }
 
 function getSelectedSolution() {
@@ -3379,6 +3420,20 @@ function makePowerAutomateSolutionUrl(environmentId, solutionId) {
     return '';
   }
   return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}/overview`;
+}
+
+function makePowerAppsSolutionUrl(environmentId, solutionId) {
+  if (!environmentId || !solutionId) {
+    return '';
+  }
+  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/${encodeURIComponent(solutionId)}/overview`;
+}
+
+function makeCopilotStudioSolutionUrl(environmentId, solutionId) {
+  if (!environmentId || !solutionId) {
+    return '';
+  }
+  return `https://copilotstudio.microsoft.com/environments/${encodeURIComponent(environmentId)}/${encodeURIComponent(solutionId)}/overview`;
 }
 
 function safeHttpsUrl(value) {
@@ -3405,8 +3460,9 @@ async function api(path, options = {}) {
 }
 
 async function apiFetch(path, options = {}) {
-  const requestAccountId = resolveRequestAccountId(options.preferAccountId || '');
+  let requestAccountId = resolveRequestAccountId(options.preferAccountId || '');
   await ensureSelectedAccountForRequest(requestAccountId);
+  requestAccountId = resolveRequestAccountId(requestAccountId);
 
   const headers = {};
   if (requestAccountId) {
@@ -3486,7 +3542,7 @@ function isAccountSelectionError(message) {
 
 async function refreshAuthStateForRetry() {
   try {
-    const accountId = state.selectedAccountHomeId || localStorage.getItem(LAST_ACCOUNT_KEY) || '';
+    const accountId = resolveRequestAccountId();
     if (!accountId) {
       return false;
     }
@@ -3557,7 +3613,7 @@ function toast(message, type = 'info') {
   el.toast.classList.toggle('error', type === 'error');
   el.toast.classList.add('show');
   clearTimeout(toast.timeout);
-  toast.timeout = setTimeout(() => el.toast.classList.remove('show'), 3600);
+  toast.timeout = setTimeout(() => el.toast.classList.remove('show'), type === 'error' ? 5000 : 3600);
 }
 
 function cleanApiErrorMessage(message) {

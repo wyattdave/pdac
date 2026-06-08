@@ -358,6 +358,14 @@
               <input id="unmanagedOnly" type="checkbox" checked />
               Unmanaged only
             </label>
+            <label class="checkbox-label">
+              <input id="includeActiveSolution" type="checkbox" />
+              Active Solution
+            </label>
+            <label class="checkbox-label">
+              <input id="includeDefaultSolution" type="checkbox" />
+              Default Solution
+            </label>
             <label>
               Publishers
               <div class="combo">
@@ -380,7 +388,10 @@
                 <div>
                   <h3 id="selectedSolutionName">No solution selected</h3>
                   <p id="selectedSolutionMeta" class="muted"></p>
-                  <p><a id="selectedSolutionLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Power Automate</a></p>
+                  <p class="solution-links">
+                    <a id="selectedSolutionPowerAppsLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Power Apps</a>
+                    <a id="selectedSolutionCopilotLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Copilot Studio</a>
+                  </p>
                 </div>
                 <div class="actions solution-actions">
                   <button id="loadComponentsButton" type="button" disabled>List components</button>

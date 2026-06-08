@@ -875,8 +875,14 @@ select:disabled {
   align-items: end;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 0.4fr);
+  grid-template-columns: minmax(220px, 1fr) auto auto auto minmax(220px, 0.4fr);
   margin-bottom: 14px;
+}
+
+.solution-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
 }
 
 .table-filters {
@@ -1123,14 +1129,6 @@ select:disabled {
 .compact-title .actions button {
   flex: 1 1 140px;
   min-width: 0;
-}
-
-.solution-actions button {
-  align-items: center;
-  display: inline-flex;
-  justify-content: center;
-  min-height: 78px;
-  text-align: center;
 }
 
 .file-format-toggle {

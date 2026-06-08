@@ -1,8 +1,30 @@
 {
   "name": "pdac",
+  "version": "0.1.0",
+  "description": "Local Power DevBox Admin Center for Power Platform and Dataverse administration.",
+  "license": "MIT",
+  "homepage": "https://github.com/wyattdave/pdac#readme",
+  "bugs": {
+    "url": "https://github.com/wyattdave/pdac/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wyattdave/pdac.git"
+  },
   "type": "module",
   "bin": {
-    "pdac": "./server.mjs"
+    "pdac": "server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "public",
+    "icon.png",
+    "favicon.png",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "start": "node server.mjs"
