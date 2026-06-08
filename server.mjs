@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -29,6 +31,7 @@ const POWER_PLATFORM_RESOURCE = process.env.PP_API_RESOURCE || 'https://api.powe
 const PUBLIC_DIR = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
 const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
 const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
+const USERS_TEAMS_PAGE_SIZE = 50;
 
 const DEPTHS = new Set(['None', 'Basic', 'Local', 'Deep', 'Global', 'RecordFilter']);
 const CSV_SCOPE_TO_DEPTH = {
@@ -342,7 +345,10 @@ async function handleApi(req, res) {
 
   if (route === 'GET /api/users') {
     requireOrgUrl();
-    sendJson(res, 200, await listEnvironmentUsers(url.searchParams.get('q') || ''));
+    sendJson(res, 200, await listEnvironmentUsers({
+      query: url.searchParams.get('q') || '',
+      pageToken: url.searchParams.get('pageToken') || '',
+    }));
     return;
   }
 
@@ -355,7 +361,10 @@ async function handleApi(req, res) {
 
   if (route === 'GET /api/teams') {
     requireOrgUrl();
-    sendJson(res, 200, await listEnvironmentTeams(url.searchParams.get('q') || ''));
+    sendJson(res, 200, await listEnvironmentTeams({
+      query: url.searchParams.get('q') || '',
+      pageToken: url.searchParams.get('pageToken') || '',
+    }));
     return;
   }
 
@@ -453,6 +462,14 @@ async function handleApi(req, res) {
   if (route === 'GET /api/solutions') {
     requireOrgUrl();
     sendJson(res, 200, await listSolutions());
+    return;
+  }
+
+  if (route === 'POST /api/solutions/report') {
+    requireOrgUrl();
+    const body = await readJson(req);
+    const report = await buildSolutionsReportWorkbook(body.solutionIds || []);
+    sendXlsx(res, 200, report.filename, report.bytes);
     return;
   }
 
@@ -602,6 +619,7 @@ async function handleApi(req, res) {
     requireOrgUrl();
     const body = await readJson(req);
     const result = await exportSolution(solutionExportMatch[1], {
+      environmentDisplayName: body.environmentDisplayName,
       managed: Boolean(body.managed),
       version: body.version,
     });
@@ -1189,6 +1207,248 @@ async function listSolutions() {
       uniquename: solution.publisherid?.uniquename || '',
     },
   }));
+}
+
+async function buildSolutionsReportWorkbook(solutionIds) {
+  const normalizedIds = [...new Set((Array.isArray(solutionIds) ? solutionIds : [])
+    .map((value) => normalizeGuid(value))
+    .filter(Boolean))];
+  if (!normalizedIds.length) {
+    throw new HttpError(400, 'Select at least one solution to export a report.');
+  }
+
+  const allSolutions = await listSolutions();
+  const selectedSolutions = allSolutions.filter((solution) => normalizedIds.includes(normalizeGuid(solution.solutionid)));
+  if (!selectedSolutions.length) {
+    throw new HttpError(404, 'No matching solutions were found for the requested report.');
+  }
+
+  const components = await listSolutionComponentsForSolutions(selectedSolutions.map((solution) => solution.solutionid));
+  const rows = await buildSolutionReportRows(selectedSolutions, components);
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet('Solutions', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  const columns = [
+    ['Solution name', 32],
+    ['Solution unique name', 36],
+    ['Publisher display name', 28],
+    ['# of flows', 14],
+    ['# of Canvas Apps', 18],
+    ['# of Model Driven Apps', 22],
+    ['# of Copilot Studio Agents', 24],
+    ['# of Dataverse tables', 20],
+    ['# of AI models', 16],
+    ['# of connection references', 23],
+    ['# of environment variables', 23],
+    ['# of dataflows', 16],
+  ];
+  worksheet.columns = columns.map(([header, width]) => ({ header, key: header, width }));
+  worksheet.addRows(rows);
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: columns.length },
+  };
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    cell.border = bottomBorder();
+  });
+  for (let rowNumber = 2; rowNumber <= rows.length + 1; rowNumber++) {
+    worksheet.getRow(rowNumber).alignment = { vertical: 'top' };
+  }
+
+  return {
+    filename: `solutions-report-${safeFilename(selected.environmentName || 'environment')}.xlsx`,
+    bytes: Buffer.from(await workbook.xlsx.writeBuffer()),
+  };
+}
+
+async function buildSolutionReportRows(solutions, components) {
+  const componentsBySolution = new Map();
+  for (const component of components) {
+    const solutionId = normalizeGuid(component.solutionid);
+    if (!solutionId) {
+      continue;
+    }
+    if (!componentsBySolution.has(solutionId)) {
+      componentsBySolution.set(solutionId, []);
+    }
+    componentsBySolution.get(solutionId).push(component);
+  }
+
+  const componentTypes = [...new Set(components.map((component) => Number(component.componenttype)).filter((value) => Number.isFinite(value)))];
+  const typeDetails = new Map(await mapWithConcurrency(componentTypes, 4, async (componentType) => {
+    const details = await getSolutionReportTypeDetails(componentType);
+    return [componentType, details];
+  }));
+
+  const canvasAppIds = [...new Set(components
+    .filter((component) => Number(component.componenttype) === 300)
+    .map((component) => normalizeGuid(component.objectid))
+    .filter(Boolean))];
+  const canvasApps = await listCanvasAppsForReport(canvasAppIds);
+
+  return solutions.map((solution) => {
+    const counts = createSolutionReportCounts();
+    const solutionComponents = componentsBySolution.get(normalizeGuid(solution.solutionid)) || [];
+    for (const component of solutionComponents) {
+      const componentType = Number(component.componenttype);
+      const objectId = normalizeGuid(component.objectid) || `${componentType}:${counts.flows.size + counts.tables.size}`;
+      const typeDetail = typeDetails.get(componentType) || {};
+      const logicalName = String(typeDetail.logicalName || '').toLowerCase();
+      const typeLabel = String(typeDetail.typeLabel || '').toLowerCase();
+
+      if (componentType === 29) {
+        counts.flows.add(objectId);
+        continue;
+      }
+
+      if (componentType === 1) {
+        counts.tables.add(objectId);
+        continue;
+      }
+
+      if (componentType === 380 || logicalName === 'environmentvariabledefinition') {
+        counts.environmentVariables.add(objectId);
+        continue;
+      }
+
+      if (logicalName === 'connectionreference') {
+        counts.connectionReferences.add(objectId);
+        continue;
+      }
+
+      if (logicalName === 'appmodule') {
+        counts.modelDrivenApps.add(objectId);
+        continue;
+      }
+
+      if (logicalName === 'bot') {
+        counts.copilotStudioAgents.add(objectId);
+        continue;
+      }
+
+      if (componentType === 300) {
+        const canvasApp = canvasApps.get(objectId);
+        if (Number(canvasApp?.canvasapptype) === 4) {
+          continue;
+        }
+        counts.canvasApps.add(objectId);
+        continue;
+      }
+
+      if (isAiModelComponent(logicalName, typeLabel)) {
+        counts.aiModels.add(objectId);
+        continue;
+      }
+
+      if (isDataflowComponent(logicalName, typeLabel)) {
+        counts.dataflows.add(objectId);
+      }
+    }
+
+    return {
+      'Solution name': solution.friendlyname || solution.uniquename || '',
+      'Solution unique name': solution.uniquename || '',
+      'Publisher display name': solution.publisher?.friendlyname || solution.publisher?.uniquename || '',
+      '# of flows': counts.flows.size,
+      '# of Canvas Apps': counts.canvasApps.size,
+      '# of Model Driven Apps': counts.modelDrivenApps.size,
+      '# of Copilot Studio Agents': counts.copilotStudioAgents.size,
+      '# of Dataverse tables': counts.tables.size,
+      '# of AI models': counts.aiModels.size,
+      '# of connection references': counts.connectionReferences.size,
+      '# of environment variables': counts.environmentVariables.size,
+      '# of dataflows': counts.dataflows.size,
+    };
+  });
+}
+
+function createSolutionReportCounts() {
+  return {
+    flows: new Set(),
+    canvasApps: new Set(),
+    modelDrivenApps: new Set(),
+    copilotStudioAgents: new Set(),
+    tables: new Set(),
+    aiModels: new Set(),
+    connectionReferences: new Set(),
+    environmentVariables: new Set(),
+    dataflows: new Set(),
+  };
+}
+
+async function listSolutionComponentsForSolutions(solutionIds) {
+  const normalizedIds = [...new Set(solutionIds.map((value) => normalizeGuid(value)).filter(Boolean))];
+  if (!normalizedIds.length) {
+    return [];
+  }
+
+  const chunks = chunkArray(normalizedIds, 20);
+  const pages = await mapWithConcurrency(chunks, 3, async (chunk) => {
+    const filter = chunk.map((solutionId) => `_solutionid_value eq ${solutionId}`).join(' or ');
+    return dvGetAll(`solutioncomponents?$select=_solutionid_value,componenttype,objectid&$filter=${filter}`);
+  });
+  return pages.flat().map((component) => ({
+    solutionid: component._solutionid_value,
+    componenttype: Number(component.componenttype),
+    objectid: component.objectid,
+  }));
+}
+
+async function getSolutionReportTypeDetails(componentType) {
+  const known = {
+    1: { logicalName: 'entity', typeLabel: 'Table' },
+    29: { logicalName: 'workflow', typeLabel: 'Flow' },
+    300: { logicalName: 'canvasapp', typeLabel: 'Canvas App' },
+    380: { logicalName: 'environmentvariabledefinition', typeLabel: 'Environment Variable Definition' },
+    381: { logicalName: 'environmentvariablevalue', typeLabel: 'Environment Variable Value' },
+  }[Number(componentType)];
+  if (known) {
+    return known;
+  }
+
+  try {
+    return await resolveEntityForComponentType(componentType);
+  } catch {
+    return {};
+  }
+}
+
+async function listCanvasAppsForReport(canvasAppIds) {
+  const ids = [...new Set(canvasAppIds.map((value) => normalizeGuid(value)).filter(Boolean))];
+  if (!ids.length) {
+    return new Map();
+  }
+
+  const chunks = chunkArray(ids, 20);
+  const pages = await mapWithConcurrency(chunks, 3, async (chunk) => {
+    const filter = chunk.map((canvasAppId) => `canvasappid eq ${canvasAppId}`).join(' or ');
+    return dvGetAll(`canvasapps?$select=canvasappid,canvasapptype&$filter=${filter}`);
+  });
+  return new Map(pages.flat().map((app) => [normalizeGuid(app.canvasappid), app]));
+}
+
+function isAiModelComponent(logicalName, typeLabel) {
+  return [logicalName, typeLabel].some((value) => {
+    const text = String(value || '').toLowerCase();
+    return text === 'aimodel' ||
+      text === 'predictionmodel' ||
+      text === 'aibmodel' ||
+      text === 'ai model' ||
+      text === 'prediction model' ||
+      text.includes('ai model');
+  });
+}
+
+function isDataflowComponent(logicalName, typeLabel) {
+  return [logicalName, typeLabel].some((value) => String(value || '').toLowerCase().includes('dataflow'));
 }
 
 async function getSolution(solutionId) {
@@ -2415,10 +2675,17 @@ async function listEnvironmentPrincipals(query) {
   ].sort((left, right) => left.label.localeCompare(right.label)).slice(0, 40);
 }
 
-async function listEnvironmentUsers(query = '') {
+async function listEnvironmentUsers(options = {}) {
+  const query = typeof options === 'string' ? options : options.query || '';
+  const pageToken = typeof options === 'string' ? '' : options.pageToken || '';
   const filter = userSearchFilter(query);
-  const rows = await dvGetAll(`systemusers?$select=systemuserid,fullname,internalemailaddress,domainname,isdisabled,accessmode,azureactivedirectoryobjectid,_businessunitid_value&$expand=businessunitid($select=name)&$filter=${filter}&$orderby=fullname&$top=250`);
-  return rows.map((user) => ({
+  const { rows, nextPageToken } = await dvGetPage(
+    `systemusers?$select=systemuserid,fullname,internalemailaddress,domainname,isdisabled,accessmode,azureactivedirectoryobjectid,_businessunitid_value&$expand=businessunitid($select=name)&$filter=${filter}&$orderby=fullname`,
+    pageToken,
+    { Prefer: `odata.maxpagesize=${USERS_TEAMS_PAGE_SIZE}` },
+  );
+  return {
+    items: rows.map((user) => ({
     systemuserid: user.systemuserid,
     fullname: user.fullname || '',
     internalemailaddress: user.internalemailaddress || '',
@@ -2428,14 +2695,23 @@ async function listEnvironmentUsers(query = '') {
     azureactivedirectoryobjectid: user.azureactivedirectoryobjectid || '',
     businessUnitId: user._businessunitid_value || '',
     businessUnitName: user.businessunitid?.name || user['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
-  }));
+    })),
+    nextPageToken,
+  };
 }
 
-async function listEnvironmentTeams(query = '') {
+async function listEnvironmentTeams(options = {}) {
+  const query = typeof options === 'string' ? options : options.query || '';
+  const pageToken = typeof options === 'string' ? '' : options.pageToken || '';
   const normalized = String(query || '').trim();
   const filter = normalized ? `&$filter=${principalContainsFilter(['name', 'emailaddress'], normalized)}` : '';
-  const rows = await dvGetAll(`teams?$select=teamid,name,teamtype,emailaddress,description,azureactivedirectoryobjectid,_businessunitid_value&$expand=businessunitid($select=name)${filter}&$orderby=name&$top=250`);
-  return rows.map((team) => ({
+  const { rows, nextPageToken } = await dvGetPage(
+    `teams?$select=teamid,name,teamtype,emailaddress,description,azureactivedirectoryobjectid,_businessunitid_value&$expand=businessunitid($select=name)${filter}&$orderby=name`,
+    pageToken,
+    { Prefer: `odata.maxpagesize=${USERS_TEAMS_PAGE_SIZE}` },
+  );
+  return {
+    items: rows.map((team) => ({
     teamid: team.teamid,
     name: team.name || '',
     teamtype: team.teamtype,
@@ -2445,7 +2721,9 @@ async function listEnvironmentTeams(query = '') {
     azureactivedirectoryobjectid: team.azureactivedirectoryobjectid || '',
     businessUnitId: team._businessunitid_value || '',
     businessUnitName: team.businessunitid?.name || team['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || '',
-  }));
+    })),
+    nextPageToken,
+  };
 }
 
 async function syncEnvironmentUser(principalObjectId) {
@@ -2637,6 +2915,7 @@ function parsePossiblyJson(value) {
 async function exportSolution(solutionId, options = {}) {
   const solution = await getSolution(solutionId);
   const managed = Boolean(options.managed);
+  const environmentDisplayName = String(options.environmentDisplayName || '').trim();
   const version = String(options.version || '').trim();
   if (version && version !== solution.version) {
     await updateSolutionVersion(solutionId, version);
@@ -2651,8 +2930,9 @@ async function exportSolution(solutionId, options = {}) {
     throw new HttpError(502, 'ExportSolution did not return a solution file.');
   }
   const suffix = managed ? 'managed' : 'unmanaged';
+  const environmentSegment = safeFilename(environmentDisplayName || 'environment');
   return {
-    filename: `${safeFilename(solution.uniquename || solution.friendlyname)}_${suffix}.zip`,
+    filename: `${safeFilename(solution.uniquename || solution.friendlyname)}_${environmentSegment}_${suffix}.zip`,
     bytes: Buffer.from(data.ExportSolutionFile, 'base64'),
   };
 }
@@ -3947,9 +4227,39 @@ async function dvGetAll(path) {
   return rows;
 }
 
+async function dvGetPage(path, pageToken = '', extraHeaders = {}) {
+  const next = decodePageToken(pageToken);
+  const response = await dvRequestUrl('GET', next || `${selected.orgUrl}/api/data/v9.2/${path}`, undefined, extraHeaders);
+  return {
+    rows: response.data.value || [],
+    nextPageToken: encodePageToken(response.data['@odata.nextLink'] || ''),
+  };
+}
+
 async function dvGet(path) {
   const response = await dvRequest('GET', path);
   return response.data;
+}
+
+function encodePageToken(nextLink) {
+  const normalized = String(nextLink || '').trim();
+  return normalized ? Buffer.from(normalized, 'utf8').toString('base64url') : '';
+}
+
+function decodePageToken(pageToken) {
+  const normalized = String(pageToken || '').trim();
+  if (!normalized) {
+    return '';
+  }
+  try {
+    const decoded = Buffer.from(normalized, 'base64url').toString('utf8');
+    if (!decoded.startsWith(`${selected.orgUrl}/api/data/v9.2/`)) {
+      throw new Error('Unexpected page token target.');
+    }
+    return decoded;
+  } catch {
+    throw new HttpError(400, 'Invalid page token. Refresh users or teams and try again.');
+  }
 }
 
 async function dvPost(path, body, options = {}) {

@@ -435,6 +435,26 @@ select {
   padding: 4px;
 }
 
+.publisher-filter-actions {
+  display: flex;
+  gap: 8px;
+  padding: 4px 4px 6px;
+}
+
+.combo-action-button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  min-height: 30px;
+  padding: 6px 10px;
+}
+
+.combo-action-button:hover {
+  background: var(--soft);
+  border-color: var(--soft-line);
+}
+
 .publisher-option {
   align-items: center;
   color: var(--text);
@@ -783,6 +803,15 @@ select:disabled {
 
 .principal-row {
   cursor: pointer;
+}
+
+.pager-row {
+  cursor: pointer;
+}
+
+.pager-row:disabled {
+  cursor: progress;
+  opacity: 0.75;
 }
 
 .principal-row:disabled {

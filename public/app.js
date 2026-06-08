@@ -66,10 +66,13 @@ const el = {
   selectedRoleId: document.querySelector('#selectedRoleId'),
   roleNameInput: document.querySelector('#roleNameInput'),
   loadSolutionsButton: document.querySelector('#loadSolutionsButton'),
+  downloadSolutionsReportButton: document.querySelector('#downloadSolutionsReportButton'),
   solutionSearch: document.querySelector('#solutionSearch'),
   unmanagedOnly: document.querySelector('#unmanagedOnly'),
   publisherDropdownButton: document.querySelector('#publisherDropdownButton'),
   publisherDropdown: document.querySelector('#publisherDropdown'),
+  publisherSelectAllButton: document.querySelector('#publisherSelectAllButton'),
+  publisherSelectNoneButton: document.querySelector('#publisherSelectNoneButton'),
   publisherFilter: document.querySelector('#publisherFilter'),
   solutions: document.querySelector('#solutions'),
   selectedSolutionName: document.querySelector('#selectedSolutionName'),
@@ -154,7 +157,17 @@ const state = {
   businessUnits: [],
   businessUnitsLoaded: false,
   users: [],
+  usersLoaded: false,
+  usersLoading: false,
+  usersError: '',
+  usersNextPageToken: '',
+  usersRequestId: 0,
   teams: [],
+  teamsLoaded: false,
+  teamsLoading: false,
+  teamsError: '',
+  teamsNextPageToken: '',
+  teamsRequestId: 0,
   connections: [],
   connectionsLoaded: false,
   connectionUser: null,
@@ -164,6 +177,7 @@ const state = {
   selectedTeamId: '',
   roleAssignmentPrincipal: null,
   solutions: [],
+  selectedPublisherIds: null,
   selectedSolutionId: '',
   solutionComponents: [],
   solutionTableCount: 0,
@@ -183,6 +197,10 @@ const state = {
 
 const LAST_ACCOUNT_KEY = 'pdacLastAccountHomeId';
 const LAST_ENVIRONMENT_PREFIX = 'pdacLastEnvironment';
+const USERS_TEAMS_SEARCH_DELAY_MS = 220;
+
+let userSearchTimer = 0;
+let teamSearchTimer = 0;
 
 el.tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 el.themeButton.addEventListener('click', toggleTheme);
@@ -212,8 +230,8 @@ el.loadUsersTeamsButton.addEventListener('click', () => withBusy(el.loadUsersTea
 el.loadConnectionsButton.addEventListener('click', () => withBusy(el.loadConnectionsButton, loadConnections, 'Loading connections'));
 el.toggleCreateUserButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('user'));
 el.toggleCreateTeamButton.addEventListener('click', () => toggleUsersTeamsCreatePanel('team'));
-el.userSearch.addEventListener('input', renderUsers);
-el.teamSearch.addEventListener('input', renderTeams);
+el.userSearch.addEventListener('input', scheduleUserSearch);
+el.teamSearch.addEventListener('input', scheduleTeamSearch);
 el.connectionSearch.addEventListener('input', renderConnections);
 el.myConnectionsOnly.addEventListener('change', renderConnections);
 el.brokenConnectionsOnly.addEventListener('change', renderConnections);
@@ -232,12 +250,28 @@ el.roleAssignmentRoles.addEventListener('click', (event) => {
   });
 });
 el.usersList.addEventListener('click', (event) => {
+  const nextPageButton = event.target.closest('[data-users-next-page]');
+  if (nextPageButton) {
+    loadUsersPage({ append: true }).catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+    return;
+  }
   const button = event.target.closest('[data-principal-action="assign-role"]');
   if (button) {
     openRoleAssignmentModal(button.dataset.principalType || '', button.dataset.principalId || '');
   }
 });
 el.teamsList.addEventListener('click', (event) => {
+  const nextPageButton = event.target.closest('[data-teams-next-page]');
+  if (nextPageButton) {
+    loadTeamsPage({ append: true }).catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+    return;
+  }
   const assignButton = event.target.closest('[data-principal-action="assign-role"]');
   if (assignButton) {
     openRoleAssignmentModal(assignButton.dataset.principalType || '', assignButton.dataset.principalId || '');
@@ -303,9 +337,12 @@ el.csvFile.addEventListener('change', () => {
   updateRoleFileFormatUi();
 });
 el.loadSolutionsButton.addEventListener('click', () => withBusy(el.loadSolutionsButton, loadSolutions));
+el.downloadSolutionsReportButton.addEventListener('click', () => withBusy(el.downloadSolutionsReportButton, downloadSolutionsReport, 'Creating report'));
 el.solutionSearch.addEventListener('input', renderSolutions);
 el.unmanagedOnly.addEventListener('change', renderSolutions);
-el.publisherFilter.addEventListener('change', renderSolutions);
+el.publisherFilter.addEventListener('change', handlePublisherFilterChange);
+el.publisherSelectAllButton.addEventListener('click', () => setPublisherSelection(true));
+el.publisherSelectNoneButton.addEventListener('click', () => setPublisherSelection(false));
 el.loadTablesButton.addEventListener('click', () => withBusy(el.loadTablesButton, loadTables));
 el.tableSearch.addEventListener('input', renderTables);
 el.tableScopes.forEach((input) => input.addEventListener('change', () => {
@@ -1044,8 +1081,20 @@ function clearBusinessUnits() {
 
 function clearEnvironmentData() {
   clearBusinessUnits();
+  clearTimeout(userSearchTimer);
+  clearTimeout(teamSearchTimer);
   state.users = [];
+  state.usersLoaded = false;
+  state.usersLoading = false;
+  state.usersError = '';
+  state.usersNextPageToken = '';
+  state.usersRequestId += 1;
   state.teams = [];
+  state.teamsLoaded = false;
+  state.teamsLoading = false;
+  state.teamsError = '';
+  state.teamsNextPageToken = '';
+  state.teamsRequestId += 1;
   state.connections = [];
   state.connectionsLoaded = false;
   state.connectionUser = null;
@@ -1094,14 +1143,12 @@ async function loadUsersAndTeams() {
   if (!state.selectedEnvironment.orgUrl) {
     throw new Error('Select an environment first.');
   }
-  const [users, teams] = await Promise.all([
-    api('/api/users'),
-    api('/api/teams'),
+  clearTimeout(userSearchTimer);
+  clearTimeout(teamSearchTimer);
+  await Promise.all([
+    loadUsersPage(),
+    loadTeamsPage(),
   ]);
-  state.users = users || [];
-  state.teams = teams || [];
-  renderUsers();
-  renderTeams();
   renderTeamMembersPanel();
   await ensureRolesLoaded().catch((error) => {
     console.error(error);
@@ -1114,18 +1161,129 @@ async function loadUsersAndTeams() {
   toast('Users and teams loaded.');
 }
 
+function scheduleUserSearch() {
+  clearTimeout(userSearchTimer);
+  if (!state.selectedEnvironment.orgUrl || (!state.usersLoaded && !state.users.length && !state.usersLoading)) {
+    return;
+  }
+  userSearchTimer = setTimeout(() => {
+    loadUsersPage().catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+  }, USERS_TEAMS_SEARCH_DELAY_MS);
+}
+
+function scheduleTeamSearch() {
+  clearTimeout(teamSearchTimer);
+  if (!state.selectedEnvironment.orgUrl || (!state.teamsLoaded && !state.teams.length && !state.teamsLoading)) {
+    return;
+  }
+  teamSearchTimer = setTimeout(() => {
+    loadTeamsPage().catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+  }, USERS_TEAMS_SEARCH_DELAY_MS);
+}
+
+async function loadUsersPage(options = {}) {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  const append = options.append === true;
+  const requestId = state.usersRequestId + 1;
+  state.usersRequestId = requestId;
+  state.usersLoading = true;
+  if (!append) {
+    state.users = [];
+    state.usersLoaded = false;
+    state.usersError = '';
+    state.usersNextPageToken = '';
+  }
+  renderUsers();
+  try {
+    const data = await api(buildPagedUsersTeamsPath('/api/users', el.userSearch.value, append ? state.usersNextPageToken : ''));
+    if (requestId !== state.usersRequestId) {
+      return;
+    }
+    const items = Array.isArray(data?.items) ? data.items : [];
+    state.users = append ? [...state.users, ...items] : items;
+    state.usersLoaded = true;
+    state.usersError = '';
+    state.usersNextPageToken = data?.nextPageToken || '';
+  } catch (error) {
+    if (requestId === state.usersRequestId && !append) {
+      state.users = [];
+      state.usersLoaded = false;
+      state.usersError = `Users could not be loaded. ${error.message}`;
+      state.usersNextPageToken = '';
+    }
+    throw error;
+  } finally {
+    if (requestId === state.usersRequestId) {
+      state.usersLoading = false;
+      renderUsers();
+    }
+  }
+}
+
+async function loadTeamsPage(options = {}) {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  const append = options.append === true;
+  const requestId = state.teamsRequestId + 1;
+  state.teamsRequestId = requestId;
+  state.teamsLoading = true;
+  if (!append) {
+    state.teams = [];
+    state.teamsLoaded = false;
+    state.teamsError = '';
+    state.teamsNextPageToken = '';
+  }
+  renderTeams();
+  try {
+    const data = await api(buildPagedUsersTeamsPath('/api/teams', el.teamSearch.value, append ? state.teamsNextPageToken : ''));
+    if (requestId !== state.teamsRequestId) {
+      return;
+    }
+    const items = Array.isArray(data?.items) ? data.items : [];
+    state.teams = append ? [...state.teams, ...items] : items;
+    state.teamsLoaded = true;
+    state.teamsError = '';
+    state.teamsNextPageToken = data?.nextPageToken || '';
+  } catch (error) {
+    if (requestId === state.teamsRequestId && !append) {
+      state.teams = [];
+      state.teamsLoaded = false;
+      state.teamsError = `Teams could not be loaded. ${error.message}`;
+      state.teamsNextPageToken = '';
+    }
+    throw error;
+  } finally {
+    if (requestId === state.teamsRequestId) {
+      state.teamsLoading = false;
+      renderTeams();
+    }
+  }
+}
+
 function renderUsers() {
-  const query = el.userSearch.value.trim().toLowerCase();
-  const users = state.users.filter((user) => {
-    const text = `${user.fullname || ''} ${user.internalemailaddress || ''} ${user.domainname || ''} ${user.businessUnitName || ''}`.toLowerCase();
-    return !query || text.includes(query);
-  });
-  if (!users.length) {
-    el.usersList.innerHTML = empty(state.users.length ? 'No users match the filter.' : 'Load users and teams.');
+  if (!state.users.length) {
+    el.usersList.innerHTML = empty(usersEmptyStateMessage());
     renderTeamMembersPanel();
     return;
   }
-  el.usersList.innerHTML = users.map((user) => `
+  const nextPage = state.usersNextPageToken
+    ? `
+    <button class="list-item pager-row" type="button" data-users-next-page${state.usersLoading ? ' disabled' : ''}>
+      <span class="role-name">${state.usersLoading ? 'Loading more users...' : 'Next 50 users'}</span>
+      <span class="role-id">Load the next page for the current filter.</span>
+    </button>
+  `
+    : '';
+  el.usersList.innerHTML = `${state.users.map((user) => `
     <button class="list-item principal-row user-row" type="button" data-principal-action="assign-role" data-principal-type="systemuser" data-principal-id="${escapeAttr(user.systemuserid)}"${user.isdisabled ? ' disabled' : ''}>
       <span class="role-name">${escapeHtml(user.fullname || user.internalemailaddress || user.domainname || user.systemuserid)}</span>
       <span class="role-id">${escapeHtml(user.internalemailaddress || user.domainname || '')}</span>
@@ -1133,21 +1291,24 @@ function renderUsers() {
       <span class="role-id">${escapeHtml(user.azureactivedirectoryobjectid || '')}</span>
       <span class="role-id row-action-text">${user.isdisabled ? 'Disabled users cannot receive roles' : 'Assign role'}</span>
     </button>
-  `).join('');
+  `).join('')}${nextPage}`;
   renderTeamMembersPanel();
 }
 
 function renderTeams() {
-  const query = el.teamSearch.value.trim().toLowerCase();
-  const teams = state.teams.filter((team) => {
-    const text = `${team.name || ''} ${team.emailaddress || ''} ${team.teamTypeLabel || ''} ${team.businessUnitName || ''}`.toLowerCase();
-    return !query || text.includes(query);
-  });
-  if (!teams.length) {
-    el.teamsList.innerHTML = empty(state.teams.length ? 'No teams match the filter.' : 'Load users and teams.');
+  if (!state.teams.length) {
+    el.teamsList.innerHTML = empty(teamsEmptyStateMessage());
     return;
   }
-  el.teamsList.innerHTML = teams.map((team) => {
+  const nextPage = state.teamsNextPageToken
+    ? `
+    <button class="list-item pager-row" type="button" data-teams-next-page${state.teamsLoading ? ' disabled' : ''}>
+      <span class="role-name">${state.teamsLoading ? 'Loading more teams...' : 'Next 50 teams'}</span>
+      <span class="role-id">Load the next page for the current filter.</span>
+    </button>
+  `
+    : '';
+  el.teamsList.innerHTML = `${state.teams.map((team) => {
     const canAssignRoles = Number(team.teamtype) !== 1;
     return `
     <div class="list-item team-row${team.teamid === state.selectedTeamId ? ' selected' : ''}">
@@ -1160,7 +1321,7 @@ function renderTeams() {
       <button class="role-id row-action-text row-action-link" type="button" data-principal-action="assign-role" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}"${canAssignRoles ? '' : ' disabled'}>${canAssignRoles ? 'Assign role' : 'Access team'}</button>
     </div>
   `;
-  }).join('');
+  }).join('')}${nextPage}`;
 }
 
 async function syncEnvironmentUser(event) {
@@ -1211,13 +1372,51 @@ async function createEnvironmentTeam(event) {
 }
 
 async function refreshUsers() {
-  state.users = await api('/api/users');
-  renderUsers();
+  await loadUsersPage();
 }
 
 async function refreshTeams() {
-  state.teams = await api('/api/teams');
-  renderTeams();
+  await loadTeamsPage();
+}
+
+function buildPagedUsersTeamsPath(path, query, pageToken) {
+  const searchParams = new URLSearchParams();
+  const normalizedQuery = String(query || '').trim();
+  const normalizedPageToken = String(pageToken || '').trim();
+  if (normalizedQuery) {
+    searchParams.set('q', normalizedQuery);
+  }
+  if (normalizedPageToken) {
+    searchParams.set('pageToken', normalizedPageToken);
+  }
+  const suffix = searchParams.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}
+
+function usersEmptyStateMessage() {
+  if (state.usersLoading) {
+    return 'Loading users...';
+  }
+  if (state.usersError) {
+    return state.usersError;
+  }
+  if (state.usersLoaded) {
+    return 'No users found for the current filter.';
+  }
+  return 'Load users and teams.';
+}
+
+function teamsEmptyStateMessage() {
+  if (state.teamsLoading) {
+    return 'Loading teams...';
+  }
+  if (state.teamsError) {
+    return state.teamsError;
+  }
+  if (state.teamsLoaded) {
+    return 'No teams found for the current filter.';
+  }
+  return 'Load users and teams.';
 }
 
 async function loadConnections() {
@@ -1477,14 +1676,14 @@ function selectTeam(teamId) {
 function renderTeamMembersPanel() {
   const team = state.teams.find((item) => item.teamid === state.selectedTeamId);
   if (!team) {
-    el.teamMembersPanel.innerHTML = '<p class="muted">Select a team to add loaded environment users as members.</p>';
+    el.teamMembersPanel.innerHTML = '<p class="muted">Select a team to add users from the currently loaded results.</p>';
     return;
   }
   const availableUsers = state.users.filter((user) => !user.isdisabled);
   el.teamMembersPanel.innerHTML = `
     <h4>Add users to ${escapeHtml(team.name || 'team')}</h4>
     <label>
-      Loaded users
+      Loaded users in current results
       <select id="teamMemberUserSelect" multiple size="6">
         ${availableUsers.map((user) => `
           <option value="${escapeAttr(user.systemuserid)}">
@@ -1671,8 +1870,27 @@ async function loadSolutions() {
   renderSolutions();
 }
 
+async function downloadSolutionsReport() {
+  const filtered = getFilteredSolutions();
+  if (!filtered.length) {
+    throw new Error('No solutions match the current filters.');
+  }
+
+  const response = await apiFetch('/api/solutions/report', {
+    method: 'POST',
+    body: {
+      solutionIds: filtered.map((solution) => solution.solutionid),
+    },
+  });
+
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  downloadBlob(match?.[1] || 'solutions-report.xlsx', blob);
+  toast('Excel file downloaded.');
+}
+
 function renderPublisherFilter() {
-  const selected = getSelectedPublishers();
   const publishers = new Map();
   for (const solution of state.solutions) {
     const id = solution.publisher?.publisherid || '';
@@ -1681,8 +1899,19 @@ function renderPublisherFilter() {
       publishers.set(id, name);
     }
   }
-  el.publisherFilter.innerHTML = [...publishers.entries()]
-    .sort((left, right) => left[1].localeCompare(right[1]))
+  const entries = [...publishers.entries()].sort((left, right) => left[1].localeCompare(right[1]));
+  const availableIds = new Set(entries.map(([id]) => id));
+  let selected;
+  if (state.selectedPublisherIds instanceof Set) {
+    selected = new Set([...state.selectedPublisherIds].filter((id) => availableIds.has(id)));
+    if (!selected.size && state.selectedPublisherIds.size) {
+      selected = new Set(entries.map(([id]) => id));
+    }
+  } else {
+    selected = new Set(entries.map(([id]) => id));
+  }
+  state.selectedPublisherIds = selected;
+  el.publisherFilter.innerHTML = entries
     .map(([id, name]) => `
       <label class="publisher-option">
         <input type="checkbox" value="${escapeAttr(id)}"${selected.has(id) ? ' checked' : ''} />
@@ -1693,16 +1922,26 @@ function renderPublisherFilter() {
   updatePublisherSummary();
 }
 
-function renderSolutions() {
-  const query = el.solutionSearch.value.trim().toLowerCase();
-  const publisherIds = getSelectedPublishers();
-  const filtered = state.solutions.filter((solution) => {
-    const text = `${solution.friendlyname || ''} ${solution.uniquename || ''}`.toLowerCase();
-    const publisherId = solution.publisher?.publisherid || '';
-    return (!query || text.includes(query)) &&
-      (!el.unmanagedOnly.checked || !solution.ismanaged) &&
-      (!publisherIds.size || publisherIds.has(publisherId));
+function handlePublisherFilterChange() {
+  state.selectedPublisherIds = new Set(
+    [...el.publisherFilter.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value),
+  );
+  renderSolutions();
+}
+
+function setPublisherSelection(selected) {
+  const checkboxes = [...el.publisherFilter.querySelectorAll('input[type="checkbox"]')];
+  checkboxes.forEach((input) => {
+    input.checked = selected;
   });
+  state.selectedPublisherIds = new Set(selected ? checkboxes.map((input) => input.value) : []);
+  renderSolutions();
+}
+
+function renderSolutions() {
+  const filtered = getFilteredSolutions();
+
+  el.downloadSolutionsReportButton.disabled = !filtered.length;
 
   if (!filtered.length) {
     el.solutions.innerHTML = empty(state.solutions.length ? 'No solutions match the filters.' : 'No solutions loaded.');
@@ -1724,14 +1963,34 @@ function renderSolutions() {
   updatePublisherSummary();
 }
 
+function getFilteredSolutions() {
+  const query = el.solutionSearch.value.trim().toLowerCase();
+  const publisherIds = getSelectedPublishers();
+  return state.solutions.filter((solution) => {
+    const text = `${solution.friendlyname || ''} ${solution.uniquename || ''}`.toLowerCase();
+    const publisherId = solution.publisher?.publisherid || '';
+    return (!query || text.includes(query)) &&
+      (!el.unmanagedOnly.checked || !solution.ismanaged) &&
+      (!publisherIds.size || publisherIds.has(publisherId));
+  });
+}
+
 function getSelectedPublishers() {
+  if (state.selectedPublisherIds instanceof Set) {
+    return new Set(state.selectedPublisherIds);
+  }
   return new Set([...el.publisherFilter.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value));
 }
 
 function updatePublisherSummary() {
   const selected = [...el.publisherFilter.querySelectorAll('input[type="checkbox"]:checked')];
-  if (!selected.length) {
+  const total = el.publisherFilter.querySelectorAll('input[type="checkbox"]').length;
+  el.publisherSelectAllButton.disabled = !total || selected.length === total;
+  el.publisherSelectNoneButton.disabled = !selected.length;
+  if (!total || selected.length === total) {
     el.publisherDropdownButton.textContent = 'All publishers';
+  } else if (!selected.length) {
+    el.publisherDropdownButton.textContent = 'No publishers';
   } else if (selected.length === 1) {
     el.publisherDropdownButton.textContent = selected[0].closest('label')?.innerText.trim() || '1 publisher';
   } else {
@@ -2614,10 +2873,12 @@ async function shareSelectedComponent(target) {
 
 async function exportSolutionZip() {
   const solutionId = requireSelectedSolution();
+  const environmentDisplayName = getEnvironmentByName(state.selectedEnvironment.environmentName)?.displayName || '';
   const response = await fetch(`/api/solutions/${encodeURIComponent(solutionId)}/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      environmentDisplayName,
       managed: el.exportManaged.checked,
       version: el.solutionVersionInput.value.trim(),
     }),
@@ -2991,15 +3252,7 @@ function downloadBlob(filename, blob) {
 }
 
 async function downloadFile(path, fallbackFilename) {
-  const headers = {};
-  if (state.selectedAccountHomeId) {
-    headers['X-PDAC-Account-Home-Id'] = state.selectedAccountHomeId;
-  }
-  const response = await fetch(path, { headers });
-  if (!response.ok) {
-    const data = await response.json().catch(() => null);
-    throw new Error(cleanApiErrorMessage(data?.error || data?.message || `Download failed: ${response.status}`));
-  }
+  const response = await apiFetch(path);
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
   const match = disposition.match(/filename="([^"]+)"/);
@@ -3145,9 +3398,19 @@ function requireSelectedSolution() {
 }
 
 async function api(path, options = {}) {
+  const response = await apiFetch(path, options);
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : null;
+  return data;
+}
+
+async function apiFetch(path, options = {}) {
+  const requestAccountId = resolveRequestAccountId(options.preferAccountId || '');
+  await ensureSelectedAccountForRequest(requestAccountId);
+
   const headers = {};
-  if (state.selectedAccountHomeId) {
-    headers['X-PDAC-Account-Home-Id'] = state.selectedAccountHomeId;
+  if (requestAccountId) {
+    headers['X-PDAC-Account-Home-Id'] = requestAccountId;
   }
   if (options.body) {
     headers['Content-Type'] = 'application/json';
@@ -3157,27 +3420,49 @@ async function api(path, options = {}) {
     headers: Object.keys(headers).length ? headers : undefined,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    const message = cleanApiErrorMessage(data?.error || data?.message || `Request failed: ${response.status}`);
-    if (response.status === 401 && options.retryAuth !== false && await refreshAuthStateForRetry()) {
-      return api(path, { ...options, retryAuth: false });
-    }
-    if (!options.quiet) {
-      toast(message, 'error');
-    }
-    throw new Error(message);
+
+  if (response.ok) {
+    return response;
   }
-  return data;
+
+  const cloned = response.clone();
+  const data = await cloned.json().catch(() => null);
+  let message = cleanApiErrorMessage(data?.error || data?.message || `Request failed: ${response.status}`);
+  const canRetry = options.retryAuth !== false &&
+    (response.status === 401 || isAccountSelectionError(message));
+  if (canRetry && await refreshAuthStateForRetry()) {
+    return apiFetch(path, { ...options, retryAuth: false });
+  }
+
+  if (isAccountSelectionError(message)) {
+    message = 'Select an account in the header, then retry. PDAC could not determine which signed-in account to use for this request.';
+  }
+
+  if (!options.quiet) {
+    toast(message, 'error');
+  }
+  throw new Error(message);
 }
 
-async function refreshAuthStateForRetry() {
+function resolveRequestAccountId(preferredAccountId = '') {
+  return preferredAccountId ||
+    state.selectedAccountHomeId ||
+    el.accountSelect?.value ||
+    localStorage.getItem(LAST_ACCOUNT_KEY) ||
+    '';
+}
+
+async function ensureSelectedAccountForRequest(preferredAccountId = '') {
+  if (state.selectedAccountHomeId) {
+    return true;
+  }
+
+  const accountId = resolveRequestAccountId(preferredAccountId);
+  if (!accountId) {
+    return false;
+  }
+
   try {
-    const accountId = state.selectedAccountHomeId || localStorage.getItem(LAST_ACCOUNT_KEY) || '';
-    if (!accountId) {
-      return false;
-    }
     const response = await fetch('/api/account', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3188,6 +3473,24 @@ async function refreshAuthStateForRetry() {
     }
     applyAuthState(await response.json());
     return state.selectedAccountHomeId === accountId;
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
+}
+
+function isAccountSelectionError(message) {
+  return String(message || '').toLowerCase().includes('multiple accounts found') &&
+    String(message || '').toLowerCase().includes('select an account in the header first');
+}
+
+async function refreshAuthStateForRetry() {
+  try {
+    const accountId = state.selectedAccountHomeId || localStorage.getItem(LAST_ACCOUNT_KEY) || '';
+    if (!accountId) {
+      return false;
+    }
+    return ensureSelectedAccountForRequest(accountId);
   } catch (error) {
     console.error(error);
     return false;

@@ -1,5 +1,9 @@
 {
+  "name": "pdac",
   "type": "module",
+  "bin": {
+    "pdac": "./server.mjs"
+  },
   "scripts": {
     "start": "node server.mjs"
   },

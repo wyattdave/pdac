@@ -343,7 +343,10 @@
         <section class="panel">
           <div class="section-title">
             <h2>Solutions</h2>
-            <button id="loadSolutionsButton" type="button">Load solutions</button>
+              <div class="actions">
+                <button id="downloadSolutionsReportButton" type="button" class="secondary" disabled>Download report</button>
+                <button id="loadSolutionsButton" type="button">Load solutions</button>
+              </div>
           </div>
 
           <div class="solution-filters">
@@ -360,6 +363,10 @@
               <div class="combo">
                 <button id="publisherDropdownButton" class="combo-button secondary" type="button">All publishers</button>
                 <div id="publisherDropdown" class="combo-panel" hidden>
+                    <div class="publisher-filter-actions">
+                      <button id="publisherSelectAllButton" class="combo-action-button" type="button">Select all</button>
+                      <button id="publisherSelectNoneButton" class="combo-action-button" type="button">Select none</button>
+                    </div>
                   <div id="publisherFilter" class="checkbox-list"></div>
                 </div>
               </div>
