@@ -585,6 +585,10 @@ select:disabled {
   grid-template-columns: minmax(280px, 0.95fr) minmax(320px, 1.05fr);
 }
 
+.split > * {
+  min-width: 0;
+}
+
 .list {
   align-content: start;
   display: grid;
@@ -769,7 +773,12 @@ select:disabled {
   border-radius: 8px;
   display: grid;
   gap: 12px;
+  min-width: 0;
   padding: 14px;
+}
+
+.editor > * {
+  min-width: 0;
 }
 
 .principal-row {
@@ -1064,10 +1073,27 @@ select:disabled {
 
 .compact-title {
   align-items: start;
+  flex-wrap: wrap;
+}
+
+.compact-title > * {
+  min-width: 0;
+}
+
+.compact-title .actions {
+  flex: 1 1 280px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 .solution-actions {
   align-items: stretch;
+}
+
+.compact-title .actions button {
+  flex: 1 1 140px;
+  min-width: 0;
 }
 
 .solution-actions button {

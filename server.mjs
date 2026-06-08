@@ -274,7 +274,7 @@ async function handleApi(req, res) {
 
   if (route === 'POST /api/account') {
     const body = await readJson(req);
-    selectAccount(requireString(body.homeAccountId, 'homeAccountId'));
+    await selectAccount(requireString(body.homeAccountId, 'homeAccountId'));
     sendJson(res, 200, {
       accounts: await listAccounts(),
       selectedAccountHomeId: selected.accountHomeId,
@@ -1078,7 +1078,16 @@ function ensureSelectedAccount(accounts) {
   }
 }
 
-function selectAccount(homeAccountId) {
+async function selectAccount(homeAccountId) {
+  const accounts = await listAccounts();
+  if (!accounts.some((account) => account.homeAccountId === homeAccountId)) {
+    ensureSelectedAccount(accounts);
+    if (!selected.accountHomeId) {
+      throw new HttpError(401, 'Selected account is no longer signed in. Sign in again.');
+    }
+    return;
+  }
+
   selected.accountHomeId = homeAccountId;
   applySavedEnvironmentForAccount(homeAccountId);
 }
@@ -1776,6 +1785,7 @@ function componentDisplayAttempts(componentType, objectId) {
     1: [{ path: `EntityDefinitions(${id})?$select=LogicalName,SchemaName,DisplayName`, map: entityMetadataMap }],
     2: [{ path: `entities?$filter=objecttypecode eq ${componentType}`, map: (data) => entityBackedComponentMap(data, id) }],
     10: [{ path: `savedqueries(${id})?$select=name,returnedtypecode`, map: namedRowMap('name') }],
+    20: [{ path: `roles(${id})?$select=roleid,name,_businessunitid_value,ismanaged,roletemplateid,_parentroleid_value,_parentrootroleid_value&$expand=businessunitid($select=name)`, map: mapRoleComponent }],
     29: [{ path: `workflows(${id})?$select=name,uniquename`, map: (data) => ({ ...namedRowMap('name', 'uniquename')(data), logicalName: 'workflow' }) }],
     300: [{ path: `canvasapps(${id})?$select=name,displayname,canvasapptype`, map: (data) => ({ displayName: pickDisplayName(data), logicalName: 'canvasapp', canvasAppTypeLabel: Number(data.canvasapptype) === 4 ? 'Code App' : 'Canvas App' }) }],
     60: [{ path: `systemforms(${id})?$select=name,objecttypecode,type`, map: namedRowMap('name') }],
@@ -1892,6 +1902,14 @@ function pickDisplayName(row) {
     }
   }
   return '';
+}
+
+function mapRoleComponent(role) {
+  return {
+    displayName: role?.name || role?.roleid || '',
+    logicalName: 'role',
+    recordLogicalName: role?.roleid || '',
+  };
 }
 
 function pickLogicalName(row) {
