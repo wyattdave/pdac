@@ -128,6 +128,7 @@ const selected = {
 };
 const accountEnvironmentSelections = new Map();
 const importPackages = new Map();
+const componentTypeEntityCache = new Map();
 let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -470,7 +471,11 @@ async function handleApi(req, res) {
     const body = await readJson(req);
     await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
     requireOrgUrl();
-    const report = await buildSolutionsReportWorkbook(body.solutionIds || [], body.solutions || body.solutionSnapshots || []);
+    const report = await buildSolutionsReportWorkbook(
+      body.solutionIds || [],
+      body.solutions || body.solutionSnapshots || [],
+      normalizeReportEnvironment(body.environment || body.selectedEnvironment || {}),
+    );
     sendXlsx(res, 200, report.filename, report.bytes);
     return;
   }
@@ -1232,7 +1237,7 @@ async function listSolutions() {
   }));
 }
 
-async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = []) {
+async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [], environment = {}) {
   const normalizedIds = [...new Set((Array.isArray(solutionIds) ? solutionIds : [])
     .map((value) => normalizeGuid(value))
     .filter(Boolean))];
@@ -1247,9 +1252,11 @@ async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [])
     throw new HttpError(404, 'No matching solutions were found for the requested report.');
   }
 
+  const reportEnvironment = normalizeReportEnvironment(environment);
+
   const components = await listSolutionComponentsForSolutions(selectedSolutions.map((solution) => solution.solutionid));
-  const rows = await buildSolutionReportRows(selectedSolutions, components);
-  const componentRows = buildSolutionComponentReportRows(selectedSolutions, components);
+  const rows = await buildSolutionReportRows(selectedSolutions, components, reportEnvironment);
+  const componentRows = buildSolutionComponentReportRows(selectedSolutions, components, reportEnvironment);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'PDAC';
   workbook.created = new Date();
@@ -1257,6 +1264,9 @@ async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [])
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   const columns = [
+    ['Environment display name', 30, true],
+    ['Environment id', 28, true],
+    ['Environment url', 42, true],
     ['Solution name', 32],
     ['Solution unique name', 36],
     ['Publisher display name', 28],
@@ -1270,7 +1280,7 @@ async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [])
     ['# of environment variables', 23],
     ['# of dataflows', 16],
   ];
-  worksheet.columns = columns.map(([header, width]) => ({ header, key: header, width }));
+  worksheet.columns = columns.map(([header, width, hidden]) => ({ header, key: header, width, hidden: Boolean(hidden) }));
   worksheet.addRows(rows);
   worksheet.autoFilter = {
     from: { row: 1, column: 1 },
@@ -1292,12 +1302,15 @@ async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [])
     views: [{ state: 'frozen', ySplit: 1 }],
   });
   const componentColumns = [
+    ['Environment display name', 30, true],
+    ['Environment id', 28, true],
+    ['Environment url', 42, true],
     ['Solution', 32],
     ['Type', 26],
     ['name', 42],
     ['Id', 38],
   ];
-  componentWorksheet.columns = componentColumns.map(([header, width]) => ({ header, key: header, width }));
+  componentWorksheet.columns = componentColumns.map(([header, width, hidden]) => ({ header, key: header, width, hidden: Boolean(hidden) }));
   componentWorksheet.addRows(componentRows);
   componentWorksheet.autoFilter = {
     from: { row: 1, column: 1 },
@@ -1316,7 +1329,7 @@ async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [])
   }
 
   return {
-    filename: `solutions-report-${safeFilename(selected.environmentName || 'environment')}.xlsx`,
+    filename: `solutions-report-${safeFilename(reportEnvironment.displayName || 'environment')}.xlsx`,
     bytes: Buffer.from(await workbook.xlsx.writeBuffer()),
   };
 }
@@ -1339,7 +1352,7 @@ function normalizeSolutionReportSnapshots(solutions) {
     }));
 }
 
-async function buildSolutionReportRows(solutions, components) {
+async function buildSolutionReportRows(solutions, components, environment = {}) {
   const componentsBySolution = new Map();
   for (const component of components) {
     const solutionId = normalizeGuid(component.solutionid);
@@ -1406,6 +1419,9 @@ async function buildSolutionReportRows(solutions, components) {
     }
 
     return {
+      'Environment display name': environment.displayName || '',
+      'Environment id': environment.environmentId || '',
+      'Environment url': environment.orgUrl || '',
       'Solution name': solution.friendlyname || solution.uniquename || '',
       'Solution unique name': solution.uniquename || '',
       'Publisher display name': solution.publisher?.friendlyname || solution.publisher?.uniquename || '',
@@ -1436,16 +1452,19 @@ function createSolutionReportCounts() {
   };
 }
 
-function buildSolutionComponentReportRows(solutions, components) {
+function buildSolutionComponentReportRows(solutions, components, environment = {}) {
   const solutionNameById = new Map(solutions.map((solution) => [
     normalizeGuid(solution.solutionid),
     solution.friendlyname || solution.uniquename || solution.solutionid || '',
   ]));
 
   const rows = components.map((component) => ({
+    'Environment display name': environment.displayName || '',
+    'Environment id': environment.environmentId || '',
+    'Environment url': environment.orgUrl || '',
     Solution: solutionNameById.get(normalizeGuid(component.solutionid)) || '',
     Type: component.typeLabel || SOLUTION_COMPONENT_TYPES[Number(component.componenttype)] || `Type ${Number(component.componenttype)}`,
-    name: component.objectid || '',
+    name: component.displayName || component.objectid || '',
     Id: component.objectid || '',
   }));
 
@@ -1463,15 +1482,14 @@ async function listSolutionComponentsForSolutions(solutionIds) {
   const chunks = chunkArray(normalizedIds, 20);
   const pages = await mapWithConcurrency(chunks, 3, async (chunk) => {
     const filter = chunk.map((solutionId) => `_solutionid_value eq ${solutionId}`).join(' or ');
-    return dvGetAll(`solutioncomponents?$select=_solutionid_value,componenttype,objectid&$filter=${filter}`, {
+    return dvGetAll(`solutioncomponents?$select=_solutionid_value,solutioncomponentid,componenttype,objectid&$filter=${filter}`, {
       Prefer: 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"',
     });
   });
-  return pages.flat().map((component) => ({
+  const rawComponents = pages.flat();
+  return mapWithConcurrency(rawComponents, 8, async (component) => ({
     solutionid: component._solutionid_value,
-    componenttype: Number(component.componenttype),
-    typeLabel: component['componenttype@OData.Community.Display.V1.FormattedValue'] || '',
-    objectid: component.objectid,
+    ...(await enrichSolutionComponent(component)),
   }));
 }
 
@@ -2351,16 +2369,34 @@ async function resolveComponentRecord(componentType, objectId) {
 }
 
 async function resolveEntityForComponentType(componentType) {
-  const data = await dvGet(`entities?$filter=objecttypecode eq ${Number(componentType)}`);
-  const row = Array.isArray(data?.value) ? data.value[0] : data;
-  if (!row) {
+  const normalizedComponentType = Number(componentType);
+  if (!normalizedComponentType) {
     return {};
   }
-  return {
+
+  const environmentKey = normalizeOrgUrl(selected.orgUrl || '') || 'default';
+  let environmentCache = componentTypeEntityCache.get(environmentKey);
+  if (!environmentCache) {
+    environmentCache = new Map();
+    componentTypeEntityCache.set(environmentKey, environmentCache);
+  }
+  if (environmentCache.has(normalizedComponentType)) {
+    return environmentCache.get(normalizedComponentType);
+  }
+
+  const data = await dvGet(`entities?$filter=objecttypecode eq ${normalizedComponentType}`);
+  const row = Array.isArray(data?.value) ? data.value[0] : data;
+  if (!row) {
+    environmentCache.set(normalizedComponentType, {});
+    return {};
+  }
+  const entity = {
     logicalName: row.logicalname || row.name || row.entitysetname || '',
     collection: row.collectionname || row.entitysetname || row.entitysetnameplural || '',
     typeLabel: row.originallocalizedname || row.localizedname || row.displayname || row.name || row.logicalname || '',
   };
+  environmentCache.set(normalizedComponentType, entity);
+  return entity;
 }
 
 async function getEnvironmentVariableDetails(definitionId) {
@@ -4436,7 +4472,10 @@ async function serveStatic(req, res) {
 
   try {
     const content = await readFile(fullPath);
-    res.writeHead(200, { 'Content-Type': contentType(fullPath) });
+    res.writeHead(200, {
+      'Content-Type': contentType(fullPath),
+      'X-Content-Type-Options': 'nosniff',
+    });
     res.end(content);
   } catch {
     sendText(res, 404, 'Not found');
@@ -4769,6 +4808,14 @@ function normalizeOrgUrl(value) {
 
 function normalizeGuid(value) {
   return String(value || '').trim().replace(/[{}]/g, '').toLowerCase();
+}
+
+function normalizeReportEnvironment(environment) {
+  return {
+    displayName: String(environment.displayName || environment.environmentDisplayName || environment.friendlyName || '').trim(),
+    environmentId: String(environment.environmentId || environment.environmentName || environment.name || selected.environmentName || '').trim(),
+    orgUrl: normalizeOrgUrl(environment.orgUrl || selected.orgUrl || ''),
+  };
 }
 
 function safeFilename(value) {

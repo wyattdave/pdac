@@ -64,20 +64,22 @@ async function loadEnvironments() {
     return;
   }
 
-  el.environmentList.innerHTML = environments.map((env) => `
-    <button class="item actionable env-option" type="button" data-name="${escapeAttr(env.name)}" data-url="${escapeAttr(env.orgUrl || '')}">
-      <span class="item-title">${escapeHtml(env.displayName || env.name)}</span>
-      <span class="item-meta">${escapeHtml(env.name)}</span>
-      <span class="item-meta">${escapeHtml(env.orgUrl || 'No Dataverse org URL found in response')}</span>
-    </button>
-  `).join('');
-
-  document.querySelectorAll('.env-option').forEach((button) => {
+  el.environmentList.replaceChildren(...environments.map((env) => {
+    const name = env.name || '';
+    const url = env.orgUrl || '';
+    const button = createEl('button', 'item actionable env-option');
+    button.type = 'button';
+    button.append(
+      createEl('span', 'item-title', env.displayName || env.name),
+      createEl('span', 'item-meta', env.name),
+      createEl('span', 'item-meta', env.orgUrl || 'No Dataverse org URL found in response'),
+    );
     button.addEventListener('click', () => {
-      el.environmentName.value = button.dataset.name || '';
-      el.orgUrl.value = button.dataset.url || '';
+      el.environmentName.value = name;
+      el.orgUrl.value = url;
     });
-  });
+    return button;
+  }));
 }
 
 async function selectEnvironment() {
@@ -103,25 +105,24 @@ async function loadTables() {
     return;
   }
 
-  el.tableList.innerHTML = tables.map((table) => {
+  el.tableList.replaceChildren(...tables.map((table) => {
     const title = table.DisplayName?.UserLocalizedLabel?.Label || table.LogicalName;
-    return `
-      <button class="item actionable table-option" type="button" data-name="${escapeAttr(table.LogicalName)}">
-        <span class="item-title">${escapeHtml(title)}</span>
-        <span class="item-meta">${escapeHtml(table.LogicalName)} | ${escapeHtml(table.EntitySetName || '')}</span>
-      </button>
-    `;
-  }).join('');
-
-  document.querySelectorAll('.table-option').forEach((button) => {
+    const logicalName = table.LogicalName || '';
+    const button = createEl('button', 'item actionable table-option');
+    button.type = 'button';
+    button.append(
+      createEl('span', 'item-title', title),
+      createEl('span', 'item-meta', `${logicalName} | ${table.EntitySetName || ''}`),
+    );
     button.addEventListener('click', async () => {
       document.querySelectorAll('.table-option').forEach((item) => item.classList.remove('selected'));
       button.classList.add('selected');
-      state.selectedTable = button.dataset.name || '';
+      state.selectedTable = logicalName;
       el.addColumnForm.elements.tableName.value = state.selectedTable;
       await loadColumns(state.selectedTable);
     });
-  });
+    return button;
+  }));
 }
 
 async function loadColumns(tableName) {
@@ -134,33 +135,37 @@ async function loadColumns(tableName) {
     return;
   }
 
-  el.columnList.innerHTML = columns.map((column) => {
+  el.columnList.replaceChildren(...columns.map((column) => {
     const title = column.DisplayName?.UserLocalizedLabel?.Label || column.LogicalName;
+    const logicalName = column.LogicalName || '';
     const canDelete = column.IsCustomAttribute?.Value === true;
-    return `
-      <div class="item">
-        <div class="item-row">
-          <div>
-            <div class="item-title">${escapeHtml(title)}</div>
-            <div class="item-meta">${escapeHtml(column.LogicalName)} | ${escapeHtml(column.AttributeType || '')}</div>
-          </div>
-          ${canDelete ? `<button class="danger delete-column" type="button" data-column="${escapeAttr(column.LogicalName)}">Remove</button>` : ''}
-        </div>
-      </div>
-    `;
-  }).join('');
 
-  document.querySelectorAll('.delete-column').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const column = button.dataset.column;
-      if (!column || !confirm(`Remove custom column ${column}?`)) {
-        return;
-      }
-      await api(`/api/tables/${encodeURIComponent(tableName)}/columns/${encodeURIComponent(column)}`, { method: 'DELETE' });
-      toast(`Removed ${column}`);
-      await loadColumns(tableName);
-    });
-  });
+    const item = createEl('div', 'item');
+    const row = createEl('div', 'item-row');
+    const info = createEl('div');
+    info.append(
+      createEl('div', 'item-title', title),
+      createEl('div', 'item-meta', `${logicalName} | ${column.AttributeType || ''}`),
+    );
+    row.append(info);
+
+    if (canDelete) {
+      const removeButton = createEl('button', 'danger delete-column', 'Remove');
+      removeButton.type = 'button';
+      removeButton.addEventListener('click', async () => {
+        if (!logicalName || !confirm(`Remove custom column ${logicalName}?`)) {
+          return;
+        }
+        await api(`/api/tables/${encodeURIComponent(tableName)}/columns/${encodeURIComponent(logicalName)}`, { method: 'DELETE' });
+        toast(`Removed ${logicalName}`);
+        await loadColumns(tableName);
+      });
+      row.append(removeButton);
+    }
+
+    item.append(row);
+    return item;
+  }));
 }
 
 async function submitCreateTable(event) {
@@ -217,13 +222,15 @@ async function listConnections() {
     return;
   }
 
-  el.connectionList.innerHTML = connections.map((connection) => `
-    <div class="item">
-      <div class="item-title">${escapeHtml(connection.properties?.displayName || connection.name || 'Connection')}</div>
-      <div class="item-meta">${escapeHtml(connection.name || '')}</div>
-      <div class="item-meta">${escapeHtml(connection.properties?.apiId || connection.properties?.connectionRuntimeUrl || '')}</div>
-    </div>
-  `).join('');
+  el.connectionList.replaceChildren(...connections.map((connection) => {
+    const item = createEl('div', 'item');
+    item.append(
+      createEl('div', 'item-title', connection.properties?.displayName || connection.name || 'Connection'),
+      createEl('div', 'item-meta', connection.name || ''),
+      createEl('div', 'item-meta', connection.properties?.apiId || connection.properties?.connectionRuntimeUrl || ''),
+    );
+    return item;
+  }));
 }
 
 async function api(path, options = {}) {
@@ -290,4 +297,15 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, '&#96;');
+}
+
+function createEl(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined) {
+    node.textContent = String(text ?? '');
+  }
+  return node;
 }

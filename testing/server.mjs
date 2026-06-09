@@ -273,7 +273,7 @@ function startConnectionServer(config) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(status === 'created'
         ? '<h2>Connection created. You can close this tab.</h2>'
-        : `<h2>Connection creation ${status || 'cancelled'}.</h2><p>${escapeHtml(message || '')}</p>`);
+        : `<h2>Connection creation ${escapeHtml(status || 'cancelled')}.</h2><p>${escapeHtml(message || '')}</p>`);
       cleanup();
 
       if (status === 'created') {
@@ -490,7 +490,10 @@ async function serveStatic(req, res) {
 
   try {
     const content = await readFile(fullPath);
-    res.writeHead(200, { 'Content-Type': contentType(fullPath) });
+    res.writeHead(200, {
+      'Content-Type': contentType(fullPath),
+      'X-Content-Type-Options': 'nosniff',
+    });
     res.end(content);
   } catch {
     sendText(res, 404, 'Not found');
@@ -572,7 +575,7 @@ function escapeODataString(value) {
 }
 
 function escapeHtml(value) {
-  return value.replace(/[&<>"']/g, (char) => ({
+  return String(value || '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;',
     '<': '&lt;',
     '>': '&gt;',

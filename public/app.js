@@ -68,6 +68,7 @@ const el = {
   loadSolutionsButton: document.querySelector('#loadSolutionsButton'),
   downloadSolutionsReportButton: document.querySelector('#downloadSolutionsReportButton'),
   solutionSearch: document.querySelector('#solutionSearch'),
+  solutionCount: document.querySelector('#solutionCount'),
   unmanagedOnly: document.querySelector('#unmanagedOnly'),
   includeActiveSolution: document.querySelector('#includeActiveSolution'),
   includeDefaultSolution: document.querySelector('#includeDefaultSolution'),
@@ -180,6 +181,7 @@ const state = {
   selectedTeamId: '',
   roleAssignmentPrincipal: null,
   solutions: [],
+  publisherFilterActive: false,
   selectedPublisherIds: null,
   selectedSolutionId: '',
   solutionComponents: [],
@@ -1780,7 +1782,7 @@ async function downloadRoleFile(kind) {
       const blob = await response.blob();
       const disposition = response.headers.get('content-disposition') || '';
       const match = disposition.match(/filename="([^"]+)"/);
-      const filename = match?.[1] || `${safeFilename(el.roleNameInput.value)}-security-role.${format}`;
+      const filename = match?.[1] ? safeFilename(match[1]) : `${safeFilename(el.roleNameInput.value)}-security-role.${format}`;
       const href = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = href;
@@ -1870,7 +1872,20 @@ async function fileToBase64(file) {
 
 async function loadSolutions() {
   el.solutions.innerHTML = empty('Loading solutions...');
+  setSolutionCount(0, 0);
   state.solutions = await api('/api/solutions');
+  el.unmanagedOnly.checked = false;
+  const publishers = new Map();
+  for (const solution of state.solutions) {
+    const id = publisherFilterKey(solution.publisher);
+    const name = solution.publisher?.friendlyname || solution.publisher?.uniquename || '(No publisher)';
+    if (id) {
+      publishers.set(id, name);
+    }
+  }
+  const entries = [...publishers.entries()].sort((left, right) => left[1].localeCompare(right[1]));
+  state.publisherFilterActive = true;
+  state.selectedPublisherIds = defaultSelectedPublisherIds(entries);
   renderPublisherFilter();
   renderSolutions();
 }
@@ -1880,6 +1895,13 @@ async function downloadSolutionsReport() {
   if (!visibleSolutions.length) {
     throw new Error('No solutions match the current filters.');
   }
+
+  const selectedEnvironment = getEnvironmentByName(state.selectedEnvironment.environmentName);
+  const environmentReportContext = {
+    displayName: selectedEnvironment?.displayName || state.selectedEnvironment.environmentName || '',
+    environmentId: state.selectedEnvironment.environmentName || '',
+    orgUrl: state.selectedEnvironment.orgUrl || '',
+  };
 
   let accountHomeId = resolveRequestAccountId();
   await ensureSelectedAccountForRequest(accountHomeId);
@@ -1893,6 +1915,7 @@ async function downloadSolutionsReport() {
     preferAccountId: accountHomeId,
     body: {
       accountHomeId,
+      environment: environmentReportContext,
       solutionIds: visibleSolutions.map((solution) => solution.solutionid),
       solutions: visibleSolutions.map((solution) => ({
         solutionid: solution.solutionid,
@@ -1909,14 +1932,14 @@ async function downloadSolutionsReport() {
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
   const match = disposition.match(/filename="([^"]+)"/);
-  downloadBlob(match?.[1] || 'solutions-report.xlsx', blob);
+  downloadBlob(match?.[1] || `solutions-report-${safeDownloadFilename(environmentReportContext.displayName || 'environment')}.xlsx`, blob);
   toast('Excel file downloaded.');
 }
 
 function renderPublisherFilter() {
   const publishers = new Map();
   for (const solution of state.solutions) {
-    const id = solution.publisher?.publisherid || '';
+    const id = publisherFilterKey(solution.publisher);
     const name = solution.publisher?.friendlyname || solution.publisher?.uniquename || '(No publisher)';
     if (id) {
       publishers.set(id, name);
@@ -1924,16 +1947,15 @@ function renderPublisherFilter() {
   }
   const entries = [...publishers.entries()].sort((left, right) => left[1].localeCompare(right[1]));
   const availableIds = new Set(entries.map(([id]) => id));
-  let selected;
-  if (state.selectedPublisherIds instanceof Set) {
+  let selected = defaultSelectedPublisherIds(entries);
+  if (state.publisherFilterActive && state.selectedPublisherIds instanceof Set) {
     selected = new Set([...state.selectedPublisherIds].filter((id) => availableIds.has(id)));
-    if (!selected.size && state.selectedPublisherIds.size) {
-      selected = new Set(entries.map(([id]) => id));
-    }
   } else {
-    selected = new Set(entries.map(([id]) => id));
+    state.selectedPublisherIds = null;
   }
-  state.selectedPublisherIds = selected;
+  if (state.publisherFilterActive) {
+    state.selectedPublisherIds = selected;
+  }
   el.publisherFilter.innerHTML = entries
     .map(([id, name]) => `
       <label class="publisher-option">
@@ -1945,7 +1967,25 @@ function renderPublisherFilter() {
   updatePublisherSummary();
 }
 
+function defaultSelectedPublisherIds(entries) {
+  return new Set(entries.filter(([, name]) => !isDefaultExcludedPublisher(name)).map(([id]) => id));
+}
+
+function isDefaultExcludedPublisher(name) {
+  return /microsoft|dynamics/i.test(String(name || ''));
+}
+
+function publisherFilterKey(publisher) {
+  return String(
+    publisher?.publisherid ||
+    publisher?.uniquename ||
+    publisher?.friendlyname ||
+    '(No publisher)',
+  ).trim();
+}
+
 function handlePublisherFilterChange() {
+  state.publisherFilterActive = true;
   state.selectedPublisherIds = new Set(
     [...el.publisherFilter.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value),
   );
@@ -1957,12 +1997,14 @@ function setPublisherSelection(selected) {
   checkboxes.forEach((input) => {
     input.checked = selected;
   });
+  state.publisherFilterActive = true;
   state.selectedPublisherIds = new Set(selected ? checkboxes.map((input) => input.value) : []);
   renderSolutions();
 }
 
 function renderSolutions() {
   const filtered = getFilteredSolutions();
+  setSolutionCount(filtered.length, state.solutions.length);
 
   el.downloadSolutionsReportButton.disabled = !filtered.length;
 
@@ -1986,6 +2028,13 @@ function renderSolutions() {
   updatePublisherSummary();
 }
 
+function setSolutionCount(filteredCount, totalCount) {
+  if (!el.solutionCount) {
+    return;
+  }
+  el.solutionCount.textContent = `${filteredCount} / ${totalCount}`;
+}
+
 function getVisibleSolutionRows() {
   const visibleIds = new Set([...el.solutions.querySelectorAll('.solution-row')]
     .map((button) => normalizeSolutionId(button.dataset.id))
@@ -2000,24 +2049,24 @@ function normalizeSolutionId(value) {
 function getFilteredSolutions() {
   const query = el.solutionSearch.value.trim().toLowerCase();
   const publisherIds = getSelectedPublishers();
-  const publisherFilterAvailable = Boolean(el.publisherFilter.querySelector('input[type="checkbox"]'));
+  const publisherFilterActive = state.publisherFilterActive && publisherIds instanceof Set;
   return state.solutions.filter((solution) => {
     const text = `${solution.friendlyname || ''} ${solution.uniquename || ''}`.toLowerCase();
     const uniqueName = String(solution.uniquename || '').trim().toLowerCase();
-    const publisherId = solution.publisher?.publisherid || '';
+    const publisherId = publisherFilterKey(solution.publisher);
     return (!query || text.includes(query)) &&
       (!el.unmanagedOnly.checked || !solution.ismanaged) &&
       (el.includeActiveSolution.checked || uniqueName !== 'active') &&
       (el.includeDefaultSolution.checked || uniqueName !== 'default') &&
-      (!publisherFilterAvailable || publisherIds.has(publisherId));
+      (!publisherFilterActive || publisherIds.has(publisherId));
   });
 }
 
 function getSelectedPublishers() {
-  if (state.selectedPublisherIds instanceof Set) {
+  if (state.publisherFilterActive && state.selectedPublisherIds instanceof Set) {
     return new Set(state.selectedPublisherIds);
   }
-  return new Set([...el.publisherFilter.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value));
+  return null;
 }
 
 function updatePublisherSummary() {
@@ -2034,6 +2083,10 @@ function updatePublisherSummary() {
   } else {
     el.publisherDropdownButton.textContent = `${selected.length} publishers`;
   }
+}
+
+function safeDownloadFilename(value) {
+  return String(value || 'environment').replace(/[^\w.-]+/g, '-').replace(/^-|-$/g, '') || 'environment';
 }
 
 function selectSolution(solutionId) {
@@ -2931,7 +2984,7 @@ async function exportSolutionZip() {
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
   const match = disposition.match(/filename="([^"]+)"/);
-  const filename = match?.[1] || 'solution.zip';
+  const filename = match?.[1] ? safeFilename(match[1]) : 'solution.zip';
   const href = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = href;

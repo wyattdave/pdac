@@ -350,12 +350,15 @@
           </div>
 
           <div class="solution-filters">
-            <label>
-              Filter by name
+              <label>
+                <span class="filter-label-row">
+                  <span>Filter by name</span>
+                  <span id="solutionCount" class="filter-count" aria-live="polite">0 / 0</span>
+                </span>
               <input id="solutionSearch" placeholder="Search friendly or unique name" />
             </label>
             <label class="checkbox-label">
-              <input id="unmanagedOnly" type="checkbox" checked />
+              <input id="unmanagedOnly" type="checkbox" />
               Unmanaged only
             </label>
             <label class="checkbox-label">

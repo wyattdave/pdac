@@ -879,6 +879,19 @@ select:disabled {
   margin-bottom: 14px;
 }
 
+.filter-label-row {
+  align-items: baseline;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.filter-count {
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
 .solution-links {
   display: flex;
   flex-wrap: wrap;
@@ -1203,6 +1216,7 @@ select:disabled {
   color: var(--muted);
   font-size: 13px;
   font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .component-name {
