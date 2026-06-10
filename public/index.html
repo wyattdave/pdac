@@ -393,6 +393,7 @@
                   <h3 id="selectedSolutionName">No solution selected</h3>
                   <p id="selectedSolutionMeta" class="muted"></p>
                   <p class="solution-links">
+                    <a id="selectedSolutionPowerAutomateLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Power Automate</a>
                     <a id="selectedSolutionPowerAppsLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Power Apps</a>
                     <a id="selectedSolutionCopilotLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Copilot Studio</a>
                   </p>
@@ -414,6 +415,10 @@
               <label class="checkbox-label export-managed-row">
                 <input id="exportManaged" type="checkbox" />
                 Export as managed
+              </label>
+              <label id="solutionComponentSearchLabel" class="search solution-component-search" hidden>
+                Search components
+                <input id="solutionComponentSearch" placeholder="Type or name" />
               </label>
               <div id="solutionComponents" class="component-list"></div>
             </div>

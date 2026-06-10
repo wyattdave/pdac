@@ -1239,6 +1239,10 @@ select:disabled {
   justify-content: flex-start;
 }
 
+.solution-component-search {
+  margin-bottom: 10px;
+}
+
 .component-list {
   border: 1px solid var(--line);
   border-radius: 8px;

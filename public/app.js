@@ -80,6 +80,7 @@ const el = {
   solutions: document.querySelector('#solutions'),
   selectedSolutionName: document.querySelector('#selectedSolutionName'),
   selectedSolutionMeta: document.querySelector('#selectedSolutionMeta'),
+  selectedSolutionPowerAutomateLink: document.querySelector('#selectedSolutionPowerAutomateLink'),
   selectedSolutionPowerAppsLink: document.querySelector('#selectedSolutionPowerAppsLink'),
   selectedSolutionCopilotLink: document.querySelector('#selectedSolutionCopilotLink'),
   loadComponentsButton: document.querySelector('#loadComponentsButton'),
@@ -90,6 +91,8 @@ const el = {
   createSolutionTableButton: document.querySelector('#createSolutionTableButton'),
   solutionVersionInput: document.querySelector('#solutionVersionInput'),
   exportManaged: document.querySelector('#exportManaged'),
+  solutionComponentSearchLabel: document.querySelector('#solutionComponentSearchLabel'),
+  solutionComponentSearch: document.querySelector('#solutionComponentSearch'),
   solutionComponents: document.querySelector('#solutionComponents'),
   loadTablesButton: document.querySelector('#loadTablesButton'),
   loadAiEventsButton: document.querySelector('#loadAiEventsButton'),
@@ -377,6 +380,7 @@ el.csvFile.addEventListener('change', () => {
 el.loadSolutionsButton.addEventListener('click', () => withBusy(el.loadSolutionsButton, loadSolutions));
 el.downloadSolutionsReportButton.addEventListener('click', () => withBusy(el.downloadSolutionsReportButton, downloadSolutionsReport, 'Creating report'));
 el.solutionSearch.addEventListener('input', renderSolutions);
+el.solutionComponentSearch.addEventListener('input', renderSolutionComponents);
 el.unmanagedOnly.addEventListener('change', renderSolutions);
 el.includeActiveSolution.addEventListener('change', renderSolutions);
 el.includeDefaultSolution.addEventListener('change', renderSolutions);
@@ -2498,6 +2502,8 @@ function selectSolution(solutionId) {
   el.solutionVersionInput.value = solution?.version || '';
   el.exportManaged.checked = Boolean(solution?.ismanaged);
   el.solutionComponents.innerHTML = '';
+  el.solutionComponentSearch.value = '';
+  el.solutionComponentSearchLabel.hidden = true;
   state.solutionComponents = [];
   state.solutionTableCount = 0;
   renderSolutionTableActions();
@@ -2506,11 +2512,19 @@ function selectSolution(solutionId) {
 async function loadSolutionComponents() {
   const solutionId = requireSelectedSolution();
   el.solutionComponents.innerHTML = empty('Loading components...');
+  el.solutionComponentSearchLabel.hidden = true;
   const components = await api(`/api/solutions/${encodeURIComponent(solutionId)}/components`);
   state.solutionComponents = components || [];
   state.solutionTableCount = state.solutionComponents.filter((component) => Number(component.componenttype) === 1).length;
   renderSolutionTableActions();
-  if (!components.length) {
+  el.solutionComponentSearch.value = '';
+  renderSolutionComponents();
+}
+
+function renderSolutionComponents() {
+  const components = getFilteredSolutionComponents();
+  el.solutionComponentSearchLabel.hidden = !state.solutionComponents.length;
+  if (!state.solutionComponents.length) {
     el.solutionComponents.innerHTML = empty('No components found.');
     return;
   }
@@ -2524,7 +2538,25 @@ async function loadSolutionComponents() {
         ${component.manageable ? `<button class="secondary" type="button" data-component-action="manage" data-type="${escapeAttr(component.componenttype)}" data-id="${escapeAttr(component.objectid)}">Manage</button>` : ''}
       </span>
     </div>
-  `).join('');
+  `).join('') || empty('No components match the filter.');
+}
+
+function getFilteredSolutionComponents() {
+  const query = el.solutionComponentSearch.value.trim().toLowerCase();
+  if (!query) {
+    return state.solutionComponents;
+  }
+
+  return state.solutionComponents.filter((component) => {
+    const type = String(component.typeLabel || '').toLowerCase();
+    const name = [
+      component.displayName,
+      component.objectid,
+      component.logicalName,
+      component.recordLogicalName,
+    ].filter(Boolean).join(' ').toLowerCase();
+    return type.includes(query) || name.includes(query);
+  });
 }
 
 function renderSolutionTableActions() {
@@ -3849,8 +3881,11 @@ function lastEnvironmentKey() {
 }
 
 function renderSolutionLink(solution) {
+  const powerAutomateHref = solution ? makePowerAutomateSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
   const powerAppsHref = solution ? makePowerAppsSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
   const copilotHref = solution ? makeCopilotStudioSolutionUrl(state.selectedEnvironment.environmentName, solution.solutionid) : '';
+  el.selectedSolutionPowerAutomateLink.hidden = !powerAutomateHref;
+  el.selectedSolutionPowerAutomateLink.href = powerAutomateHref || '#';
   el.selectedSolutionPowerAppsLink.hidden = !powerAppsHref;
   el.selectedSolutionPowerAppsLink.href = powerAppsHref || '#';
   el.selectedSolutionCopilotLink.hidden = !copilotHref;
@@ -3865,7 +3900,7 @@ function makePowerAutomateSolutionUrl(environmentId, solutionId) {
   if (!environmentId || !solutionId) {
     return '';
   }
-  return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}/overview`;
+  return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/${encodeURIComponent(solutionId)}/overview`;
 }
 
 function makePowerAppsSolutionUrl(environmentId, solutionId) {
