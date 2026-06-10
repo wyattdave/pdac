@@ -3,8 +3,9 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { extname, join, normalize } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
@@ -23,7 +24,12 @@ import { NodeMsalAuthenticationProvider } from '@microsoft/power-apps-cli/dist/A
 import { initializeCliSettings, setCliLogger } from '@microsoft/power-apps-cli/dist/CliSettings.js';
 import { CliHttpClient } from '@microsoft/power-apps-cli/dist/HttpClient/CliHttpClient.js';
 import open from 'open';
-import { deleteConnectionAsync } from './node_modules/@microsoft/power-apps-actions/dist/services/connectivity/ConnectivityService.js';
+
+const require = createRequire(import.meta.url);
+const powerAppsActionsUrl = pathToFileURL(require.resolve('@microsoft/power-apps-actions'));
+const { deleteConnectionAsync } = await import(
+  new URL('./services/connectivity/ConnectivityService.js', powerAppsActionsUrl)
+);
 
 const PORT = Number(process.env.SECURITY_ROLES_PORT || process.env.PORT || 4280);
 const REGION = process.env.PP_REGION || 'prod';

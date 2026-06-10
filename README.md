@@ -9,14 +9,14 @@ PDAC is a small local admin app for working across Power Platform and Dataverse 
 Run directly from npm:
 
 ```powershell
-npx pdac
+npx powerdevbox-admin
 ```
 
-Or install/link it locally and run the `pdac` command:
+Or install/link it locally and run the `powerdevbox-admin` or `pdac` command:
 
 ```powershell
 npm link
-pdac
+powerdevbox-admin
 ```
 
 For development from this checkout:
@@ -39,7 +39,7 @@ $env:PP_REGION = "prod"
 $env:PP_ENVIRONMENT_ID = "Default-00000000-0000-0000-0000-000000000000"
 $env:PP_ORG_URL = "https://org.crm.dynamics.com"
 $env:POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION = "true"
-pdac
+powerdevbox-admin
 ```
 
 `POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION=true` enables the interactive local browser callback flow for connectors that cannot be created silently.

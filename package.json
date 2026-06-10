@@ -1,6 +1,6 @@
 {
-  "name": "pdac",
-  "version": "0.1.0",
+  "name": "powerdevbox-admin",
+  "version": "0.1.1",
   "description": "Local Power DevBox Admin Center for Power Platform and Dataverse administration.",
   "license": "MIT",
   "homepage": "https://github.com/wyattdave/pdac#readme",
@@ -13,6 +13,7 @@
   },
   "type": "module",
   "bin": {
+    "powerdevbox-admin": "server.mjs",
     "pdac": "server.mjs"
   },
   "files": [
