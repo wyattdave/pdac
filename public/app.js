@@ -546,6 +546,18 @@ el.importEnvironmentSelect.addEventListener('change', () => {
 });
 el.prepareImportButton.addEventListener('click', () => withBusy(el.prepareImportButton, prepareImportTarget, 'Preparing import'));
 el.refreshImportTargetButton.addEventListener('click', () => withBusy(el.refreshImportTargetButton, prepareImportTarget, 'Refreshing target'));
+el.importConnections.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-import-action]');
+  if (!button) {
+    return;
+  }
+  const action = button.dataset.importAction || '';
+  if (action === 'create-connection') {
+    withBusy(button, () => createImportConnection(button), 'Creating connection');
+  } else if (action === 'refresh-connections') {
+    withImportButtonBusy(button, () => refreshImportConnectionRow(button), '<span class="spinner" aria-hidden="true"></span>');
+  }
+});
 el.downloadImportSettingsButton.addEventListener('click', downloadImportSettings);
 el.importSettingsButton.addEventListener('click', () => el.importSettingsFile.click());
 el.importSettingsFile.addEventListener('change', () => importSettingsFile().catch((error) => {
@@ -3504,7 +3516,7 @@ function renderImportEnvironments() {
   updateImportButtons();
 }
 
-async function prepareImportTarget() {
+async function prepareImportTarget(showToast = true) {
   const target = getImportTargetEnvironment();
   if (!state.importPackage || !target) {
     toast('Choose a package and target environment.', 'error');
@@ -3516,7 +3528,10 @@ async function prepareImportTarget() {
     body: target,
   });
   renderImportTarget();
-  toast('Target environment prepared.');
+  if (showToast) {
+    toast('Target environment prepared.');
+  }
+  return state.importTargetPrepared;
 }
 
 async function maybeAutoPrepareImportTarget() {
@@ -3558,19 +3573,119 @@ function renderImportConnections(connectionReferences) {
           </option>
         `).join('')
       : '<option value="">No matching connection found</option>';
-    const createUrl = safeHttpsUrl(reference.createUrl);
-    const link = reference.matches?.length || !createUrl ? '' : `<a href="${escapeAttr(createUrl)}" target="_blank" rel="noopener noreferrer">Create connection</a>`;
+    const displayName = reference.displayName || reference.logicalName || connectorNameFromId(reference.connectorId) || 'Connection';
     return `
-      <div class="import-row" data-logical-name="${escapeAttr(reference.logicalName)}" data-connector-id="${escapeAttr(reference.connectorId)}">
+      <div class="import-row" data-logical-name="${escapeAttr(reference.logicalName)}" data-connector-id="${escapeAttr(reference.connectorId)}" data-display-name="${escapeAttr(displayName)}">
         <div>
           <strong>${escapeHtml(reference.displayName || reference.logicalName)}</strong>
           <span class="role-id">${escapeHtml(reference.connectorId)}</span>
-          ${link}
         </div>
-        <select class="import-connection-select">${options}</select>
+        <div class="import-connection-controls">
+          <select class="import-connection-select">${options}</select>
+          <button class="icon-button secondary" type="button" data-import-action="refresh-connections" title="Refresh connections" aria-label="Refresh connections">
+            <svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M21 12a9 9 0 0 0-15.74-6.26L3 8"></path>
+              <path d="M3 3v5h5"></path>
+              <path d="M3 12a9 9 0 0 0 15.74 6.26L21 16"></path>
+              <path d="M16 16h5v5"></path>
+            </svg>
+          </button>
+          <button class="secondary" type="button" data-import-action="create-connection"${reference.connectorId ? '' : ' disabled'}>Create connection</button>
+        </div>
       </div>
     `;
   }).join('');
+}
+
+async function createImportConnection(button) {
+  const target = getImportTargetEnvironment();
+  const row = button.closest('.import-row');
+  if (!state.importPackage || !state.importTargetPrepared || !target || !row) {
+    toast('Prepare the import first.', 'error');
+    return;
+  }
+
+  const settings = {
+    connectionReferences: collectImportSettingsConnectionReferences(),
+    environmentVariables: collectImportSettingsEnvironmentVariables(),
+  };
+  const displayName = `${row.dataset.displayName || row.dataset.logicalName || 'Connection'} connection`;
+  const result = await api(`/api/import-packages/${encodeURIComponent(state.importPackage.id)}/connections`, {
+    method: 'POST',
+    body: {
+      target,
+      logicalName: row.dataset.logicalName || '',
+      connectorId: row.dataset.connectorId || '',
+      displayName,
+    },
+  });
+
+  const createdName = result.connection?.displayName || result.connection?.name || result.connection?.id || result.requestedDisplayName || displayName;
+  const createdConnectionId = result.connection?.id || result.connection?.name || result.connection?.connectionId || result.connection?.connectionName || '';
+  const found = result.connection?.status === 'created'
+    ? await refreshImportMappingsUntilConnection(row.dataset.logicalName || '', createdConnectionId, settings)
+    : false;
+  toast(result.connection?.status === 'created'
+    ? found
+      ? `Connection created and selected: ${createdName}.`
+      : `Connection created: ${createdName}. Refresh connections if it does not appear yet.`
+    : `Connection flow started for ${createdName}. Complete it, then refresh connections.`);
+}
+
+async function refreshImportConnectionRow(button) {
+  const row = button.closest('.import-row');
+  if (!row) {
+    return;
+  }
+  if (!state.importPackage || !state.importTargetPrepared || !getImportTargetEnvironment()) {
+    toast('Prepare the import first.', 'error');
+    return;
+  }
+  const settings = {
+    connectionReferences: collectImportSettingsConnectionReferences(),
+    environmentVariables: collectImportSettingsEnvironmentVariables(),
+  };
+  await prepareImportTarget(false);
+  applyImportSettings(settings);
+  toast('Connections refreshed.');
+}
+
+async function refreshImportMappingsUntilConnection(logicalName, connectionId, settings) {
+  const attempts = connectionId ? 6 : 1;
+  for (let index = 0; index < attempts; index += 1) {
+    await prepareImportTarget(false);
+    applyImportSettings(settings);
+    if (selectImportConnection(logicalName, connectionId)) {
+      return true;
+    }
+    if (index < attempts - 1) {
+      await delay(1500);
+    }
+  }
+  return false;
+}
+
+function selectImportConnection(logicalName, connectionId) {
+  const row = [...el.importConnections.querySelectorAll('.import-row')]
+    .find((item) => (item.dataset.logicalName || '') === logicalName);
+  const select = row?.querySelector('.import-connection-select');
+  const wanted = normalizeConnectionValue(connectionId);
+  if (!select || !wanted) {
+    return false;
+  }
+  const option = [...select.options].find((item) => {
+    const candidate = normalizeConnectionValue(item.value);
+    return candidate && (candidate.includes(wanted) || wanted.includes(candidate));
+  });
+  if (!option) {
+    return false;
+  }
+  select.value = option.value;
+  return true;
+}
+
+function normalizeConnectionValue(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function renderImportEnvironmentVariables(environmentVariables) {
@@ -3900,21 +4015,21 @@ function makePowerAutomateSolutionUrl(environmentId, solutionId) {
   if (!environmentId || !solutionId) {
     return '';
   }
-  return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/${encodeURIComponent(solutionId)}/overview`;
+  return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}`;
 }
 
 function makePowerAppsSolutionUrl(environmentId, solutionId) {
   if (!environmentId || !solutionId) {
     return '';
   }
-  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/${encodeURIComponent(solutionId)}/overview`;
+  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}`;
 }
 
 function makeCopilotStudioSolutionUrl(environmentId, solutionId) {
   if (!environmentId || !solutionId) {
     return '';
   }
-  return `https://copilotstudio.microsoft.com/environments/${encodeURIComponent(environmentId)}/${encodeURIComponent(solutionId)}/overview`;
+  return `https://copilotstudio.microsoft.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}`;
 }
 
 function safeHttpsUrl(value) {
@@ -3924,6 +4039,10 @@ function safeHttpsUrl(value) {
   } catch {
     return '';
   }
+}
+
+function connectorNameFromId(connectorId) {
+  return String(connectorId || '').split('/').filter(Boolean).pop() || '';
 }
 
 function requireSelectedSolution() {
@@ -4051,6 +4170,26 @@ async function withBusy(button, task, busyText = '') {
       button.textContent = text;
     }
   }
+}
+
+async function withImportButtonBusy(button, task, busyHtml = '') {
+  const html = button.innerHTML;
+  button.disabled = true;
+  if (busyHtml) {
+    button.innerHTML = busyHtml;
+  }
+  try {
+    await task();
+  } catch (error) {
+    console.error(error);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = html;
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function requireSelectedRole() {

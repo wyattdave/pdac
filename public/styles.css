@@ -592,6 +592,21 @@ button .spinner {
   width: 7px;
 }
 
+.refresh-icon {
+  display: block;
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  width: 18px;
+}
+
+.icon-button .spinner {
+  margin-right: 0;
+}
+
 button:disabled,
 input:disabled,
 select:disabled {
@@ -1279,6 +1294,12 @@ select:disabled {
   font-size: 12px;
 }
 
+.import-connection-controls {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
 .import-actions {
   align-items: center;
   border-top: 1px solid var(--line);
@@ -1644,6 +1665,7 @@ select:disabled {
   .ai-event-filters,
   .table-filters,
   .connection-filters,
+  .import-connection-controls,
   .connection-row,
   .share-grid,
   .selected-environment-bar,

@@ -11,6 +11,7 @@ import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import {
   createConnectionAsync,
+  getPlayerServiceConfig,
   getConnectorAsync,
   initializePlayerServices,
   isSsoOnlyConnector,
@@ -745,6 +746,21 @@ async function handleApi(req, res) {
     return;
   }
 
+  const packageConnectionCreateMatch = url.pathname.match(/^\/api\/import-packages\/([^/]+)\/connections$/);
+  if (req.method === 'POST' && packageConnectionCreateMatch) {
+    const body = await readJson(req);
+    const target = environmentFromBody(body.target || {}, {});
+    if (!target.environmentName || !target.orgUrl) {
+      throw new HttpError(400, 'Choose a target environment.');
+    }
+    sendJson(res, 201, await createConnectionForImportReference(
+      requireImportPackage(packageConnectionCreateMatch[1]),
+      target,
+      body,
+    ));
+    return;
+  }
+
   const packageImportMatch = url.pathname.match(/^\/api\/import-packages\/([^/]+)\/import$/);
   if (req.method === 'POST' && packageImportMatch) {
     const body = await readJson(req);
@@ -1157,6 +1173,14 @@ async function getMsalAccounts() {
     return [];
   }
   return authProvider._msalClient.getTokenCache().getAllAccounts();
+}
+
+async function getSelectedAccountTenantId() {
+  const accounts = await getMsalAccounts();
+  const account = selected.accountHomeId
+    ? accounts.find((item) => item.homeAccountId === selected.accountHomeId)
+    : null;
+  return String(account?.tenantId || authProvider.getUserTenantId() || accounts[0]?.tenantId || '').trim();
 }
 
 async function listAccounts() {
@@ -2533,7 +2557,7 @@ async function getConnectionReferenceDetails(connectionReferenceId) {
     totalConnectionCount: allConnections.length,
     matchingConnectionCount: connections.length,
     currentConnectionFound: Boolean(currentConnection),
-    createUrl: makeConnectionCreateUrl(selected.environmentName, reference.connectorid),
+    createUrl: await makeConnectionCreateUrl(selected.environmentName, reference.connectorid),
     notes: ['PDAC only lists existing connections whose connector matches this connection reference. Create connection starts the Microsoft Power Apps connection flow, then refreshes this panel.'],
   };
 }
@@ -2549,6 +2573,7 @@ async function createConnectionForReference(connectionReferenceId, displayName) 
   const connection = await createPowerPlatformConnection(
     reference.connectorid,
     requestedDisplayName,
+    { environmentName: selected.environmentName },
   );
   return {
     connection,
@@ -2557,34 +2582,99 @@ async function createConnectionForReference(connectionReferenceId, displayName) 
   };
 }
 
-async function createPowerPlatformConnection(connectorIdRaw, displayName) {
-  const connectorId = normalizeActionConnectorId(requireString(connectorIdRaw, 'connectorId'));
-  const connector = await getConnectorAsync(connectorId, logger);
-  if (!connector) {
-    throw new HttpError(404, `Connector '${connectorId}' was not found.`);
-  }
-
-  if (isSsoOnlyConnector(connector)) {
-    try {
-      return await createConnectionAsync(actionContext({ connectorId, displayName }));
-    } catch (error) {
-      if (!isBrowserConnectionEnabled()) {
-        throw error;
-      }
-      console.warn(`Silent connection creation failed; falling back to browser flow: ${String(error)}`);
-    }
-  } else if (!isBrowserConnectionEnabled()) {
-    throw new HttpError(
-      400,
-      `Connector '${connectorId}' needs an interactive browser flow. Restart with POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION=true or create it in make.powerapps.com.`,
-    );
-  }
-
-  return startConnectionServer({
-    connectorName: connectorId,
-    environmentId: environmentUrlName(selected.environmentName),
-    region: REGION,
+async function createConnectionForImportReference(item, target, body) {
+  const connectorId = requireString(body.connectorId, 'connectorId');
+  const reference = findImportConnectionReference(item, connectorId, body.logicalName);
+  const requestedDisplayName = String(
+    body.displayName ||
+    reference.displayName ||
+    reference.logicalName ||
+    connectorName(connectorId) ||
+    'Connection',
+  ).trim();
+  const connection = await createPowerPlatformConnection(connectorId, requestedDisplayName, {
+    environmentName: target.environmentName,
   });
+  return {
+    connection,
+    requestedDisplayName,
+  };
+}
+
+function findImportConnectionReference(item, connectorId, logicalName) {
+  const wantedLogicalName = String(logicalName || '').trim().toLowerCase();
+  const wantedKeys = connectorMatchKeys(connectorId);
+  const references = item.analysis.connectionReferences || [];
+  const reference = wantedLogicalName
+    ? references.find((candidate) => String(candidate.logicalName || '').toLowerCase() === wantedLogicalName)
+    : references.find((candidate) => hasConnectorMatch(wantedKeys, connectorMatchKeys(candidate.connectorId)));
+  if (!reference) {
+    throw new HttpError(400, 'Connector is not used by this import package.');
+  }
+  if (!hasConnectorMatch(wantedKeys, connectorMatchKeys(reference.connectorId))) {
+    throw new HttpError(400, 'Connector does not match the selected import connection reference.');
+  }
+  return reference;
+}
+
+async function createPowerPlatformConnection(connectorIdRaw, displayName, options = {}) {
+  const connectorId = normalizeActionConnectorId(requireString(connectorIdRaw, 'connectorId'));
+  const environmentName = options.environmentName || selected.environmentName;
+  const actionEnvironmentName = environmentUrlName(environmentName);
+  return withPlayerEnvironment(actionEnvironmentName, async () => {
+    const connector = await getConnectorAsync(connectorId, logger);
+    if (!connector) {
+      throw new HttpError(404, `Connector '${connectorId}' was not found.`);
+    }
+
+    if (isSsoOnlyConnector(connector)) {
+      try {
+        const connection = await createConnectionAsync(actionContext({ connectorId, displayName }, actionEnvironmentName));
+        return normalizeCreatedConnection(connection, displayName);
+      } catch (error) {
+        if (!isBrowserConnectionEnabled()) {
+          throw error;
+        }
+        console.warn(`Silent connection creation failed; falling back to browser flow: ${String(error)}`);
+      }
+    } else if (!isBrowserConnectionEnabled()) {
+      throw new HttpError(
+        400,
+        `Connector '${connectorId}' needs an interactive browser flow. Restart with POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION=true or create it in make.powerapps.com.`,
+      );
+    }
+
+    return startConnectionServer({
+      connectorName: connectorId,
+      environmentId: actionEnvironmentName,
+      region: REGION,
+      tenantId: await getSelectedAccountTenantId(),
+    });
+  });
+}
+
+async function withPlayerEnvironment(environmentName, task) {
+  const previousEnvironmentName = getPlayerServiceConfig().environmentName;
+  updateEnvironmentName(environmentName);
+  try {
+    return await task();
+  } finally {
+    updateEnvironmentName(previousEnvironmentName);
+  }
+}
+
+function normalizeCreatedConnection(connection, fallbackDisplayName = '') {
+  if (connection?.status) {
+    return connection;
+  }
+  const id = connection?.name || connection?.id || connection?.connectionName || connection?.connectionId || '';
+  return {
+    ...connection,
+    status: 'created',
+    id,
+    name: connection?.name || id,
+    displayName: connection?.properties?.displayName || connection?.displayName || fallbackDisplayName || id,
+  };
 }
 
 function startConnectionServer(config) {
@@ -2638,11 +2728,12 @@ function startConnectionServer(config) {
         nonce,
         protocolVersion: CONNECTION_CALLBACK_PROTOCOL_VERSION,
       });
+      const playerUrlWithTenant = addTenantIdToUrl(playerUrl, config.tenantId);
 
       try {
-        await open(playerUrl, { wait: false });
+        await open(playerUrlWithTenant, { wait: false });
       } catch {
-        console.log(`Open this URL to create the connection:\n${playerUrl}`);
+        console.log(`Open this URL to create the connection:\n${playerUrlWithTenant}`);
       }
     });
 
@@ -3174,7 +3265,7 @@ async function prepareImportTarget(item, target) {
       ...reference,
       matches,
       selectedConnectionId: matches[0]?.connectionId || '',
-      createUrl: makeConnectionCreateUrl(target.environmentName, reference.connectorId),
+      createUrl: await makeConnectionCreateUrl(target.environmentName, reference.connectorId),
     };
   }));
   const environmentVariables = await hydrateTargetEnvironmentVariables(item.analysis.environmentVariables, target);
@@ -3472,7 +3563,7 @@ async function listTargetConnections(environmentName) {
   }
 
   try {
-    sources.push(...await listUserConnections());
+    sources.push(...await listUserConnections(environmentName));
   } catch (error) {
     console.warn(`Power Apps action connection list failed: ${errorMessage(error)}`);
   }
@@ -3486,8 +3577,11 @@ async function listAdminConnections(environmentName) {
   return rows.map(normalizeAdminConnection);
 }
 
-async function listUserConnections() {
-  const actionConnections = await listConnectionsAsync(actionContext({}));
+async function listUserConnections(environmentName = selected.environmentName) {
+  const actionEnvironmentName = environmentUrlName(environmentName);
+  const actionConnections = await withPlayerEnvironment(actionEnvironmentName, () =>
+    listConnectionsAsync(actionContext({}, actionEnvironmentName))
+  );
   const values = Array.isArray(actionConnections) ? actionConnections : actionConnections?.value || [];
   return values.map(normalizeActionConnection);
 }
@@ -4087,13 +4181,16 @@ function connectionLooksLikeConnector(connection, connectorKeys) {
   return false;
 }
 
-function makeConnectionCreateUrl(environmentName, connectorId) {
+async function makeConnectionCreateUrl(environmentName, connectorId) {
   const environmentId = environmentUrlName(environmentName);
   const connector = connectorName(connectorId);
   if (!environmentId || !connector) {
     return '';
   }
-  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/connections/available/${encodeURIComponent(connector)}`;
+  return addTenantIdToUrl(
+    `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/connections/available/${encodeURIComponent(connector)}`,
+    await getSelectedAccountTenantId(),
+  );
 }
 
 function makeConnectionManageUrl(environmentName, connectionId) {
@@ -4115,16 +4212,27 @@ function environmentUrlName(environmentName) {
   return lastPathPart(value);
 }
 
+function addTenantIdToUrl(rawUrl, tenantId) {
+  const normalizedTenantId = String(tenantId || '').trim();
+  if (!normalizedTenantId) {
+    return rawUrl;
+  }
+
+  const url = new URL(rawUrl);
+  url.searchParams.set('tenantId', normalizedTenantId);
+  return url.toString();
+}
+
 function isBrowserConnectionEnabled() {
   return String(process.env.POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION || '').toLowerCase() === 'true';
 }
 
-function actionContext(actionsParams) {
+function actionContext(actionsParams, environmentName = selected.environmentName) {
   return {
     vfs: {},
     authProvider: actionAuthProvider,
     region: REGION,
-    environmentName: environmentUrlName(selected.environmentName),
+    environmentName: environmentUrlName(environmentName),
     actionsParams,
     localFilePaths: {
       powerConfigPath: 'power.config.json',

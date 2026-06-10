@@ -246,6 +246,7 @@ async function createConnection(connectorIdRaw, displayName) {
     connectorName: connectorId,
     environmentId: selectedEnvironment.environmentName,
     region: REGION,
+    tenantId: authProvider.getUserTenantId(),
   });
 }
 
@@ -300,11 +301,12 @@ function startConnectionServer(config) {
         nonce,
         protocolVersion: CONNECTION_CALLBACK_PROTOCOL_VERSION,
       });
+      const playerUrlWithTenant = addTenantIdToUrl(playerUrl, config.tenantId);
 
       try {
-        await open(playerUrl, { wait: false });
+        await open(playerUrlWithTenant, { wait: false });
       } catch {
-        console.log(`Open this URL to create the connection:\n${playerUrl}`);
+        console.log(`Open this URL to create the connection:\n${playerUrlWithTenant}`);
       }
     });
 
@@ -582,6 +584,17 @@ function escapeHtml(value) {
     '"': '&quot;',
     "'": '&#39;',
   }[char]));
+}
+
+function addTenantIdToUrl(rawUrl, tenantId) {
+  const normalizedTenantId = String(tenantId || '').trim();
+  if (!normalizedTenantId) {
+    return rawUrl;
+  }
+
+  const url = new URL(rawUrl);
+  url.searchParams.set('tenantId', normalizedTenantId);
+  return url.toString();
 }
 
 function isBrowserConnectionEnabled() {
