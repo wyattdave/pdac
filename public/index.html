@@ -41,11 +41,12 @@
       <button class="tab active" type="button" data-tab="home">Home</button>
       <button class="tab" type="button" data-tab="roles">Roles</button>
       <button class="tab" type="button" data-tab="solutions">Solutions</button>
-      <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="import">Imports</button>
-      <button class="tab" type="button" data-tab="users">Users and Teams</button>
+      <button class="tab" type="button" data-tab="aiEvents">AI Flow</button>
+      <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="connections">Connections</button>
-      <button class="tab" type="button" data-tab="auth">Environment and Auth</button>
+      <button class="tab" type="button" data-tab="users">Users and Teams</button>
+      <button class="tab" type="button" data-tab="auth">Settings</button>
     </nav>
 
     <main>
@@ -96,7 +97,7 @@
       <section id="authTab" class="tab-panel">
         <section class="panel">
           <div class="section-title">
-            <h2>Environment and Auth</h2>
+            <h2>Settings</h2>
             <div class="actions">
               <button id="signInButton" type="button">Sign in</button>
               <button id="signInDifferentButton" type="button" class="secondary">Sign in different account</button>
@@ -491,6 +492,66 @@
         </section>
       </section>
 
+      <section id="aiEventsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>AI Flow</h2>
+            <div class="actions">
+              <button id="loadAiEventsButton" type="button">Load AI Flow</button>
+            </div>
+          </div>
+
+          <div class="ai-event-filters">
+            <label>
+              Date range
+              <select id="aiEventsRange">
+                <option value="month">Current calendar month</option>
+                <option value="today">Today</option>
+                <option value="7d">Last 7 days</option>
+                <option value="28d">Last 28 days</option>
+                <option value="365d">Last 365 days</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <label>
+              Start date
+              <input id="aiEventsStart" type="date" />
+            </label>
+            <label>
+              End date
+              <input id="aiEventsEnd" type="date" />
+            </label>
+            <label>
+              Copilot or AI Builder Credits
+              <select id="aiEventsCreditType">
+                <option value="">All credits</option>
+              </select>
+            </label>
+            <label>
+              Created by
+              <input id="aiEventsCreatedBy" placeholder="Quick filter by creator" />
+            </label>
+            <label>
+              Tool name
+              <input id="aiEventsToolName" placeholder="Quick filter by tool" />
+            </label>
+            <label>
+              Model
+              <input id="aiEventsModel" placeholder="Quick filter by model" />
+            </label>
+            <label>
+              Source
+              <input id="aiEventsSource" placeholder="Quick filter by source" />
+            </label>
+          </div>
+
+          <p id="aiEventsSummary" class="muted"></p>
+          <p id="aiEventsWarnings" class="muted" hidden></p>
+          <div id="aiEventsTotals" class="ai-event-totals"></div>
+          <div id="aiEventsTable" class="ai-event-table-wrap"></div>
+        </section>
+      </section>
+
       <section id="importTab" class="tab-panel">
         <section class="panel">
           <div class="section-title">
@@ -650,6 +711,19 @@
           </div>
         </div>
         <div id="tableDocumentBody" class="table-document-body"></div>
+      </section>
+    </div>
+
+    <div id="aiEventDetailModal" class="modal-backdrop" hidden>
+      <section class="modal ai-event-modal" role="dialog" aria-modal="true" aria-labelledby="aiEventDetailTitle">
+        <div class="section-title compact-title">
+          <div>
+            <h2 id="aiEventDetailTitle">AI Event</h2>
+            <p id="aiEventDetailMeta" class="muted"></p>
+          </div>
+          <button id="aiEventDetailClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+        </div>
+        <div id="aiEventDetailBody" class="ai-event-detail-body"></div>
       </section>
     </div>
 

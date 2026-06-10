@@ -92,6 +92,7 @@ const el = {
   exportManaged: document.querySelector('#exportManaged'),
   solutionComponents: document.querySelector('#solutionComponents'),
   loadTablesButton: document.querySelector('#loadTablesButton'),
+  loadAiEventsButton: document.querySelector('#loadAiEventsButton'),
   tableSearch: document.querySelector('#tableSearch'),
   tableScopes: document.querySelectorAll('input[name="tableScope"]'),
   tableSummary: document.querySelector('#tableSummary'),
@@ -108,6 +109,18 @@ const el = {
   tableDiagramCanvas: document.querySelector('#tableDiagramCanvas'),
   tableDiagramSource: document.querySelector('#tableDiagramSource'),
   copyDiagramButton: document.querySelector('#copyDiagramButton'),
+  aiEventsRange: document.querySelector('#aiEventsRange'),
+  aiEventsStart: document.querySelector('#aiEventsStart'),
+  aiEventsEnd: document.querySelector('#aiEventsEnd'),
+  aiEventsCreditType: document.querySelector('#aiEventsCreditType'),
+  aiEventsCreatedBy: document.querySelector('#aiEventsCreatedBy'),
+  aiEventsToolName: document.querySelector('#aiEventsToolName'),
+  aiEventsModel: document.querySelector('#aiEventsModel'),
+  aiEventsSource: document.querySelector('#aiEventsSource'),
+  aiEventsSummary: document.querySelector('#aiEventsSummary'),
+  aiEventsWarnings: document.querySelector('#aiEventsWarnings'),
+  aiEventsTotals: document.querySelector('#aiEventsTotals'),
+  aiEventsTable: document.querySelector('#aiEventsTable'),
   diagramModal: document.querySelector('#diagramModal'),
   diagramModalTitle: document.querySelector('#diagramModalTitle'),
   diagramModalMeta: document.querySelector('#diagramModalMeta'),
@@ -125,6 +138,11 @@ const el = {
   tableDocumentBody: document.querySelector('#tableDocumentBody'),
   exportTableDocumentButton: document.querySelector('#exportTableDocumentButton'),
   tableDocumentClose: document.querySelector('#tableDocumentClose'),
+  aiEventDetailModal: document.querySelector('#aiEventDetailModal'),
+  aiEventDetailTitle: document.querySelector('#aiEventDetailTitle'),
+  aiEventDetailMeta: document.querySelector('#aiEventDetailMeta'),
+  aiEventDetailBody: document.querySelector('#aiEventDetailBody'),
+  aiEventDetailClose: document.querySelector('#aiEventDetailClose'),
   componentModal: document.querySelector('#componentModal'),
   componentModalTitle: document.querySelector('#componentModalTitle'),
   componentModalMeta: document.querySelector('#componentModalMeta'),
@@ -188,6 +206,21 @@ const state = {
   solutionTableCount: 0,
   tables: [],
   tablesLoaded: false,
+  aiEvents: [],
+  aiEventsLoaded: false,
+  aiEventFieldMappings: {},
+  aiEventUnresolvedFields: [],
+  aiEventDateRange: {
+    range: 'month',
+    startDate: '',
+    endDate: '',
+  },
+  aiEventSort: {
+    column: 'created',
+    direction: 'desc',
+  },
+  aiEventDetailCache: new Map(),
+  selectedAiEventId: '',
   selectedTableLogicalName: '',
   selectedTableDetails: null,
   selectedTableDiagram: null,
@@ -351,7 +384,16 @@ el.publisherFilter.addEventListener('change', handlePublisherFilterChange);
 el.publisherSelectAllButton.addEventListener('click', () => setPublisherSelection(true));
 el.publisherSelectNoneButton.addEventListener('click', () => setPublisherSelection(false));
 el.loadTablesButton.addEventListener('click', () => withBusy(el.loadTablesButton, loadTables));
+el.loadAiEventsButton.addEventListener('click', () => withBusy(el.loadAiEventsButton, () => loadAiEvents(), 'Loading AI Flow'));
 el.tableSearch.addEventListener('input', renderTables);
+el.aiEventsRange.addEventListener('change', handleAiEventRangeChange);
+el.aiEventsStart.addEventListener('change', handleAiEventCustomRangeChange);
+el.aiEventsEnd.addEventListener('change', handleAiEventCustomRangeChange);
+el.aiEventsCreditType.addEventListener('change', renderAiEvents);
+el.aiEventsCreatedBy.addEventListener('input', renderAiEvents);
+el.aiEventsToolName.addEventListener('input', renderAiEvents);
+el.aiEventsModel.addEventListener('input', renderAiEvents);
+el.aiEventsSource.addEventListener('input', renderAiEvents);
 el.tableScopes.forEach((input) => input.addEventListener('change', () => {
   state.tablesLoaded = false;
   state.tables = [];
@@ -375,6 +417,22 @@ el.tablesList.addEventListener('click', (event) => {
     return;
   }
   selectTable(button.dataset.tableLogicalName || '').catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.aiEventsTable.addEventListener('click', (event) => {
+  const sortButton = event.target.closest('[data-ai-event-sort]');
+  if (sortButton) {
+    event.preventDefault();
+    toggleAiEventSort(sortButton.dataset.aiEventSort || '');
+    return;
+  }
+  const row = event.target.closest('[data-ai-event-id]');
+  if (!row) {
+    return;
+  }
+  openAiEventDetail(row.dataset.aiEventId || '').catch((error) => {
     toast(error.message, 'error');
     console.error(error);
   });
@@ -407,6 +465,7 @@ el.copyDiagramModalButton.addEventListener('click', () => copyActiveMermaid().ca
 }));
 el.diagramModalClose.addEventListener('click', closeDiagramModal);
 el.tableDocumentClose.addEventListener('click', closeTableDocumentModal);
+el.aiEventDetailClose.addEventListener('click', closeAiEventDetailModal);
 el.exportTableDocumentButton.addEventListener('click', () => exportActiveTableDocument().catch((error) => {
   toast(error.message, 'error');
   console.error(error);
@@ -425,7 +484,9 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') {
     return;
   }
-  if (!el.diagramModal.hidden) {
+  if (!el.aiEventDetailModal.hidden) {
+    closeAiEventDetailModal();
+  } else if (!el.diagramModal.hidden) {
     closeDiagramModal();
   } else if (!el.tableDocumentModal.hidden) {
     closeTableDocumentModal();
@@ -492,6 +553,8 @@ el.importSolutionButton.addEventListener('click', () => withBusy(el.importSoluti
 initTheme();
 updateRoleFileFormatUi();
 clearTableSelection();
+resetAiEventFilters();
+renderAiEvents();
 await loadStatus();
 
 async function loadStatus() {
@@ -1114,22 +1177,352 @@ function clearEnvironmentData() {
   state.solutionTableCount = 0;
   state.tables = [];
   state.tablesLoaded = false;
+  state.aiEvents = [];
+  state.aiEventsLoaded = false;
+  state.aiEventFieldMappings = {};
+  state.aiEventUnresolvedFields = [];
+  state.aiEventDetailCache = new Map();
+  state.selectedAiEventId = '';
   state.selectedTableLogicalName = '';
   state.selectedTableDetails = null;
   state.selectedTableDiagram = null;
   state.activeDiagram = null;
   state.diagramZoom = 1;
   state.activeTableDocument = null;
+  resetAiEventFilters();
   renderUsers();
   renderTeams();
   renderConnections();
+  renderAiEvents();
   renderTables();
   clearTableSelection();
+  closeAiEventDetailModal();
   closeConnectionDeleteModal();
   closeRoleAssignmentModal();
   closeDiagramModal();
   closeTableDocumentModal();
   clearRoleSelection();
+}
+
+function resetAiEventFilters() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  state.aiEventDateRange = {
+    range: 'month',
+    startDate: formatDateInputValue(start),
+    endDate: formatDateInputValue(end),
+  };
+  el.aiEventsRange.value = 'month';
+  el.aiEventsStart.value = state.aiEventDateRange.startDate;
+  el.aiEventsEnd.value = state.aiEventDateRange.endDate;
+  el.aiEventsCreditType.value = '';
+  el.aiEventsCreatedBy.value = '';
+  el.aiEventsToolName.value = '';
+  el.aiEventsModel.value = '';
+  el.aiEventsSource.value = '';
+  state.aiEventSort = {
+    column: 'created',
+    direction: 'desc',
+  };
+  syncAiEventCustomRangeVisibility();
+}
+
+function syncAiEventCustomRangeVisibility() {
+  const isCustom = el.aiEventsRange.value === 'custom';
+  el.aiEventsStart.disabled = !isCustom;
+  el.aiEventsEnd.disabled = !isCustom;
+}
+
+function handleAiEventRangeChange() {
+  syncAiEventCustomRangeVisibility();
+}
+
+function handleAiEventCustomRangeChange() {
+  return;
+}
+
+async function loadAiEvents(options = {}) {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  el.aiEventsTable.innerHTML = empty('Loading AI Flow events...');
+  const params = new URLSearchParams();
+  params.set('range', el.aiEventsRange.value || 'month');
+  if (params.get('range') === 'custom') {
+    params.set('start', el.aiEventsStart.value || '');
+    params.set('end', el.aiEventsEnd.value || '');
+  }
+  const data = await api(`/api/ai-events?${params.toString()}`);
+  state.aiEvents = data.rows || [];
+  state.aiEventsLoaded = true;
+  state.aiEventFieldMappings = data.fieldMappings || {};
+  state.aiEventUnresolvedFields = data.unresolvedFields || [];
+  state.aiEventDetailCache = new Map();
+  applyAiEventDateRange(data.dateRange || {});
+  renderAiEventCreditTypes();
+  renderAiEvents();
+  if (options.toastMessage === undefined) {
+    toast('AI Flow events loaded.');
+  } else if (options.toastMessage) {
+    toast(options.toastMessage);
+  }
+}
+
+function applyAiEventDateRange(dateRange) {
+  if (!dateRange || !dateRange.startDate || !dateRange.endDate) {
+    return;
+  }
+  state.aiEventDateRange = {
+    range: dateRange.range || 'month',
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+  };
+  el.aiEventsRange.value = state.aiEventDateRange.range;
+  el.aiEventsStart.value = state.aiEventDateRange.startDate;
+  el.aiEventsEnd.value = state.aiEventDateRange.endDate;
+  syncAiEventCustomRangeVisibility();
+}
+
+function renderAiEventCreditTypes() {
+  const selected = el.aiEventsCreditType.value;
+  const values = [...new Set(state.aiEvents.map((row) => String(row.creditType || '').trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+  el.aiEventsCreditType.innerHTML = ['<option value="">All credits</option>', ...values.map((value) => `
+    <option value="${escapeAttr(value)}">${escapeHtml(value)}</option>
+  `)].join('');
+  el.aiEventsCreditType.value = values.includes(selected) ? selected : '';
+}
+
+function renderAiEvents() {
+  if (!state.aiEventsLoaded) {
+    el.aiEventsSummary.textContent = 'Load AI Flow events for the current calendar month.';
+    el.aiEventsWarnings.hidden = true;
+    el.aiEventsTotals.innerHTML = '';
+    el.aiEventsTable.innerHTML = empty('Load AI Flow events.');
+    return;
+  }
+
+  const filtered = getFilteredAiEvents();
+  const sorted = getSortedAiEvents(filtered);
+  const rangeText = state.aiEventDateRange.startDate && state.aiEventDateRange.endDate
+    ? `${state.aiEventDateRange.startDate} to ${state.aiEventDateRange.endDate}`
+    : '';
+  el.aiEventsSummary.textContent = `${sorted.length} / ${state.aiEvents.length} AI Flow events${rangeText ? ` | ${rangeText}` : ''}`;
+  if (state.aiEventUnresolvedFields.length) {
+    el.aiEventsWarnings.hidden = false;
+    el.aiEventsWarnings.textContent = `Some AI Flow fields were not exposed by metadata in this environment: ${state.aiEventUnresolvedFields.join(', ')}`;
+  } else {
+    el.aiEventsWarnings.hidden = true;
+  }
+  renderAiEventTotals(filtered);
+
+  if (!sorted.length) {
+    el.aiEventsTable.innerHTML = empty(state.aiEvents.length ? 'No AI Flow events match the current filters.' : 'No AI Flow events found for this range.');
+    return;
+  }
+
+  el.aiEventsTable.innerHTML = `
+    <table class="metadata-table ai-events-table">
+      <thead>
+        <tr>
+          ${renderAiEventSortHeader('owner', 'Owner')}
+          ${renderAiEventSortHeader('creditType', 'Copilot Or AI Builder Credits')}
+          ${renderAiEventSortHeader('creditsConsumed', 'Credits Consumed')}
+          ${renderAiEventSortHeader('dataType', 'Data Type')}
+          ${renderAiEventSortHeader('source', 'Source')}
+          ${renderAiEventSortHeader('toolName', 'Tool name')}
+          ${renderAiEventSortHeader('model', 'Model')}
+          ${renderAiEventSortHeader('created', 'Created')}
+        </tr>
+      </thead>
+      <tbody>
+        ${sorted.map((row) => `
+          <tr class="ai-event-row" data-ai-event-id="${escapeAttr(row.id)}">
+            <td>${escapeHtml(row.ownerName || '')}</td>
+            <td>${escapeHtml(row.creditType || '')}</td>
+            <td>${escapeHtml(formatCredits(row.creditsConsumed))}</td>
+            <td>${escapeHtml(row.dataType || '')}</td>
+            <td>${escapeHtml(row.source || '')}</td>
+            <td>${escapeHtml(row.toolName || '')}</td>
+            <td>${escapeHtml(row.model || '')}</td>
+            <td>${escapeHtml(row.createdOn || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function getFilteredAiEvents() {
+  const creditType = el.aiEventsCreditType.value.trim().toLowerCase();
+  const createdBy = el.aiEventsCreatedBy.value.trim().toLowerCase();
+  const toolName = el.aiEventsToolName.value.trim().toLowerCase();
+  const model = el.aiEventsModel.value.trim().toLowerCase();
+  const source = el.aiEventsSource.value.trim().toLowerCase();
+  return state.aiEvents.filter((row) => {
+    const rowCreditType = String(row.creditType || '').trim().toLowerCase();
+    const rowCreatedBy = String(row.createdByName || '').trim().toLowerCase();
+    const rowToolName = String(row.toolName || '').trim().toLowerCase();
+    const rowModel = String(row.model || '').trim().toLowerCase();
+    const rowSource = String(row.source || '').trim().toLowerCase();
+    return (!creditType || rowCreditType === creditType) &&
+      (!createdBy || rowCreatedBy.includes(createdBy)) &&
+      (!toolName || rowToolName.includes(toolName)) &&
+      (!model || rowModel.includes(model)) &&
+      (!source || rowSource.includes(source));
+  });
+}
+
+function renderAiEventSortHeader(column, label) {
+  const isActive = state.aiEventSort.column === column;
+  const direction = isActive ? state.aiEventSort.direction : 'none';
+  const indicator = direction === 'asc' ? '▲' : direction === 'desc' ? '▼' : '↕';
+  const ariaSort = direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
+  return `
+    <th scope="col" aria-sort="${ariaSort}">
+      <button class="table-sort-button" type="button" data-ai-event-sort="${escapeAttr(column)}" aria-label="Sort by ${escapeAttr(label)}">
+        <span>${escapeHtml(label)}</span>
+        <span class="table-sort-indicator" aria-hidden="true">${indicator}</span>
+      </button>
+    </th>
+  `;
+}
+
+function toggleAiEventSort(column) {
+  if (!column) {
+    return;
+  }
+  if (state.aiEventSort.column === column) {
+    state.aiEventSort.direction = state.aiEventSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.aiEventSort = {
+      column,
+      direction: column === 'created' ? 'desc' : 'asc',
+    };
+  }
+  renderAiEvents();
+}
+
+function getSortedAiEvents(rows) {
+  const { column, direction } = state.aiEventSort;
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => compareAiEventValues(left, right, column) * multiplier);
+}
+
+function compareAiEventValues(left, right, column) {
+  if (column === 'creditsConsumed') {
+    return Number(left.creditsConsumed || 0) - Number(right.creditsConsumed || 0);
+  }
+  if (column === 'created') {
+    return String(left.createdOnRaw || '').localeCompare(String(right.createdOnRaw || ''));
+  }
+  const leftValue = getAiEventSortValue(left, column);
+  const rightValue = getAiEventSortValue(right, column);
+  return leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function getAiEventSortValue(row, column) {
+  if (column === 'owner') {
+    return String(row.ownerName || '');
+  }
+  return String(row[column] || '');
+}
+
+function renderAiEventTotals(rows) {
+  if (!rows.length) {
+    el.aiEventsTotals.innerHTML = '';
+    return;
+  }
+  const totals = new Map();
+  for (const row of rows) {
+    const key = row.creditType || 'Unlabeled credits';
+    totals.set(key, (totals.get(key) || 0) + Number(row.creditsConsumed || 0));
+  }
+  el.aiEventsTotals.innerHTML = [...totals.entries()].map(([label, total]) => `
+    <div class="ai-event-total-card">
+      <strong>${escapeHtml(formatCredits(total))}</strong>
+      <span>${escapeHtml(label)}</span>
+    </div>
+  `).join('');
+}
+
+function formatCredits(value) {
+  const number = Number(value || 0);
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 2,
+  }).format(number);
+}
+
+async function openAiEventDetail(aiEventId) {
+  if (!aiEventId) {
+    return;
+  }
+  state.selectedAiEventId = aiEventId;
+  el.aiEventDetailModal.hidden = false;
+  el.aiEventDetailTitle.textContent = 'AI Flow Event';
+  el.aiEventDetailMeta.textContent = 'Loading event details...';
+  el.aiEventDetailBody.innerHTML = empty('Loading event details...');
+
+  const cached = state.aiEventDetailCache.get(aiEventId);
+  if (cached) {
+    renderAiEventDetailModal(cached);
+    return;
+  }
+
+  const data = await api(`/api/ai-events/${encodeURIComponent(aiEventId)}`);
+  const detail = data.event || null;
+  if (!detail) {
+    throw new Error('AI Flow event details are unavailable.');
+  }
+  state.aiEventDetailCache.set(aiEventId, detail);
+  if (state.selectedAiEventId === aiEventId) {
+    renderAiEventDetailModal(detail);
+  }
+}
+
+function renderAiEventDetailModal(detail) {
+  el.aiEventDetailTitle.textContent = detail.toolName || detail.source || 'AI Flow Event';
+  el.aiEventDetailMeta.textContent = [
+    detail.creditType || '',
+    detail.ownerName ? `Owner: ${detail.ownerName}` : '',
+    detail.createdByName ? `Created by: ${detail.createdByName}` : '',
+    detail.createdOn || '',
+  ].filter(Boolean).join(' | ');
+  el.aiEventDetailBody.innerHTML = `
+    <div class="ai-event-detail-panel">
+      <h3>Input</h3>
+      <pre>${escapeHtml(formatAiEventPayload(detail.input))}</pre>
+    </div>
+    <div class="ai-event-detail-panel">
+      <h3>Output</h3>
+      <pre>${escapeHtml(formatAiEventPayload(detail.output))}</pre>
+    </div>
+  `;
+}
+
+function formatAiEventPayload(payload) {
+  if (!payload) {
+    return '(empty)';
+  }
+  const value = payload.parsed !== undefined ? payload.parsed : payload.raw;
+  if (value === null || value === '') {
+    return '(empty)';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function closeAiEventDetailModal() {
+  el.aiEventDetailModal.hidden = true;
+  el.aiEventDetailBody.innerHTML = '';
+  state.selectedAiEventId = '';
+}
+
+function formatDateInputValue(value) {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 }
 
 function toggleCreateRoleForm() {

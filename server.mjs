@@ -129,12 +129,67 @@ const selected = {
 const accountEnvironmentSelections = new Map();
 const importPackages = new Map();
 const componentTypeEntityCache = new Map();
+const aiEventMetadataCache = new Map();
 let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '',
   textNodeName: 'text',
 });
+const AI_EVENT_ENTITY_LOGICAL_NAME = 'msdyn_aievent';
+const AI_EVENT_ENTITY_SET_NAME = 'msdyn_aievents';
+const ODATA_FORMATTED_VALUE_ANNOTATION = 'OData.Community.Display.V1.FormattedValue';
+const AI_EVENT_BATCH_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
+const AI_EVENT_FIELD_RULES = {
+  creditType: {
+    logicalNames: ['msdyn_consumptionsource'],
+    exactLabels: ['consumption source'],
+    tokenGroups: [],
+    preferredTypes: ['Picklist'],
+  },
+  dataType: {
+    logicalNames: [],
+    exactLabels: [],
+    tokenGroups: [],
+    preferredTypes: [],
+  },
+  source: {
+    logicalNames: ['msdyn_partnersource'],
+    exactLabels: ['partner source'],
+    tokenGroups: [],
+    preferredTypes: ['String', 'Memo'],
+  },
+  toolName: {
+    logicalNames: [],
+    exactLabels: [],
+    tokenGroups: [],
+    preferredTypes: [],
+  },
+  model: {
+    logicalNames: ['msdyn_aimodelid'],
+    exactLabels: ['ai model'],
+    tokenGroups: [],
+    preferredTypes: ['Lookup'],
+  },
+  input: {
+    logicalNames: ['msdyn_eventdata', 'msdyn_datainfo'],
+    exactLabels: ['event data', 'data info'],
+    tokenGroups: [],
+    preferredTypes: ['Memo', 'String'],
+  },
+  output: {
+    logicalNames: ['msdyn_output'],
+    exactLabels: ['output'],
+    tokenGroups: [],
+    preferredTypes: ['String', 'Memo'],
+  },
+  eventName: {
+    logicalNames: [],
+    exactLabels: [],
+    tokenGroups: [],
+    preferredTypes: [],
+  },
+};
 const logger = {
   trackActivityEvent() {},
   trackErrorEvent(eventName, eventData) {
@@ -464,6 +519,27 @@ async function handleApi(req, res) {
   if (route === 'GET /api/solutions') {
     requireOrgUrl();
     sendJson(res, 200, await listSolutions());
+    return;
+  }
+
+  if (route === 'GET /api/ai-events') {
+    requireOrgUrl();
+    const payload = await listAiEvents({
+      range: url.searchParams.get('range') || 'month',
+      start: url.searchParams.get('start') || '',
+      end: url.searchParams.get('end') || '',
+    });
+    console.log('[AI events] sending list payload:\n' + JSON.stringify(payload, null, 2));
+    sendJson(res, 200, payload);
+    return;
+  }
+
+  const aiEventDetailMatch = url.pathname.match(/^\/api\/ai-events\/([0-9a-fA-F-]+)$/);
+  if (req.method === 'GET' && aiEventDetailMatch) {
+    requireOrgUrl();
+    const payload = await getAiEventDetail(aiEventDetailMatch[1]);
+    console.log('[AI events] sending detail payload:\n' + JSON.stringify(payload, null, 2));
+    sendJson(res, 200, payload);
     return;
   }
 
@@ -4325,6 +4401,779 @@ async function getTablePrivilegeIds() {
   );
 }
 
+async function listAiEvents(filters = {}) {
+  const config = await getAiEventFieldConfig();
+  const dateRange = getAiEventDateRange(filters);
+  const selectFields = getAiEventSelectFields(config, { includePayload: false });
+  const data = await fetchAiEventData(
+    buildAiEventListPath(selectFields, dateRange),
+    AI_EVENT_BATCH_PREFER,
+  );
+  const rows = data
+    .map((row) => normalizeAiEventSummary(row, config))
+    .filter((row) => Number(row.creditsConsumed || 0) > 0);
+  return {
+    dateRange,
+    fieldMappings: config.labels,
+    fieldCandidates: config.resolved,
+    unresolvedFields: config.unresolved,
+    rows,
+  };
+}
+
+async function getAiEventDetail(aiEventId) {
+  const config = await getAiEventFieldConfig();
+  const selectFields = getAiEventSelectFields(config, { includePayload: true });
+  const responses = await dvBatchGet([
+    {
+      path: `${AI_EVENT_ENTITY_SET_NAME}(${encodeURIComponent(normalizeGuid(aiEventId))})?${buildAiEventQueryString({
+        '$select': selectFields.join(','),
+      })}`,
+      headers: {
+        Prefer: AI_EVENT_BATCH_PREFER,
+      },
+    },
+  ]);
+  const data = responses[0]?.data || {};
+  if (!data?.msdyn_aieventid) {
+    throw new HttpError(404, 'AI event not found.');
+  }
+  return {
+    fieldMappings: config.labels,
+    fieldCandidates: config.resolved,
+    unresolvedFields: config.unresolved,
+    event: normalizeAiEventDetail(data, config),
+  };
+}
+
+async function getAiEventFieldConfig() {
+  const cacheKey = selected.orgUrl;
+  const cached = aiEventMetadataCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const response = await dvRequestUrl(
+    'GET',
+    `${selected.orgUrl}/api/data/v9.2/EntityDefinitions(LogicalName='${AI_EVENT_ENTITY_LOGICAL_NAME}')/Attributes?$select=LogicalName,DisplayName,AttributeType,IsValidForRead`,
+    undefined,
+    {},
+    selected.orgUrl,
+  );
+  const config = resolveAiEventFieldConfig(response.data.value || []);
+  aiEventMetadataCache.set(cacheKey, config);
+  return config;
+}
+
+function resolveAiEventFieldConfig(attributes) {
+  const normalized = attributes.map((attribute) => ({
+    logicalName: String(attribute.LogicalName || '').trim().toLowerCase(),
+    label: getLabel(attribute.DisplayName),
+    normalizedLabel: normalizeAiEventText(getLabel(attribute.DisplayName)),
+    normalizedLogicalName: normalizeAiEventText(attribute.LogicalName),
+    attributeType: String(attribute.AttributeType || '').trim(),
+    isValidForRead: attribute.IsValidForRead !== false,
+  }));
+  const resolved = {};
+  const labels = {};
+  const unresolved = [];
+  const attributesByLogicalName = Object.fromEntries(normalized.map((attribute) => [attribute.logicalName, attribute]));
+
+  for (const [key, rule] of Object.entries(AI_EVENT_FIELD_RULES)) {
+    const configuredFields = [];
+    for (const logicalName of rule.logicalNames || []) {
+      const normalizedLogicalName = String(logicalName || '').trim().toLowerCase();
+      if (!normalizedLogicalName) {
+        continue;
+      }
+      if (attributesByLogicalName[normalizedLogicalName]) {
+        configuredFields.push(normalizedLogicalName === 'msdyn_aimodelid' ? '_msdyn_aimodelid_value' : normalizedLogicalName);
+      }
+    }
+    resolved[key] = configuredFields;
+    labels[key] = configuredFields.map((logicalName) => {
+      if (logicalName === '_msdyn_aimodelid_value') {
+        return attributesByLogicalName.msdyn_aimodelid?.label || 'AI Model';
+      }
+      return attributesByLogicalName[logicalName]?.label || logicalName;
+    }).join(' | ');
+    if (!configuredFields.length && key !== 'eventName' && key !== 'dataType' && key !== 'toolName') {
+      unresolved.push(key);
+    }
+  }
+
+  return { resolved, labels, unresolved, attributesByLogicalName };
+}
+
+function matchAiEventAttributes(attributes, rule) {
+  const exactLogicalNames = new Set((rule.logicalNames || []).map((value) => String(value).toLowerCase()));
+  const exactLabels = new Set((rule.exactLabels || []).map(normalizeAiEventText));
+  const scored = [];
+
+  for (const attribute of attributes) {
+    if (!attribute.isValidForRead) {
+      continue;
+    }
+    const score = scoreAiEventAttribute(attribute, rule, exactLogicalNames, exactLabels);
+    if (score > 0) {
+      scored.push({ ...attribute, score });
+    }
+  }
+
+  return scored.sort((left, right) => right.score - left.score || left.logicalName.localeCompare(right.logicalName));
+}
+
+function scoreAiEventAttribute(attribute, rule, exactLogicalNames, exactLabels) {
+  let score = 0;
+  const exactLogicalMatch = exactLogicalNames.has(attribute.logicalName);
+  const exactLabelMatch = exactLabels.has(attribute.normalizedLabel);
+  if (exactLogicalMatch) {
+    score += 1000;
+  }
+  if (exactLabelMatch) {
+    score += 900;
+  }
+
+  for (const [index, group] of (rule.tokenGroups || []).entries()) {
+    if (containsAiEventTokenGroup(attribute.normalizedLabel, group)) {
+      score += 300 - (index * 10);
+    }
+    if (containsAiEventTokenGroup(attribute.normalizedLogicalName, group)) {
+      score += 260 - (index * 10);
+    }
+  }
+
+  // For fuzzy matches, stay inside the AI-event namespace and avoid shadow lookup fields
+  // like createdbyname/owneridtype that appear in metadata but are not queryable columns.
+  if (score > 0 && !exactLogicalMatch && !exactLabelMatch && !attribute.logicalName.startsWith('msdyn_')) {
+    return 0;
+  }
+
+  if (score > 0 && (rule.preferredTypes || []).includes(attribute.attributeType)) {
+    score += 40;
+  }
+  return score;
+}
+
+function containsAiEventTokenGroup(text, group) {
+  return group.every((token) => text.includes(normalizeAiEventText(token)));
+}
+
+function normalizeAiEventText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function getAiEventSelectFields(config, options = {}) {
+  const fields = new Set([
+    'msdyn_aieventid',
+    'createdon',
+    'msdyn_creditconsumed',
+    '_ownerid_value',
+    '_createdby_value',
+  ]);
+
+  for (const key of ['creditType', 'dataType', 'source', 'toolName', 'model', 'eventName']) {
+    for (const logicalName of config.resolved[key] || []) {
+      fields.add(logicalName);
+    }
+  }
+
+  // Summary fields depend on payload metadata stored in the event row.
+  for (const key of ['input']) {
+    for (const logicalName of config.resolved[key] || []) {
+      fields.add(logicalName);
+    }
+  }
+
+  if (options.includePayload) {
+    for (const key of ['input', 'output']) {
+      for (const logicalName of config.resolved[key] || []) {
+        fields.add(logicalName);
+      }
+    }
+  }
+
+  return [...fields];
+}
+
+function buildAiEventListPath(selectFields, dateRange) {
+  return `${AI_EVENT_ENTITY_SET_NAME}?${buildAiEventQueryString({
+    '$select': selectFields.join(','),
+    '$filter': `createdon ge ${toODataDateTime(dateRange.start)} and createdon lt ${toODataDateTime(dateRange.endExclusive)}`,
+    '$orderby': 'createdon desc',
+  })}`;
+}
+
+function buildAiEventQueryString(parts) {
+  return Object.entries(parts)
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim())
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+    .join('&');
+}
+
+async function fetchAiEventData(path, preferHeader) {
+  const responses = await dvBatchGet([
+    {
+      path,
+      headers: {
+        Prefer: preferHeader,
+      },
+    },
+  ]);
+
+  const rows = [...(responses[0]?.data?.value || [])];
+  let nextLink = responses[0]?.data?.['@odata.nextLink'] || '';
+  while (nextLink) {
+    const response = await dvRequestUrl('GET', nextLink, undefined, { Prefer: preferHeader }, selected.orgUrl);
+    rows.push(...(response.data.value || []));
+    nextLink = response.data['@odata.nextLink'] || '';
+  }
+
+  return rows;
+}
+
+function getAiEventDateRange(filters = {}) {
+  const now = new Date();
+  const range = String(filters.range || 'month').trim().toLowerCase();
+  if (range === 'custom') {
+    const start = parseDateOnly(filters.start, 'start');
+    const end = parseDateOnly(filters.end, 'end');
+    if (end < start) {
+      throw new HttpError(400, 'Custom date range end must be on or after start.');
+    }
+    return {
+      range,
+      start: atStartOfDay(start),
+      endExclusive: addDays(atStartOfDay(end), 1),
+      startDate: toDateOnlyString(start),
+      endDate: toDateOnlyString(end),
+    };
+  }
+
+  const today = atStartOfDay(now);
+  if (range === 'today') {
+    return makeAiEventRange(range, today, addDays(today, 1));
+  }
+  if (range === '7d') {
+    return makeAiEventRange(range, addDays(today, -6), addDays(today, 1));
+  }
+  if (range === '28d') {
+    return makeAiEventRange(range, addDays(today, -27), addDays(today, 1));
+  }
+  if (range === '365d') {
+    return makeAiEventRange(range, addDays(today, -364), addDays(today, 1));
+  }
+
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  return makeAiEventRange('month', monthStart, nextMonthStart);
+}
+
+function makeAiEventRange(range, start, endExclusive) {
+  return {
+    range,
+    start,
+    endExclusive,
+    startDate: toDateOnlyString(start),
+    endDate: toDateOnlyString(addDays(endExclusive, -1)),
+  };
+}
+
+function parseDateOnly(value, name) {
+  const text = requireString(value, name);
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    throw new HttpError(400, `${name} must use YYYY-MM-DD.`);
+  }
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) {
+    throw new HttpError(400, `${name} is not a valid date.`);
+  }
+  return date;
+}
+
+function atStartOfDay(value) {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function addDays(value, days) {
+  const date = new Date(value);
+  date.setDate(date.getDate() + days);
+  return date;
+}
+
+function toDateOnlyString(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function toODataDateTime(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}T00:00:00Z`;
+}
+
+function normalizeAiEventSummary(row, config) {
+  const derived = deriveAiEventDisplayValues(row, config);
+  const fallbackSource = formatAiEventCategoryValue(pickAiEventValue(row, config, 'creditType'));
+  const creditsConsumed = deriveAiEventCreditsConsumed(row, config);
+  return {
+    id: normalizeGuid(row.msdyn_aieventid),
+    ownerName: pickFormattedLookupValue(row, '_ownerid_value'),
+    createdByName: pickFormattedLookupValue(row, '_createdby_value'),
+    creditType: derived.creditType || deriveAiEventFallbackCreditType(row, config),
+    creditsConsumed,
+    dataType: derived.dataType || pickAiEventValue(row, config, 'dataType'),
+    source: derived.source || fallbackSource,
+    toolName: derived.toolName || pickAiEventValue(row, config, 'toolName') || pickAiEventValue(row, config, 'model') || pickAiEventValue(row, config, 'eventName'),
+    model: derived.model || pickAiEventValue(row, config, 'model'),
+    createdOn: formatAiEventDate(row.createdon),
+    createdOnRaw: row.createdon || '',
+  };
+}
+
+function normalizeAiEventDetail(row, config) {
+  const summary = normalizeAiEventSummary(row, config);
+  return {
+    ...summary,
+    input: normalizeAiEventPayloadValue(row, config, 'input'),
+    output: normalizeAiEventPayloadValue(row, config, 'output'),
+  };
+}
+
+function deriveAiEventDisplayValues(row, config) {
+  const inputPayload = getAiEventParsedPayload(row, config, 'input');
+  const dataInfoRaw = readAiEventColumnValue(row, 'msdyn_datainfo');
+  const dataInfoPayload = parseAiEventStructuredValue(dataInfoRaw);
+  const toolName = pickAiEventValue(row, config, 'model');
+  const partnerSource = readAiEventPayloadProperty(inputPayload, ['partnerSource']);
+  const consumptionSource = readAiEventPayloadProperty(inputPayload, ['consumptionSource']);
+  const llmModelName = readAiEventPayloadProperty(inputPayload, ['llmModelName', 'modelName', 'model']);
+  const hasMessageConsumption = isAiEventObject(inputPayload?.messageConsumption);
+  const featureName = readAiEventNestedPayloadProperty(inputPayload, ['messageConsumption', 'featureName']);
+  const aiBuilderCreditCost = findAiEventNumericValue(dataInfoPayload, 'costAsAiBuilderCredits');
+  const copilotCreditCost = findAiEventNumericValue(dataInfoPayload, 'costAsCopilotCredits');
+  return {
+    creditType: deriveAiEventCreditType({
+      partnerSource,
+      llmModelName,
+      featureName,
+      hasMessageConsumption,
+      aiBuilderCreditCost,
+      copilotCreditCost,
+    }),
+    source: formatAiEventCategoryValue(consumptionSource),
+    toolName,
+    model: formatAiEventModelValue(llmModelName),
+    dataType: detectAiEventDataType(dataInfoRaw, toolName, inputPayload),
+  };
+}
+
+function deriveAiEventCreditType({
+  partnerSource,
+  llmModelName,
+  featureName,
+  hasMessageConsumption,
+  aiBuilderCreditCost,
+  copilotCreditCost,
+}) {
+  const partner = String(partnerSource || '').trim();
+  const model = String(llmModelName || '').trim();
+  const feature = String(featureName || '').trim();
+  const usesGenerativeFeatureMeter = hasMessageConsumption && /generative ai tools|copilot/iu.test(feature);
+  const aiBuilderCost = Number(aiBuilderCreditCost);
+  const copilotCost = Number(copilotCreditCost);
+
+  if (Number.isFinite(aiBuilderCost) || Number.isFinite(copilotCost)) {
+    if (copilotCost > 0 && copilotCost >= aiBuilderCost) {
+      return 'Copilot Studio';
+    }
+    if (aiBuilderCost > 0 && aiBuilderCost >= copilotCost) {
+      return 'AI Builder';
+    }
+  }
+
+  if (partner === 'AIBStudio') {
+    return 'Copilot Studio';
+  }
+  if (partner === 'AIBuilder') {
+    return usesGenerativeFeatureMeter ? 'Copilot Studio' : 'AI Builder';
+  }
+  if (partner) {
+    return formatAiEventCategoryValue(partner);
+  }
+  if (usesGenerativeFeatureMeter) {
+    return 'Copilot Studio';
+  }
+  if (model || /copilot|generative ai tools/iu.test(feature)) {
+    return 'Copilot';
+  }
+  return '';
+}
+
+function findAiEventNumericValue(value, targetKey, depth = 0) {
+  if (!targetKey || depth > 6 || value === undefined || value === null) {
+    return NaN;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findAiEventNumericValue(item, targetKey, depth + 1);
+      if (Number.isFinite(match)) {
+        return match;
+      }
+    }
+    return NaN;
+  }
+
+  if (isAiEventObject(value)) {
+    if (value[targetKey] !== undefined && value[targetKey] !== null) {
+      const numeric = Number(value[targetKey]);
+      if (Number.isFinite(numeric)) {
+        return numeric;
+      }
+    }
+    for (const nestedValue of Object.values(value)) {
+      const match = findAiEventNumericValue(nestedValue, targetKey, depth + 1);
+      if (Number.isFinite(match)) {
+        return match;
+      }
+    }
+    return NaN;
+  }
+
+  if (typeof value === 'string' && looksLikeJson(value)) {
+    const parsed = parseAiEventStructuredValue(value);
+    if (parsed !== value) {
+      return findAiEventNumericValue(parsed, targetKey, depth + 1);
+    }
+  }
+
+  return NaN;
+}
+
+function deriveAiEventCreditsConsumed(row, config) {
+  const rawCreditsConsumed = Number(row.msdyn_creditconsumed || 0);
+  if (rawCreditsConsumed > 0) {
+    return rawCreditsConsumed;
+  }
+
+  const inputPayload = getAiEventParsedPayload(row, config, 'input');
+  const payloadConsumption = Number(readAiEventNestedPayloadProperty(inputPayload, ['messageConsumption', 'consumption']));
+  if (Number.isFinite(payloadConsumption) && payloadConsumption > 0) {
+    return payloadConsumption;
+  }
+
+  return rawCreditsConsumed;
+}
+
+function deriveAiEventFallbackCreditType(row, config) {
+  const toolName = pickAiEventValue(row, config, 'toolName') || pickAiEventValue(row, config, 'model') || pickAiEventValue(row, config, 'eventName');
+  if (!toolName) {
+    return '';
+  }
+
+  const inputPayload = normalizeAiEventPayloadValue(row, config, 'input').raw.trim();
+  if (inputPayload && inputPayload !== '{}') {
+    return '';
+  }
+
+  return 'AI Builder';
+}
+
+function getAiEventParsedPayload(row, config, key) {
+  const payload = normalizeAiEventPayloadValue(row, config, key).parsed;
+  return isAiEventObject(payload) ? payload : null;
+}
+
+function readAiEventPayloadProperty(payload, keys) {
+  if (!isAiEventObject(payload)) {
+    return '';
+  }
+  for (const key of keys) {
+    const value = payload[key];
+    if (value !== undefined && value !== null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function readAiEventNestedPayloadProperty(payload, path) {
+  let current = payload;
+  for (const segment of path) {
+    if (!isAiEventObject(current) || !(segment in current)) {
+      return '';
+    }
+    current = current[segment];
+  }
+  if (current === undefined || current === null) {
+    return '';
+  }
+  const text = String(current).trim();
+  return text || '';
+}
+
+function detectAiEventDataType(dataInfoRaw, toolName, inputPayload) {
+  const text = String(dataInfoRaw || '');
+  if (text.includes('%PDF')) {
+    return 'PDF';
+  }
+  if (text.includes('word/')) {
+    return 'Word document';
+  }
+  if (text.includes('ppt/')) {
+    return 'PowerPoint presentation';
+  }
+  if (text.includes('xl/')) {
+    return 'Excel workbook';
+  }
+  if (text.includes('[Content_Types].xml')) {
+    return 'Office document';
+  }
+  if (/Prompt$/iu.test(String(toolName || '').trim())) {
+    return 'Prompt';
+  }
+  if (text.trim() || isAiEventObject(inputPayload)) {
+    return 'Text';
+  }
+  return '';
+}
+
+function formatAiEventCategoryValue(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  if (/^AIBuilder$/iu.test(text)) {
+    return 'AI Builder';
+  }
+  if (/^AIBStudio$/iu.test(text)) {
+    return 'Copilot Studio';
+  }
+  if (/^AICopilot$/iu.test(text)) {
+    return 'AI Copilot';
+  }
+  if (/^PowerAutomation$/iu.test(text)) {
+    return 'Power Automate';
+  }
+  if (/^Api$/iu.test(text)) {
+    return 'API';
+  }
+  return text
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/AI Builder/gi, 'AI Builder')
+    .replace(/Power Automate/gi, 'Power Automate');
+}
+
+function formatAiEventModelValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  const normalized = raw.replace(/-\d{4}-\d{2}-\d{2}$/u, '');
+  const gptMatch = normalized.match(/^gpt-(\d)(\d)(?:-(.+))?$/iu);
+  if (gptMatch) {
+    const variant = gptMatch[3] ? ` ${humanizeAiEventToken(gptMatch[3])}` : '';
+    return `GPT ${gptMatch[1]}.${gptMatch[2]}${variant}`.trim();
+  }
+  return normalized.split('-').map(humanizeAiEventToken).join(' ');
+}
+
+function humanizeAiEventToken(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
+  }
+  if (/^gpt$/iu.test(text)) {
+    return 'GPT';
+  }
+  if (/^ai$/iu.test(text)) {
+    return 'AI';
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+}
+
+function isAiEventObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function pickAiEventValue(row, config, key) {
+  for (const logicalName of config.resolved[key] || []) {
+    const value = readAiEventColumnValue(row, logicalName);
+    if (value) {
+      return value;
+    }
+  }
+  return findAiEventValueByHeuristic(row, config, key);
+}
+
+function pickFormattedLookupValue(row, logicalName) {
+  return String(row[`${logicalName}@${ODATA_FORMATTED_VALUE_ANNOTATION}`] || '').trim();
+}
+
+function formatAiEventDate(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function normalizeAiEventPayloadValue(row, config, key) {
+  const raw = pickAiEventValue(row, config, key);
+  const parsed = parseAiEventStructuredValue(raw);
+  return {
+    raw,
+    parsed,
+  };
+}
+
+function readAiEventColumnValue(row, logicalName) {
+  if (!logicalName) {
+    return '';
+  }
+  const formatted = row[`${logicalName}@${ODATA_FORMATTED_VALUE_ANNOTATION}`];
+  if (formatted !== undefined && formatted !== null && String(formatted).trim()) {
+    return String(formatted).trim();
+  }
+  const raw = row[logicalName];
+  if (raw === undefined || raw === null) {
+    return '';
+  }
+  return typeof raw === 'string' ? raw.trim() : JSON.stringify(raw);
+}
+
+function findAiEventValueByHeuristic(row, config, key) {
+  const rule = AI_EVENT_FIELD_RULES[key];
+  if (!rule) {
+    return '';
+  }
+  let best = { score: 0, value: '' };
+  for (const [columnName] of Object.entries(row)) {
+    if (!columnName || columnName.includes('@') || columnName.startsWith('_') || ['msdyn_aieventid', 'createdon', 'msdyn_creditconsumed'].includes(columnName)) {
+      continue;
+    }
+    const value = readAiEventColumnValue(row, columnName);
+    if (!value) {
+      continue;
+    }
+    const attribute = config.attributesByLogicalName[columnName];
+    if (!attribute) {
+      continue;
+    }
+    let score = scoreAiEventAttribute(attribute, rule, new Set(), new Set());
+    if ((key === 'input' || key === 'output') && looksLikeJson(value)) {
+      score += 220;
+    }
+    if ((key === 'input' || key === 'output') && value.length > 40) {
+      score += 80;
+    }
+    if (key === 'creditType' && /copilot|ai builder/i.test(value)) {
+      score += 250;
+    }
+    if (score > best.score) {
+      best = { score, value };
+    }
+  }
+  return best.value;
+}
+
+function parseAiEventStructuredValue(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return null;
+  }
+  let current = text;
+  for (let index = 0; index < 3; index += 1) {
+    try {
+      const parsed = JSON.parse(current);
+      if (typeof parsed === 'string' && looksLikeJson(parsed) && parsed.trim() !== current) {
+        current = parsed.trim();
+        continue;
+      }
+      return parsed;
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
+function looksLikeJson(value) {
+  return /^[\[{\"]/.test(String(value || '').trim());
+}
+
+async function dvBatchGet(requests) {
+  const boundary = `batch_${randomUUID().replace(/-/g, '')}`;
+  const body = `${requests.map((request) => buildBatchGetPart(boundary, request)).join('\r\n')}\r\n--${boundary}--`;
+  const response = await apiTextRequest('POST', `${selected.orgUrl}/api/data/v9.2/$batch`, {
+    authResource: selected.orgUrl,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': `multipart/mixed;boundary=${boundary}`,
+      'OData-MaxVersion': '4.0',
+      'OData-Version': '4.0',
+    },
+    body,
+  });
+  return parseBatchResponse(response.text, response.contentType);
+}
+
+function buildBatchGetPart(boundary, request) {
+  const headers = Object.entries(request.headers || {}).map(([name, value]) => `${name}: ${value}`);
+  return [
+    `--${boundary}`,
+    'Content-Type: application/http',
+    'Content-Transfer-Encoding: binary',
+    '',
+    `GET ${request.path} HTTP/1.1`,
+    'Accept: application/json',
+    ...headers,
+    '',
+    '',
+  ].join('\r\n');
+}
+
+function parseBatchResponse(text, contentType) {
+  const boundaryMatch = String(contentType || '').match(/boundary=([^;]+)/i);
+  if (!boundaryMatch) {
+    throw new HttpError(500, 'Dataverse batch response did not include a boundary.');
+  }
+  const boundary = boundaryMatch[1].trim().replace(/^"|"$/g, '');
+  return text
+    .split(`--${boundary}`)
+    .map((part) => part.trim())
+    .filter((part) => part && part !== '--')
+    .map(parseBatchPart);
+}
+
+function parseBatchPart(part) {
+  const normalized = String(part || '').replace(/\r\n/g, '\n');
+  const httpIndex = normalized.indexOf('HTTP/1.1');
+  if (httpIndex < 0) {
+    throw new HttpError(500, 'Dataverse batch part did not contain an HTTP payload.');
+  }
+  const httpPayload = normalized.slice(httpIndex).trim();
+  const separatorIndex = httpPayload.indexOf('\n\n');
+  const headerText = separatorIndex >= 0 ? httpPayload.slice(0, separatorIndex) : httpPayload;
+  const bodyText = separatorIndex >= 0 ? httpPayload.slice(separatorIndex + 2).trim() : '';
+  const headerLines = headerText.split('\n');
+  const statusMatch = headerLines[0]?.match(/^HTTP\/1\.1\s+(\d+)/i);
+  const status = statusMatch ? Number(statusMatch[1]) : 500;
+  const data = parseJsonResponse(bodyText);
+  if (status >= 400) {
+    throw new HttpError(status, errorMessageFromResponse(data) || bodyText || `Batch request failed: ${status}`);
+  }
+  return { status, data };
+}
+
 async function dvGetAll(path, extraHeaders = {}) {
   const rows = [];
   let next = `${selected.orgUrl}/api/data/v9.2/${path}`;
@@ -4434,6 +5283,27 @@ async function apiHttpRequest(method, url, options = {}) {
     throw new HttpError(response.status, errorMessageFromResponse(data) || `Request failed: ${response.status}`);
   }
   return { data };
+}
+
+async function apiTextRequest(method, url, options = {}) {
+  const authResource = options.authResource || selected.orgUrl;
+  const accessToken = await getAccessTokenForSelectedAccount(authResource);
+  const response = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...(options.headers || {}),
+    },
+    body: options.body,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new HttpError(response.status, text || `Request failed: ${response.status}`);
+  }
+  return {
+    text,
+    contentType: response.headers.get('content-type') || '',
+  };
 }
 
 function parseJsonResponse(text) {
