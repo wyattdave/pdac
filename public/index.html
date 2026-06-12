@@ -43,6 +43,7 @@
       <button class="tab" type="button" data-tab="solutions">Solutions</button>
       <button class="tab" type="button" data-tab="import">Imports</button>
       <button class="tab" type="button" data-tab="aiEvents">AI Flow</button>
+      <button class="tab" type="button" data-tab="flowRuns">Flow Runs</button>
       <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="connections">Connections</button>
       <button class="tab" type="button" data-tab="users">Users and Teams</button>
@@ -85,6 +86,10 @@
             <div class="mini-card">
               <h3>Import</h3>
               <p>Analyze a solution ZIP, map connection references and environment variables, then import.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Flow Runs</h3>
+              <p>Track cloud flow run status, timing, trigger types, errors, and jump into individual Power Automate runs.</p>
             </div>
             <div class="mini-card">
               <h3>Component Actions</h3>
@@ -460,6 +465,9 @@
                 <div>
                   <h3 id="selectedTableName">No table selected</h3>
                   <p id="selectedTableMeta" class="muted"></p>
+                  <p class="solution-links">
+                    <a id="selectedTablePowerAppsLink" class="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open in Power Apps</a>
+                  </p>
                 </div>
                 <div class="actions table-action-row">
                   <button id="createTableDiagramButton" type="button" disabled>Create diagram</button>
@@ -502,6 +510,7 @@
           <div class="section-title">
             <h2>AI Flow</h2>
             <div class="actions">
+              <button id="downloadAiEventsButton" type="button" class="secondary" disabled>Download Excel</button>
               <button id="loadAiEventsButton" type="button">Load AI Flow</button>
             </div>
           </div>
@@ -554,6 +563,68 @@
           <p id="aiEventsWarnings" class="muted" hidden></p>
           <div id="aiEventsTotals" class="ai-event-totals"></div>
           <div id="aiEventsTable" class="ai-event-table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="flowRunsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Flow Runs</h2>
+            <div class="actions">
+              <button id="downloadFlowRunsButton" type="button" class="secondary" disabled>Download Excel</button>
+              <button id="loadFlowRunsButton" type="button">Load flow runs</button>
+            </div>
+          </div>
+
+          <div class="flow-run-filters">
+            <label>
+              Date range
+              <select id="flowRunsRange">
+                <option value="today">Today</option>
+                <option value="7d" selected>Last 7 days</option>
+                <option value="28d">Last 28 days</option>
+                <option value="month">Current calendar month</option>
+                <option value="365d">Last 365 days</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <label>
+              Start date
+              <input id="flowRunsStart" type="date" />
+            </label>
+            <label>
+              End date
+              <input id="flowRunsEnd" type="date" />
+            </label>
+            <label>
+              Status
+              <select id="flowRunsStatus">
+                <option value="">All statuses</option>
+              </select>
+            </label>
+            <label>
+              Trigger
+              <select id="flowRunsTrigger">
+                <option value="">All triggers</option>
+              </select>
+            </label>
+            <label>
+              Search
+              <input id="flowRunsSearch" placeholder="Flow, run, workflow, or error" />
+            </label>
+            <label>
+              Slow runs
+              <input id="flowRunsMinDuration" type="number" min="0" step="1" placeholder="Minimum seconds" />
+            </label>
+            <label class="checkbox-label">
+              <input id="flowRunsErrorsOnly" type="checkbox" />
+              Errors only
+            </label>
+          </div>
+
+          <p id="flowRunsSummary" class="muted"></p>
+          <div id="flowRunsTotals" class="ai-event-totals"></div>
+          <div id="flowRunsTable" class="flow-run-table-wrap"></div>
         </section>
       </section>
 

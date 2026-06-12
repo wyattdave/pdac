@@ -96,12 +96,16 @@ const el = {
   solutionComponents: document.querySelector('#solutionComponents'),
   loadTablesButton: document.querySelector('#loadTablesButton'),
   loadAiEventsButton: document.querySelector('#loadAiEventsButton'),
+  downloadAiEventsButton: document.querySelector('#downloadAiEventsButton'),
+  loadFlowRunsButton: document.querySelector('#loadFlowRunsButton'),
+  downloadFlowRunsButton: document.querySelector('#downloadFlowRunsButton'),
   tableSearch: document.querySelector('#tableSearch'),
   tableScopes: document.querySelectorAll('input[name="tableScope"]'),
   tableSummary: document.querySelector('#tableSummary'),
   tablesList: document.querySelector('#tablesList'),
   selectedTableName: document.querySelector('#selectedTableName'),
   selectedTableMeta: document.querySelector('#selectedTableMeta'),
+  selectedTablePowerAppsLink: document.querySelector('#selectedTablePowerAppsLink'),
   selectedTableDescription: document.querySelector('#selectedTableDescription'),
   columnScopes: document.querySelectorAll('input[name="columnScope"]'),
   columnsList: document.querySelector('#columnsList'),
@@ -124,6 +128,17 @@ const el = {
   aiEventsWarnings: document.querySelector('#aiEventsWarnings'),
   aiEventsTotals: document.querySelector('#aiEventsTotals'),
   aiEventsTable: document.querySelector('#aiEventsTable'),
+  flowRunsRange: document.querySelector('#flowRunsRange'),
+  flowRunsStart: document.querySelector('#flowRunsStart'),
+  flowRunsEnd: document.querySelector('#flowRunsEnd'),
+  flowRunsStatus: document.querySelector('#flowRunsStatus'),
+  flowRunsTrigger: document.querySelector('#flowRunsTrigger'),
+  flowRunsSearch: document.querySelector('#flowRunsSearch'),
+  flowRunsMinDuration: document.querySelector('#flowRunsMinDuration'),
+  flowRunsErrorsOnly: document.querySelector('#flowRunsErrorsOnly'),
+  flowRunsSummary: document.querySelector('#flowRunsSummary'),
+  flowRunsTotals: document.querySelector('#flowRunsTotals'),
+  flowRunsTable: document.querySelector('#flowRunsTable'),
   diagramModal: document.querySelector('#diagramModal'),
   diagramModalTitle: document.querySelector('#diagramModalTitle'),
   diagramModalMeta: document.querySelector('#diagramModalMeta'),
@@ -224,6 +239,17 @@ const state = {
   },
   aiEventDetailCache: new Map(),
   selectedAiEventId: '',
+  flowRuns: [],
+  flowRunsLoaded: false,
+  flowRunDateRange: {
+    range: '7d',
+    startDate: '',
+    endDate: '',
+  },
+  flowRunSort: {
+    column: 'startTime',
+    direction: 'desc',
+  },
   selectedTableLogicalName: '',
   selectedTableDetails: null,
   selectedTableDiagram: null,
@@ -389,6 +415,9 @@ el.publisherSelectAllButton.addEventListener('click', () => setPublisherSelectio
 el.publisherSelectNoneButton.addEventListener('click', () => setPublisherSelection(false));
 el.loadTablesButton.addEventListener('click', () => withBusy(el.loadTablesButton, loadTables));
 el.loadAiEventsButton.addEventListener('click', () => withBusy(el.loadAiEventsButton, () => loadAiEvents(), 'Loading AI Flow'));
+el.downloadAiEventsButton.addEventListener('click', () => withBusy(el.downloadAiEventsButton, downloadAiEventsExcel, 'Downloading'));
+el.loadFlowRunsButton.addEventListener('click', () => withBusy(el.loadFlowRunsButton, () => loadFlowRuns(), 'Loading flow runs'));
+el.downloadFlowRunsButton.addEventListener('click', () => withBusy(el.downloadFlowRunsButton, downloadFlowRunsExcel, 'Downloading'));
 el.tableSearch.addEventListener('input', renderTables);
 el.aiEventsRange.addEventListener('change', handleAiEventRangeChange);
 el.aiEventsStart.addEventListener('change', handleAiEventCustomRangeChange);
@@ -398,6 +427,14 @@ el.aiEventsCreatedBy.addEventListener('input', renderAiEvents);
 el.aiEventsToolName.addEventListener('input', renderAiEvents);
 el.aiEventsModel.addEventListener('input', renderAiEvents);
 el.aiEventsSource.addEventListener('input', renderAiEvents);
+el.flowRunsRange.addEventListener('change', handleFlowRunRangeChange);
+el.flowRunsStart.addEventListener('change', handleFlowRunCustomRangeChange);
+el.flowRunsEnd.addEventListener('change', handleFlowRunCustomRangeChange);
+el.flowRunsStatus.addEventListener('change', renderFlowRuns);
+el.flowRunsTrigger.addEventListener('change', renderFlowRuns);
+el.flowRunsSearch.addEventListener('input', renderFlowRuns);
+el.flowRunsMinDuration.addEventListener('input', renderFlowRuns);
+el.flowRunsErrorsOnly.addEventListener('change', renderFlowRuns);
 el.tableScopes.forEach((input) => input.addEventListener('change', () => {
   state.tablesLoaded = false;
   state.tables = [];
@@ -440,6 +477,14 @@ el.aiEventsTable.addEventListener('click', (event) => {
     toast(error.message, 'error');
     console.error(error);
   });
+});
+el.flowRunsTable.addEventListener('click', (event) => {
+  const sortButton = event.target.closest('[data-flow-run-sort]');
+  if (!sortButton) {
+    return;
+  }
+  event.preventDefault();
+  toggleFlowRunSort(sortButton.dataset.flowRunSort || '');
 });
 el.createTableDiagramButton.addEventListener('click', () => withBusy(el.createTableDiagramButton, loadTableDiagram, 'Creating diagram'));
 el.createTableDocumentButton.addEventListener('click', () => withBusy(el.createTableDocumentButton, loadTableDocument, 'Creating table'));
@@ -570,7 +615,9 @@ initTheme();
 updateRoleFileFormatUi();
 clearTableSelection();
 resetAiEventFilters();
+resetFlowRunFilters();
 renderAiEvents();
+renderFlowRuns();
 await loadStatus();
 
 async function loadStatus() {
@@ -1199,6 +1246,8 @@ function clearEnvironmentData() {
   state.aiEventUnresolvedFields = [];
   state.aiEventDetailCache = new Map();
   state.selectedAiEventId = '';
+  state.flowRuns = [];
+  state.flowRunsLoaded = false;
   state.selectedTableLogicalName = '';
   state.selectedTableDetails = null;
   state.selectedTableDiagram = null;
@@ -1206,10 +1255,12 @@ function clearEnvironmentData() {
   state.diagramZoom = 1;
   state.activeTableDocument = null;
   resetAiEventFilters();
+  resetFlowRunFilters();
   renderUsers();
   renderTeams();
   renderConnections();
   renderAiEvents();
+  renderFlowRuns();
   renderTables();
   clearTableSelection();
   closeAiEventDetailModal();
@@ -1242,6 +1293,30 @@ function resetAiEventFilters() {
     direction: 'desc',
   };
   syncAiEventCustomRangeVisibility();
+}
+
+function resetFlowRunFilters() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  state.flowRunDateRange = {
+    range: '7d',
+    startDate: formatDateInputValue(start),
+    endDate: formatDateInputValue(end),
+  };
+  state.flowRunSort = {
+    column: 'startTime',
+    direction: 'desc',
+  };
+  el.flowRunsRange.value = '7d';
+  el.flowRunsStart.value = state.flowRunDateRange.startDate;
+  el.flowRunsEnd.value = state.flowRunDateRange.endDate;
+  el.flowRunsStatus.value = '';
+  el.flowRunsTrigger.value = '';
+  el.flowRunsSearch.value = '';
+  el.flowRunsMinDuration.value = '';
+  el.flowRunsErrorsOnly.checked = false;
+  syncFlowRunCustomRangeVisibility();
 }
 
 function syncAiEventCustomRangeVisibility() {
@@ -1316,6 +1391,7 @@ function renderAiEvents() {
     el.aiEventsWarnings.hidden = true;
     el.aiEventsTotals.innerHTML = '';
     el.aiEventsTable.innerHTML = empty('Load AI Flow events.');
+    el.downloadAiEventsButton.disabled = true;
     return;
   }
 
@@ -1332,6 +1408,7 @@ function renderAiEvents() {
     el.aiEventsWarnings.hidden = true;
   }
   renderAiEventTotals(filtered);
+  el.downloadAiEventsButton.disabled = !sorted.length;
 
   if (!sorted.length) {
     el.aiEventsTable.innerHTML = empty(state.aiEvents.length ? 'No AI Flow events match the current filters.' : 'No AI Flow events found for this range.');
@@ -1368,6 +1445,29 @@ function renderAiEvents() {
       </tbody>
     </table>
   `;
+}
+
+function getVisibleAiEventRows() {
+  return getSortedAiEvents(getFilteredAiEvents());
+}
+
+async function downloadAiEventsExcel() {
+  const rows = getVisibleAiEventRows();
+  if (!rows.length) {
+    throw new Error('No AI Flow rows to export.');
+  }
+  const response = await apiFetch('/api/ai-events/export', {
+    method: 'POST',
+    body: {
+      rows,
+      dateRange: state.aiEventDateRange,
+    },
+  });
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  downloadBlob(match?.[1] || `ai-flow-${safeDownloadFilename(state.aiEventDateRange.startDate || 'export')}.xlsx`, blob);
+  toast('AI Flow Excel file downloaded.');
 }
 
 function getFilteredAiEvents() {
@@ -1468,6 +1568,345 @@ function formatCredits(value) {
   return new Intl.NumberFormat(undefined, {
     maximumFractionDigits: 2,
   }).format(number);
+}
+
+function syncFlowRunCustomRangeVisibility() {
+  const isCustom = el.flowRunsRange.value === 'custom';
+  el.flowRunsStart.disabled = !isCustom;
+  el.flowRunsEnd.disabled = !isCustom;
+}
+
+function handleFlowRunRangeChange() {
+  syncFlowRunCustomRangeVisibility();
+}
+
+function handleFlowRunCustomRangeChange() {
+  return;
+}
+
+async function loadFlowRuns(options = {}) {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  el.flowRunsTable.innerHTML = empty('Loading flow runs...');
+  const params = new URLSearchParams();
+  params.set('range', el.flowRunsRange.value || '7d');
+  if (params.get('range') === 'custom') {
+    params.set('start', el.flowRunsStart.value || '');
+    params.set('end', el.flowRunsEnd.value || '');
+  }
+  const data = await api(`/api/flow-runs?${params.toString()}`);
+  state.flowRuns = data.rows || [];
+  state.flowRunsLoaded = true;
+  applyFlowRunDateRange(data.dateRange || {});
+  renderFlowRunStatusOptions();
+  renderFlowRunTriggerOptions();
+  renderFlowRuns();
+  if (options.toastMessage === undefined) {
+    toast('Flow runs loaded.');
+  } else if (options.toastMessage) {
+    toast(options.toastMessage);
+  }
+}
+
+function applyFlowRunDateRange(dateRange) {
+  if (!dateRange || !dateRange.startDate || !dateRange.endDate) {
+    return;
+  }
+  state.flowRunDateRange = {
+    range: dateRange.range || '7d',
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+  };
+  el.flowRunsRange.value = state.flowRunDateRange.range;
+  el.flowRunsStart.value = state.flowRunDateRange.startDate;
+  el.flowRunsEnd.value = state.flowRunDateRange.endDate;
+  syncFlowRunCustomRangeVisibility();
+}
+
+function renderFlowRunStatusOptions() {
+  renderFlowRunSelectOptions(el.flowRunsStatus, 'All statuses', state.flowRuns.map((row) => row.status));
+}
+
+function renderFlowRunTriggerOptions() {
+  renderFlowRunSelectOptions(el.flowRunsTrigger, 'All triggers', state.flowRuns.map((row) => row.triggerType));
+}
+
+function renderFlowRunSelectOptions(select, placeholder, values) {
+  const selected = select.value;
+  const distinct = [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+  select.innerHTML = [
+    `<option value="">${escapeHtml(placeholder)}</option>`,
+    ...distinct.map((value) => `<option value="${escapeAttr(value)}">${escapeHtml(value)}</option>`),
+  ].join('');
+  select.value = distinct.includes(selected) ? selected : '';
+}
+
+function renderFlowRuns() {
+  if (!state.flowRunsLoaded) {
+    el.flowRunsSummary.textContent = 'Load flow runs for the last 7 days.';
+    el.flowRunsTotals.innerHTML = '';
+    el.flowRunsTable.innerHTML = empty('Load flow runs.');
+    el.downloadFlowRunsButton.disabled = true;
+    return;
+  }
+
+  const filtered = getFilteredFlowRuns();
+  const sorted = getVisibleFlowRunRows();
+  const rangeText = state.flowRunDateRange.startDate && state.flowRunDateRange.endDate
+    ? `${state.flowRunDateRange.startDate} to ${state.flowRunDateRange.endDate}`
+    : '';
+  const errorCount = state.flowRuns.filter(hasFlowRunError).length;
+  el.flowRunsSummary.textContent = `${sorted.length} / ${state.flowRuns.length} flow runs${rangeText ? ` | ${rangeText}` : ''} | ${errorCount} with errors`;
+  renderFlowRunTotals(filtered);
+  el.downloadFlowRunsButton.disabled = !sorted.length;
+
+  if (!sorted.length) {
+    el.flowRunsTable.innerHTML = empty(state.flowRuns.length ? 'No flow runs match the current filters.' : 'No flow runs found for this range.');
+    return;
+  }
+
+  el.flowRunsTable.innerHTML = `
+    <table class="metadata-table flow-runs-table">
+      <thead>
+        <tr>
+          ${renderFlowRunSortHeader('flowName', 'Flow Name')}
+          ${renderFlowRunSortHeader('triggerType', 'Trigger')}
+          ${renderFlowRunSortHeader('status', 'Status')}
+          ${renderFlowRunSortHeader('errorCode', 'Error Code')}
+          ${renderFlowRunSortHeader('startTime', 'Start Time')}
+          ${renderFlowRunSortHeader('endTime', 'End Time')}
+          <th scope="col" class="open-run-header">Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sorted.map((row) => {
+          const title = flowRunHoverText(row);
+          return `
+            <tr title="${escapeAttr(title)}">
+              <td>${escapeHtml(row.flowName || '')}</td>
+              <td>${escapeHtml(row.triggerType || '')}</td>
+              <td>${renderFlowRunStatus(row.status)}</td>
+              <td>${escapeHtml(row.errorCode || '')}</td>
+              <td>${escapeHtml(row.startTimeDisplay || '')}</td>
+              <td>${escapeHtml(row.endTimeDisplay || '')}</td>
+              <td class="open-run-cell">
+                ${row.openUrl ? `
+                  <a class="icon-button secondary open-run-button" href="${escapeAttr(row.openUrl)}" target="_blank" rel="noopener noreferrer" title="Open flow run" aria-label="Open flow run">
+                    <svg class="open-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M15 3h6v6"></path>
+                      <path d="M10 14 21 3"></path>
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                    </svg>
+                  </a>
+                ` : ''}
+              </td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function getVisibleFlowRunRows() {
+  return getSortedFlowRuns(getFilteredFlowRuns());
+}
+
+async function downloadFlowRunsExcel() {
+  const rows = getVisibleFlowRunRows();
+  if (!rows.length) {
+    throw new Error('No flow run rows to export.');
+  }
+  const response = await apiFetch('/api/flow-runs/export', {
+    method: 'POST',
+    body: {
+      rows,
+      dateRange: state.flowRunDateRange,
+    },
+  });
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  downloadBlob(match?.[1] || `flow-runs-${safeDownloadFilename(state.flowRunDateRange.startDate || 'export')}.xlsx`, blob);
+  toast('Flow runs Excel file downloaded.');
+}
+
+function getFilteredFlowRuns() {
+  const status = el.flowRunsStatus.value.trim().toLowerCase();
+  const trigger = el.flowRunsTrigger.value.trim().toLowerCase();
+  const query = el.flowRunsSearch.value.trim().toLowerCase();
+  const minDurationSeconds = Number(el.flowRunsMinDuration.value || 0);
+  const errorsOnly = el.flowRunsErrorsOnly.checked;
+
+  return state.flowRuns.filter((row) => {
+    const rowStatus = String(row.status || '').trim().toLowerCase();
+    const rowTrigger = String(row.triggerType || '').trim().toLowerCase();
+    const durationSeconds = Number(row.durationMs || 0) / 1000;
+    return (!status || rowStatus === status) &&
+      (!trigger || rowTrigger === trigger) &&
+      (!errorsOnly || hasFlowRunError(row)) &&
+      (!Number.isFinite(minDurationSeconds) || minDurationSeconds <= 0 || durationSeconds >= minDurationSeconds) &&
+      (!query || flowRunSearchText(row).includes(query));
+  });
+}
+
+function hasFlowRunError(row) {
+  const statusClass = flowRunStatusClass(String(row.status || '').trim().toLowerCase());
+  return statusClass === 'broken' || Boolean(String(row.errorCode || '').trim() || String(row.errorMessage || '').trim());
+}
+
+function flowRunSearchText(row) {
+  return [
+    row.flowName,
+    row.triggerType,
+    row.status,
+    row.errorCode,
+    row.errorMessage,
+    row.workflowId,
+    row.resourceId,
+    row.name,
+    row.clientTrackingId,
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function flowRunHoverText(row) {
+  const lines = [
+    `Workflow ID: ${row.workflowId || 'Unknown'}`,
+    `Error message: ${row.errorMessage || 'None'}`,
+  ];
+  if (row.durationMs !== undefined && row.durationMs !== null) {
+    lines.push(`Duration: ${formatDuration(row.durationMs)}`);
+  }
+  return lines.join('\n');
+}
+
+function renderFlowRunStatus(status) {
+  const normalized = String(status || 'unknown').trim().toLowerCase() || 'unknown';
+  return `<span class="status-pill ${escapeAttr(flowRunStatusClass(normalized))}">${escapeHtml(status || 'Unknown')}</span>`;
+}
+
+function flowRunStatusClass(status) {
+  if (['succeeded', 'success', 'completed'].includes(status)) {
+    return 'succeeded';
+  }
+  if (['failed', 'failure', 'cancelled', 'canceled', 'timedout', 'timeout'].includes(status)) {
+    return 'broken';
+  }
+  if (['running', 'waiting', 'inprogress', 'in progress'].includes(status)) {
+    return 'running';
+  }
+  return 'unknown';
+}
+
+function renderFlowRunSortHeader(column, label) {
+  const isActive = state.flowRunSort.column === column;
+  const direction = isActive ? state.flowRunSort.direction : 'none';
+  const indicator = direction === 'asc' ? '▲' : direction === 'desc' ? '▼' : '↕';
+  const ariaSort = direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
+  return `
+    <th scope="col" aria-sort="${ariaSort}">
+      <button class="table-sort-button" type="button" data-flow-run-sort="${escapeAttr(column)}" aria-label="Sort by ${escapeAttr(label)}">
+        <span>${escapeHtml(label)}</span>
+        <span class="table-sort-indicator" aria-hidden="true">${indicator}</span>
+      </button>
+    </th>
+  `;
+}
+
+function toggleFlowRunSort(column) {
+  if (!column) {
+    return;
+  }
+  if (state.flowRunSort.column === column) {
+    state.flowRunSort.direction = state.flowRunSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.flowRunSort = {
+      column,
+      direction: ['startTime', 'endTime'].includes(column) ? 'desc' : 'asc',
+    };
+  }
+  renderFlowRuns();
+}
+
+function getSortedFlowRuns(rows) {
+  const { column, direction } = state.flowRunSort;
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => compareFlowRunValues(left, right, column) * multiplier);
+}
+
+function compareFlowRunValues(left, right, column) {
+  if (column === 'startTime') {
+    return String(left.startTimeRaw || '').localeCompare(String(right.startTimeRaw || ''));
+  }
+  if (column === 'endTime') {
+    return String(left.endTimeRaw || '').localeCompare(String(right.endTimeRaw || ''));
+  }
+  return String(left[column] || '').localeCompare(String(right[column] || ''), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function renderFlowRunTotals(rows) {
+  if (!rows.length) {
+    el.flowRunsTotals.innerHTML = '';
+    return;
+  }
+  const durations = rows
+    .map((row) => Number(row.durationMs || 0))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+    .sort((left, right) => left - right);
+  const failed = rows.filter((row) => flowRunStatusClass(String(row.status || '').toLowerCase()) === 'broken').length;
+  const average = durations.length ? durations.reduce((total, value) => total + value, 0) / durations.length : 0;
+  const p95 = percentile(durations, 0.95);
+  const max = durations.length ? durations[durations.length - 1] : 0;
+  el.flowRunsTotals.innerHTML = `
+    <div class="ai-event-total-card">
+      <strong>${escapeHtml(String(rows.length))}</strong>
+      <span>Visible runs</span>
+    </div>
+    <div class="ai-event-total-card">
+      <strong>${escapeHtml(String(failed))}</strong>
+      <span>Failed or cancelled</span>
+    </div>
+    <div class="ai-event-total-card">
+      <strong>${escapeHtml(formatDuration(average))}</strong>
+      <span>Average duration</span>
+    </div>
+    <div class="ai-event-total-card">
+      <strong>${escapeHtml(formatDuration(p95))}</strong>
+      <span>P95 duration</span>
+    </div>
+    <div class="ai-event-total-card">
+      <strong>${escapeHtml(formatDuration(max))}</strong>
+      <span>Max duration</span>
+    </div>
+  `;
+}
+
+function percentile(values, ratio) {
+  if (!values.length) {
+    return 0;
+  }
+  const index = Math.min(values.length - 1, Math.ceil(values.length * ratio) - 1);
+  return values[index] || 0;
+}
+
+function formatDuration(value) {
+  const milliseconds = Number(value || 0);
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+    return '0s';
+  }
+  const totalSeconds = Math.round(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 async function openAiEventDetail(aiEventId) {
@@ -2667,6 +3106,7 @@ function renderTableDetails() {
 
   el.selectedTableName.textContent = table.displayName || table.schemaName || table.logicalName;
   el.selectedTableMeta.textContent = `${table.schemaName || ''} | ${table.logicalName || ''} | ${table.isCustom ? 'custom' : 'standard'}`;
+  renderTableLink(table);
   el.selectedTableDescription.textContent = table.description || '';
   el.createTableDiagramButton.disabled = false;
   el.createTableDocumentButton.disabled = false;
@@ -2707,6 +3147,7 @@ function clearTableSelection() {
   }
   el.selectedTableName.textContent = 'No table selected';
   el.selectedTableMeta.textContent = '';
+  renderTableLink(null);
   el.selectedTableDescription.textContent = '';
   el.columnsList.innerHTML = empty('Select a table.');
   el.createTableDiagramButton.disabled = true;
@@ -4023,6 +4464,19 @@ function makePowerAppsSolutionUrl(environmentId, solutionId) {
     return '';
   }
   return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/solutions/${encodeURIComponent(solutionId)}`;
+}
+
+function renderTableLink(table) {
+  const href = table ? makePowerAppsTableUrl(state.selectedEnvironment.environmentName, table.metadataId) : '';
+  el.selectedTablePowerAppsLink.hidden = !href;
+  el.selectedTablePowerAppsLink.href = href || '#';
+}
+
+function makePowerAppsTableUrl(environmentId, entityId) {
+  if (!environmentId || !entityId) {
+    return '';
+  }
+  return `https://make.powerapps.com/environments/${encodeURIComponent(environmentId)}/entities/${encodeURIComponent(entityId)}`;
 }
 
 function makeCopilotStudioSolutionUrl(environmentId, solutionId) {

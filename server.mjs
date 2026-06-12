@@ -147,6 +147,7 @@ const AI_EVENT_ENTITY_LOGICAL_NAME = 'msdyn_aievent';
 const AI_EVENT_ENTITY_SET_NAME = 'msdyn_aievents';
 const ODATA_FORMATTED_VALUE_ANNOTATION = 'OData.Community.Display.V1.FormattedValue';
 const AI_EVENT_BATCH_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
+const FLOW_RUN_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
 const AI_EVENT_FIELD_RULES = {
   creditType: {
     logicalNames: ['msdyn_consumptionsource'],
@@ -538,6 +539,34 @@ async function handleApi(req, res) {
     });
     console.log('[AI events] sending list payload:\n' + JSON.stringify(payload, null, 2));
     sendJson(res, 200, payload);
+    return;
+  }
+
+  if (route === 'POST /api/ai-events/export') {
+    const body = await readJson(req);
+    const workbook = await exportAiEventsWorkbook(body.rows || []);
+    const range = body.dateRange || {};
+    const rangeName = range.startDate && range.endDate ? `${range.startDate}-to-${range.endDate}` : 'export';
+    sendXlsx(res, 200, `ai-flow-${safeFilename(rangeName)}.xlsx`, workbook);
+    return;
+  }
+
+  if (route === 'GET /api/flow-runs') {
+    requireOrgUrl();
+    sendJson(res, 200, await listFlowRuns({
+      range: url.searchParams.get('range') || '7d',
+      start: url.searchParams.get('start') || '',
+      end: url.searchParams.get('end') || '',
+    }));
+    return;
+  }
+
+  if (route === 'POST /api/flow-runs/export') {
+    const body = await readJson(req);
+    const workbook = await exportFlowRunsWorkbook(body.rows || []);
+    const range = body.dateRange || {};
+    const rangeName = range.startDate && range.endDate ? `${range.startDate}-to-${range.endDate}` : 'export';
+    sendXlsx(res, 200, `flow-runs-${safeFilename(rangeName)}.xlsx`, workbook);
     return;
   }
 
@@ -1654,7 +1683,7 @@ async function getSolution(solutionId) {
 
 async function listDataverseTables(options = {}) {
   const scope = options.scope === 'all' ? 'all' : 'custom';
-  const data = await dvGetAll('EntityDefinitions?$select=LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033');
+  const data = await dvGetAll('EntityDefinitions?$select=MetadataId,LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033');
   const tables = data
     .filter((item) => item.LogicalName && item.SchemaName && !item.IsIntersect)
     .filter((item) => scope === 'all' || item.IsCustomEntity)
@@ -1863,7 +1892,7 @@ async function listSolutionTables(solutionId) {
 
 async function getEntityDefinition(logicalName) {
   const name = requireLogicalName(logicalName, 'table');
-  return dvGet(`EntityDefinitions(LogicalName='${odataString(name)}')?$select=LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033`);
+  return dvGet(`EntityDefinitions(LogicalName='${odataString(name)}')?$select=MetadataId,LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033`);
 }
 
 async function getEntityDefinitionByMetadataId(metadataId) {
@@ -1871,7 +1900,7 @@ async function getEntityDefinitionByMetadataId(metadataId) {
   if (!id) {
     throw new HttpError(400, 'Table metadata id is required.');
   }
-  return dvGet(`EntityDefinitions(${id})?$select=LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033`);
+  return dvGet(`EntityDefinitions(${id})?$select=MetadataId,LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033`);
 }
 
 async function listEntityAttributes(logicalName) {
@@ -1920,6 +1949,7 @@ async function listDirectLookupRelationships(logicalName) {
 
 function mapEntityDefinition(item) {
   return {
+    metadataId: normalizeGuid(item.MetadataId),
     logicalName: item.LogicalName || '',
     schemaName: item.SchemaName || '',
     displayName: getLabel(item.DisplayName) || item.SchemaName || item.LogicalName || '',
@@ -4533,6 +4563,254 @@ async function listAiEvents(filters = {}) {
     unresolvedFields: config.unresolved,
     rows,
   };
+}
+
+async function listFlowRuns(filters = {}) {
+  const dateRange = getFlowRunDateRange(filters);
+  const rows = await dvGetAll(buildFlowRunListPath(dateRange), { Prefer: FLOW_RUN_PREFER });
+  return {
+    dateRange,
+    rows: rows.map(normalizeFlowRunSummary),
+  };
+}
+
+function getFlowRunDateRange(filters = {}) {
+  return getAiEventDateRange({
+    range: filters.range || '7d',
+    start: filters.start || '',
+    end: filters.end || '',
+  });
+}
+
+function buildFlowRunListPath(dateRange) {
+  const selectFields = [
+    'flowrunid',
+    'name',
+    'clienttrackingid',
+    'resourceid',
+    'triggertype',
+    'status',
+    'errorcode',
+    'errormessage',
+    'starttime',
+    'endtime',
+    'duration',
+    'workflowid',
+    '_workflow_value',
+  ];
+  return `flowruns?${buildAiEventQueryString({
+    '$select': selectFields.join(','),
+    '$filter': `starttime ge ${toODataDateTime(dateRange.start)} and starttime lt ${toODataDateTime(dateRange.endExclusive)}`,
+    '$orderby': 'starttime desc',
+  })}`;
+}
+
+function normalizeFlowRunSummary(row) {
+  const durationMs = normalizeFlowRunDuration(row);
+  const resourceId = String(row.resourceid || '').trim();
+  const name = String(row.name || '').trim();
+  return {
+    id: normalizeGuid(row.flowrunid),
+    name,
+    clientTrackingId: String(row.clienttrackingid || '').trim(),
+    flowName: pickFormattedLookupValue(row, '_workflow_value') || String(row.Workflow?.name || row.workflowid || row._workflow_value || '').trim() || 'Unknown flow',
+    triggerType: readFlowRunValue(row, 'triggertype'),
+    status: readFlowRunValue(row, 'status'),
+    errorCode: readFlowRunValue(row, 'errorcode'),
+    errorMessage: readFlowRunValue(row, 'errormessage'),
+    startTimeDisplay: formatFlowRunDateTime(row.starttime),
+    startTimeRaw: row.starttime || '',
+    endTimeDisplay: formatFlowRunDateTime(row.endtime),
+    endTimeRaw: row.endtime || '',
+    durationMs,
+    resourceId,
+    workflowId: String(row.workflowid || row._workflow_value || '').trim(),
+    openUrl: makeFlowRunUrl(selected.environmentName, resourceId, name),
+  };
+}
+
+function readFlowRunValue(row, logicalName) {
+  const formatted = row[`${logicalName}@${ODATA_FORMATTED_VALUE_ANNOTATION}`];
+  if (formatted !== undefined && formatted !== null && String(formatted).trim()) {
+    return String(formatted).trim();
+  }
+  const raw = row[logicalName];
+  if (raw === undefined || raw === null) {
+    return '';
+  }
+  return String(raw).trim();
+}
+
+function normalizeFlowRunDuration(row) {
+  const explicit = Number(row.duration);
+  if (Number.isFinite(explicit) && explicit >= 0) {
+    return explicit;
+  }
+  const start = row.starttime ? new Date(row.starttime) : null;
+  const end = row.endtime ? new Date(row.endtime) : null;
+  if (start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+    return Math.max(0, end.getTime() - start.getTime());
+  }
+  return 0;
+}
+
+function formatFlowRunDateTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+function makeFlowRunUrl(environmentName, resourceId, runName) {
+  const environmentId = environmentUrlName(environmentName);
+  if (!environmentId || !resourceId || !runName) {
+    return '';
+  }
+  return `https://make.powerautomate.com/environments/${encodeURIComponent(environmentId)}/solutions/~preferred/flows/${encodeURIComponent(resourceId)}/runs/${encodeURIComponent(runName)}`;
+}
+
+async function exportAiEventsWorkbook(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    throw new HttpError(400, 'No AI Flow rows were provided for export.');
+  }
+
+  const columns = [
+    ['Owner', 28],
+    ['Copilot Or AI Builder Credits', 32],
+    ['Credits Consumed', 18],
+    ['Data Type', 22],
+    ['Source', 24],
+    ['Tool name', 34],
+    ['Model', 28],
+    ['Created', 22],
+  ];
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet('AI Flow', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+
+  worksheet.columns = columns.map(([header, width]) => ({
+    header,
+    key: header,
+    width,
+  }));
+  worksheet.addRows(rows.map((row) => ({
+    Owner: aiEventExportText(row.ownerName),
+    'Copilot Or AI Builder Credits': aiEventExportText(row.creditType),
+    'Credits Consumed': Number(row.creditsConsumed || 0),
+    'Data Type': aiEventExportText(row.dataType),
+    Source: aiEventExportText(row.source),
+    'Tool name': aiEventExportText(row.toolName),
+    Model: aiEventExportText(row.model),
+    Created: aiEventExportText(row.createdOn),
+  })));
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: columns.length },
+  };
+
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    cell.border = bottomBorder();
+  });
+  for (let rowNumber = 2; rowNumber <= rows.length + 1; rowNumber++) {
+    worksheet.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+  }
+  worksheet.getColumn(3).numFmt = '0.##';
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function aiEventExportText(value) {
+  return String(value ?? '').trim();
+}
+
+async function exportFlowRunsWorkbook(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    throw new HttpError(400, 'No flow run rows were provided for export.');
+  }
+
+  const columns = [
+    ['Flow Name', 34],
+    ['Trigger', 18],
+    ['Status', 16],
+    ['Error Code', 22],
+    ['Start Time', 22],
+    ['End Time', 22],
+    ['Duration Seconds', 18],
+    ['Workflow ID', 38],
+    ['Error Message', 56],
+    ['Flow Run URL', 92],
+  ];
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet('Flow Runs', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+
+  worksheet.addTable({
+    name: 'FlowRuns',
+    ref: 'A1',
+    headerRow: true,
+    totalsRow: false,
+    style: {
+      theme: 'TableStyleMedium2',
+      showRowStripes: true,
+    },
+    columns: columns.map(([name]) => ({ name, filterButton: true })),
+    rows: rows.map((row) => [
+      flowRunExportText(row.flowName),
+      flowRunExportText(row.triggerType),
+      flowRunExportText(row.status),
+      flowRunExportText(row.errorCode),
+      flowRunExportText(row.startTimeDisplay),
+      flowRunExportText(row.endTimeDisplay),
+      Math.round(Number(row.durationMs || 0) / 1000),
+      flowRunExportText(row.workflowId),
+      flowRunExportText(row.errorMessage),
+      flowRunExportText(row.openUrl),
+    ]),
+  });
+
+  columns.forEach(([, width], index) => {
+    worksheet.getColumn(index + 1).width = width;
+  });
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+  });
+  for (let rowNumber = 2; rowNumber <= rows.length + 1; rowNumber++) {
+    const row = worksheet.getRow(rowNumber);
+    row.alignment = { vertical: 'top', wrapText: true };
+    const urlCell = row.getCell(10);
+    const url = String(urlCell.value || '').trim();
+    if (url) {
+      urlCell.value = { text: 'Open flow run', hyperlink: url };
+      urlCell.font = { color: { argb: 'FF1D4ED8' }, underline: true };
+    }
+  }
+  worksheet.getColumn(7).numFmt = '0';
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function flowRunExportText(value) {
+  return String(value ?? '').trim();
 }
 
 async function getAiEventDetail(aiEventId) {
