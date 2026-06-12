@@ -99,6 +99,15 @@ const el = {
   downloadAiEventsButton: document.querySelector('#downloadAiEventsButton'),
   loadFlowRunsButton: document.querySelector('#loadFlowRunsButton'),
   downloadFlowRunsButton: document.querySelector('#downloadFlowRunsButton'),
+  loadAgentSessionsButton: document.querySelector('#loadAgentSessionsButton'),
+  loadMoreAgentSessionsButton: document.querySelector('#loadMoreAgentSessionsButton'),
+  downloadAgentSessionsButton: document.querySelector('#downloadAgentSessionsButton'),
+  agentSessionsRange: document.querySelector('#agentSessionsRange'),
+  agentSessionsStart: document.querySelector('#agentSessionsStart'),
+  agentSessionsEnd: document.querySelector('#agentSessionsEnd'),
+  agentSessionsSearch: document.querySelector('#agentSessionsSearch'),
+  agentSessionsTotals: document.querySelector('#agentSessionsTotals'),
+  agentSessionsTotalsTable: document.querySelector('#agentSessionsTotalsTable'),
   tableSearch: document.querySelector('#tableSearch'),
   tableScopes: document.querySelectorAll('input[name="tableScope"]'),
   tableSummary: document.querySelector('#tableSummary'),
@@ -126,6 +135,7 @@ const el = {
   aiEventsSource: document.querySelector('#aiEventsSource'),
   aiEventsSummary: document.querySelector('#aiEventsSummary'),
   aiEventsWarnings: document.querySelector('#aiEventsWarnings'),
+  aiEventsTotalsToggle: document.querySelector('#aiEventsTotalsToggle'),
   aiEventsTotals: document.querySelector('#aiEventsTotals'),
   aiEventsTable: document.querySelector('#aiEventsTable'),
   flowRunsRange: document.querySelector('#flowRunsRange'),
@@ -139,6 +149,8 @@ const el = {
   flowRunsSummary: document.querySelector('#flowRunsSummary'),
   flowRunsTotals: document.querySelector('#flowRunsTotals'),
   flowRunsTable: document.querySelector('#flowRunsTable'),
+  agentSessionsSummary: document.querySelector('#agentSessionsSummary'),
+  agentSessionsTable: document.querySelector('#agentSessionsTable'),
   diagramModal: document.querySelector('#diagramModal'),
   diagramModalTitle: document.querySelector('#diagramModalTitle'),
   diagramModalMeta: document.querySelector('#diagramModalMeta'),
@@ -161,6 +173,11 @@ const el = {
   aiEventDetailMeta: document.querySelector('#aiEventDetailMeta'),
   aiEventDetailBody: document.querySelector('#aiEventDetailBody'),
   aiEventDetailClose: document.querySelector('#aiEventDetailClose'),
+  agentSessionDetailModal: document.querySelector('#agentSessionDetailModal'),
+  agentSessionDetailTitle: document.querySelector('#agentSessionDetailTitle'),
+  agentSessionDetailMeta: document.querySelector('#agentSessionDetailMeta'),
+  agentSessionDetailBody: document.querySelector('#agentSessionDetailBody'),
+  agentSessionDetailClose: document.querySelector('#agentSessionDetailClose'),
   componentModal: document.querySelector('#componentModal'),
   componentModalTitle: document.querySelector('#componentModalTitle'),
   componentModalMeta: document.querySelector('#componentModalMeta'),
@@ -233,12 +250,28 @@ const state = {
     startDate: '',
     endDate: '',
   },
+  aiEventTotalsGroupBy: 'flow',
+  aiEventTotalsSort: {
+    column: 'totalRuns',
+    direction: 'desc',
+  },
   aiEventSort: {
     column: 'created',
     direction: 'desc',
   },
   aiEventDetailCache: new Map(),
   selectedAiEventId: '',
+  agentSessions: [],
+  agentSessionsLoaded: false,
+  agentSessionsLoading: false,
+  agentSessionsNextPageToken: '',
+  agentSessionDateRange: {
+    range: '7d',
+    startDate: '',
+    endDate: '',
+  },
+  agentSessionDetailCache: new Map(),
+  selectedAgentSessionId: '',
   flowRuns: [],
   flowRunsLoaded: false,
   flowRunDateRange: {
@@ -248,6 +281,10 @@ const state = {
   },
   flowRunSort: {
     column: 'startTime',
+    direction: 'desc',
+  },
+  flowRunTotalsSort: {
+    column: 'totalRuns',
     direction: 'desc',
   },
   selectedTableLogicalName: '',
@@ -418,15 +455,32 @@ el.loadAiEventsButton.addEventListener('click', () => withBusy(el.loadAiEventsBu
 el.downloadAiEventsButton.addEventListener('click', () => withBusy(el.downloadAiEventsButton, downloadAiEventsExcel, 'Downloading'));
 el.loadFlowRunsButton.addEventListener('click', () => withBusy(el.loadFlowRunsButton, () => loadFlowRuns(), 'Loading flow runs'));
 el.downloadFlowRunsButton.addEventListener('click', () => withBusy(el.downloadFlowRunsButton, downloadFlowRunsExcel, 'Downloading'));
+el.loadAgentSessionsButton.addEventListener('click', () => withBusy(el.loadAgentSessionsButton, () => loadAgentSessions(), 'Loading sessions'));
+el.loadMoreAgentSessionsButton.addEventListener('click', () => withBusy(el.loadMoreAgentSessionsButton, () => loadAgentSessions({ append: true }), 'Loading more'));
+el.downloadAgentSessionsButton.addEventListener('click', () => withBusy(el.downloadAgentSessionsButton, downloadAgentSessionTotalsExcel, 'Downloading'));
 el.tableSearch.addEventListener('input', renderTables);
 el.aiEventsRange.addEventListener('change', handleAiEventRangeChange);
 el.aiEventsStart.addEventListener('change', handleAiEventCustomRangeChange);
 el.aiEventsEnd.addEventListener('change', handleAiEventCustomRangeChange);
+el.aiEventsTotalsToggle?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-ai-event-total-group]');
+  if (!button) {
+    return;
+  }
+  setAiEventTotalsGroupBy(button.dataset.aiEventTotalGroup || 'flow');
+});
 el.aiEventsCreditType.addEventListener('change', renderAiEvents);
 el.aiEventsCreatedBy.addEventListener('input', renderAiEvents);
 el.aiEventsToolName.addEventListener('input', renderAiEvents);
 el.aiEventsModel.addEventListener('input', renderAiEvents);
 el.aiEventsSource.addEventListener('input', renderAiEvents);
+el.aiEventsTotals.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-ai-event-total-sort]');
+  if (!button) {
+    return;
+  }
+  toggleAiEventTotalsSort(button.dataset.aiEventTotalSort || '');
+});
 el.flowRunsRange.addEventListener('change', handleFlowRunRangeChange);
 el.flowRunsStart.addEventListener('change', handleFlowRunCustomRangeChange);
 el.flowRunsEnd.addEventListener('change', handleFlowRunCustomRangeChange);
@@ -435,6 +489,41 @@ el.flowRunsTrigger.addEventListener('change', renderFlowRuns);
 el.flowRunsSearch.addEventListener('input', renderFlowRuns);
 el.flowRunsMinDuration.addEventListener('input', renderFlowRuns);
 el.flowRunsErrorsOnly.addEventListener('change', renderFlowRuns);
+el.flowRunsTotals.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-flow-run-total-sort]');
+  if (!button) {
+    return;
+  }
+  toggleFlowRunTotalsSort(button.dataset.flowRunTotalSort || '');
+});
+el.agentSessionsRange.addEventListener('change', handleAgentSessionRangeChange);
+el.agentSessionsStart.addEventListener('change', handleAgentSessionCustomRangeChange);
+el.agentSessionsEnd.addEventListener('change', handleAgentSessionCustomRangeChange);
+el.agentSessionsSearch.addEventListener('input', renderAgentSessions);
+el.agentSessionsTable.addEventListener('click', (event) => {
+  const row = event.target.closest('[data-agent-session-id]');
+  if (!row) {
+    return;
+  }
+  openAgentSessionDetail(row.dataset.agentSessionId || '').catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.agentSessionsTable.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') {
+    return;
+  }
+  const row = event.target.closest('[data-agent-session-id]');
+  if (!row) {
+    return;
+  }
+  event.preventDefault();
+  openAgentSessionDetail(row.dataset.agentSessionId || '').catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
 el.tableScopes.forEach((input) => input.addEventListener('change', () => {
   state.tablesLoaded = false;
   state.tables = [];
@@ -515,6 +604,7 @@ el.copyDiagramModalButton.addEventListener('click', () => copyActiveMermaid().ca
 el.diagramModalClose.addEventListener('click', closeDiagramModal);
 el.tableDocumentClose.addEventListener('click', closeTableDocumentModal);
 el.aiEventDetailClose.addEventListener('click', closeAiEventDetailModal);
+el.agentSessionDetailClose.addEventListener('click', closeAgentSessionDetailModal);
 el.exportTableDocumentButton.addEventListener('click', () => exportActiveTableDocument().catch((error) => {
   toast(error.message, 'error');
   console.error(error);
@@ -533,7 +623,9 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') {
     return;
   }
-  if (!el.aiEventDetailModal.hidden) {
+  if (!el.agentSessionDetailModal.hidden) {
+    closeAgentSessionDetailModal();
+  } else if (!el.aiEventDetailModal.hidden) {
     closeAiEventDetailModal();
   } else if (!el.diagramModal.hidden) {
     closeDiagramModal();
@@ -615,8 +707,10 @@ initTheme();
 updateRoleFileFormatUi();
 clearTableSelection();
 resetAiEventFilters();
+resetAgentSessionFilters();
 resetFlowRunFilters();
 renderAiEvents();
+renderAgentSessions();
 renderFlowRuns();
 await loadStatus();
 
@@ -1246,6 +1340,17 @@ function clearEnvironmentData() {
   state.aiEventUnresolvedFields = [];
   state.aiEventDetailCache = new Map();
   state.selectedAiEventId = '';
+  state.agentSessions = [];
+  state.agentSessionsLoaded = false;
+  state.agentSessionsLoading = false;
+  state.agentSessionsNextPageToken = '';
+  state.agentSessionDateRange = {
+    range: '7d',
+    startDate: '',
+    endDate: '',
+  };
+  state.agentSessionDetailCache = new Map();
+  state.selectedAgentSessionId = '';
   state.flowRuns = [];
   state.flowRunsLoaded = false;
   state.selectedTableLogicalName = '';
@@ -1255,15 +1360,18 @@ function clearEnvironmentData() {
   state.diagramZoom = 1;
   state.activeTableDocument = null;
   resetAiEventFilters();
+  resetAgentSessionFilters();
   resetFlowRunFilters();
   renderUsers();
   renderTeams();
   renderConnections();
   renderAiEvents();
+  renderAgentSessions();
   renderFlowRuns();
   renderTables();
   clearTableSelection();
   closeAiEventDetailModal();
+  closeAgentSessionDetailModal();
   closeConnectionDeleteModal();
   closeRoleAssignmentModal();
   closeDiagramModal();
@@ -1280,6 +1388,7 @@ function resetAiEventFilters() {
     startDate: formatDateInputValue(start),
     endDate: formatDateInputValue(end),
   };
+  state.aiEventTotalsGroupBy = 'flow';
   el.aiEventsRange.value = 'month';
   el.aiEventsStart.value = state.aiEventDateRange.startDate;
   el.aiEventsEnd.value = state.aiEventDateRange.endDate;
@@ -1292,7 +1401,27 @@ function resetAiEventFilters() {
     column: 'created',
     direction: 'desc',
   };
+  state.aiEventTotalsSort = {
+    column: 'totalRuns',
+    direction: 'desc',
+  };
   syncAiEventCustomRangeVisibility();
+}
+
+function resetAgentSessionFilters() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  state.agentSessionDateRange = {
+    range: '7d',
+    startDate: formatDateInputValue(start),
+    endDate: formatDateInputValue(end),
+  };
+  el.agentSessionsRange.value = '7d';
+  el.agentSessionsStart.value = state.agentSessionDateRange.startDate;
+  el.agentSessionsEnd.value = state.agentSessionDateRange.endDate;
+  el.agentSessionsSearch.value = '';
+  syncAgentSessionCustomRangeVisibility();
 }
 
 function resetFlowRunFilters() {
@@ -1308,6 +1437,10 @@ function resetFlowRunFilters() {
     column: 'startTime',
     direction: 'desc',
   };
+  state.flowRunTotalsSort = {
+    column: 'totalRuns',
+    direction: 'desc',
+  };
   el.flowRunsRange.value = '7d';
   el.flowRunsStart.value = state.flowRunDateRange.startDate;
   el.flowRunsEnd.value = state.flowRunDateRange.endDate;
@@ -1317,6 +1450,20 @@ function resetFlowRunFilters() {
   el.flowRunsMinDuration.value = '';
   el.flowRunsErrorsOnly.checked = false;
   syncFlowRunCustomRangeVisibility();
+}
+
+function syncAgentSessionCustomRangeVisibility() {
+  const isCustom = el.agentSessionsRange.value === 'custom';
+  el.agentSessionsStart.disabled = !isCustom;
+  el.agentSessionsEnd.disabled = !isCustom;
+}
+
+function handleAgentSessionRangeChange() {
+  syncAgentSessionCustomRangeVisibility();
+}
+
+function handleAgentSessionCustomRangeChange() {
+  return;
 }
 
 function syncAiEventCustomRangeVisibility() {
@@ -1389,6 +1536,9 @@ function renderAiEvents() {
   if (!state.aiEventsLoaded) {
     el.aiEventsSummary.textContent = 'Load AI Flow events for the current calendar month.';
     el.aiEventsWarnings.hidden = true;
+    if (el.aiEventsTotalsToggle) {
+      el.aiEventsTotalsToggle.hidden = true;
+    }
     el.aiEventsTotals.innerHTML = '';
     el.aiEventsTable.innerHTML = empty('Load AI Flow events.');
     el.downloadAiEventsButton.disabled = true;
@@ -1407,6 +1557,7 @@ function renderAiEvents() {
   } else {
     el.aiEventsWarnings.hidden = true;
   }
+  renderAiEventTotalsToggle();
   renderAiEventTotals(filtered);
   el.downloadAiEventsButton.disabled = !sorted.length;
 
@@ -1449,6 +1600,39 @@ function renderAiEvents() {
 
 function getVisibleAiEventRows() {
   return getSortedAiEvents(getFilteredAiEvents());
+}
+
+function setAiEventTotalsGroupBy(groupBy) {
+  const nextGroupBy = groupBy === 'model' ? 'model' : 'flow';
+  if (state.aiEventTotalsGroupBy === nextGroupBy) {
+    return;
+  }
+  state.aiEventTotalsGroupBy = nextGroupBy;
+  renderAiEvents();
+}
+
+function renderAiEventTotalsToggle() {
+  if (!el.aiEventsTotalsToggle) {
+    return;
+  }
+  el.aiEventsTotalsToggle.hidden = !state.aiEventsLoaded || !state.aiEvents.length;
+  if (el.aiEventsTotalsToggle.hidden) {
+    return;
+  }
+  const options = [
+    ['flow', 'By flow'],
+    ['model', 'By model'],
+  ];
+  el.aiEventsTotalsToggle.innerHTML = options.map(([groupBy, label]) => `
+    <button
+      class="totals-toggle-button"
+      type="button"
+      data-ai-event-total-group="${escapeAttr(groupBy)}"
+      aria-pressed="${state.aiEventTotalsGroupBy === groupBy ? 'true' : 'false'}"
+    >
+      ${escapeHtml(label)}
+    </button>
+  `).join('');
 }
 
 async function downloadAiEventsExcel() {
@@ -1545,22 +1729,105 @@ function getAiEventSortValue(row, column) {
   return String(row[column] || '');
 }
 
-function renderAiEventTotals(rows) {
-  if (!rows.length) {
-    el.aiEventsTotals.innerHTML = '';
+function renderAiEventTotalsSortHeader(column, label) {
+  const isActive = state.aiEventTotalsSort.column === column;
+  const direction = isActive ? state.aiEventTotalsSort.direction : 'none';
+  const indicator = direction === 'asc' ? '▲' : direction === 'desc' ? '▼' : '↕';
+  const ariaSort = direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
+  return `
+    <th scope="col" aria-sort="${ariaSort}">
+      <button class="table-sort-button" type="button" data-ai-event-total-sort="${escapeAttr(column)}" aria-label="Sort AI Flow totals by ${escapeAttr(label)}">
+        <span>${escapeHtml(label)}</span>
+        <span class="table-sort-indicator" aria-hidden="true">${indicator}</span>
+      </button>
+    </th>
+  `;
+}
+
+function toggleAiEventTotalsSort(column) {
+  if (!column) {
     return;
   }
+  if (state.aiEventTotalsSort.column === column) {
+    state.aiEventTotalsSort.direction = state.aiEventTotalsSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.aiEventTotalsSort = {
+      column,
+      direction: ['totalRuns', 'aiBuilderCost', 'copilotStudioCost', 'totalCost'].includes(column) ? 'desc' : 'asc',
+    };
+  }
+  renderAiEvents();
+}
+
+function renderAiEventTotals(rows) {
+  if (!rows.length) {
+    el.aiEventsTotals.innerHTML = empty('No AI Flow totals match the current filters.');
+    return;
+  }
+  const groupBy = state.aiEventTotalsGroupBy === 'model' ? 'model' : 'flow';
   const totals = new Map();
   for (const row of rows) {
-    const key = row.creditType || 'Unlabeled credits';
-    totals.set(key, (totals.get(key) || 0) + Number(row.creditsConsumed || 0));
+    const groupLabel = groupBy === 'model'
+      ? String(row.model || '').trim() || 'Unknown model'
+      : String(row.toolName || row.source || '').trim() || 'Unknown flow';
+    const creditType = String(row.creditType || '').trim().toLowerCase();
+    const creditsConsumed = Number(row.creditsConsumed || 0);
+    const current = totals.get(groupLabel) || {
+      groupLabel,
+      totalRuns: 0,
+      aiBuilderCost: 0,
+      copilotStudioCost: 0,
+      totalCost: 0,
+    };
+    current.totalRuns += 1;
+    if (creditType === 'ai builder') {
+      current.aiBuilderCost += creditsConsumed;
+    }
+    if (creditType === 'copilot studio') {
+      current.copilotStudioCost += creditsConsumed;
+    }
+    current.totalCost += creditsConsumed;
+    totals.set(groupLabel, current);
   }
-  el.aiEventsTotals.innerHTML = [...totals.entries()].map(([label, total]) => `
-    <div class="ai-event-total-card">
-      <strong>${escapeHtml(formatCredits(total))}</strong>
-      <span>${escapeHtml(label)}</span>
-    </div>
-  `).join('');
+  const rowsToRender = getSortedAiEventTotalsRows([...totals.values()]);
+  const label = groupBy === 'model' ? 'Model' : 'Flow';
+  el.aiEventsTotals.innerHTML = `
+    <table class="metadata-table ai-flow-totals-table">
+      <thead>
+        <tr>
+          ${renderAiEventTotalsSortHeader('groupLabel', label)}
+          ${renderAiEventTotalsSortHeader('totalRuns', 'Total runs')}
+          ${renderAiEventTotalsSortHeader('aiBuilderCost', 'AI Builder cost')}
+          ${renderAiEventTotalsSortHeader('copilotStudioCost', 'Copilot Studio cost')}
+          ${renderAiEventTotalsSortHeader('totalCost', 'Total cost')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsToRender.map((row) => `
+          <tr>
+            <td>${escapeHtml(row.groupLabel)}</td>
+            <td>${escapeHtml(String(row.totalRuns))}</td>
+            <td>${escapeHtml(formatCredits(row.aiBuilderCost))}</td>
+            <td>${escapeHtml(formatCredits(row.copilotStudioCost))}</td>
+            <td>${escapeHtml(formatCredits(row.totalCost))}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function getSortedAiEventTotalsRows(rows) {
+  const { column, direction } = state.aiEventTotalsSort;
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => compareAiEventTotalsValues(left, right, column) * multiplier);
+}
+
+function compareAiEventTotalsValues(left, right, column) {
+  if (column === 'totalRuns' || column === 'aiBuilderCost' || column === 'copilotStudioCost' || column === 'totalCost') {
+    return Number(left[column] || 0) - Number(right[column] || 0);
+  }
+  return String(left.groupLabel || '').localeCompare(String(right.groupLabel || ''), undefined, { numeric: true, sensitivity: 'base' });
 }
 
 function formatCredits(value) {
@@ -1846,49 +2113,100 @@ function compareFlowRunValues(left, right, column) {
   return String(left[column] || '').localeCompare(String(right[column] || ''), undefined, { numeric: true, sensitivity: 'base' });
 }
 
-function renderFlowRunTotals(rows) {
-  if (!rows.length) {
-    el.flowRunsTotals.innerHTML = '';
-    return;
-  }
-  const durations = rows
-    .map((row) => Number(row.durationMs || 0))
-    .filter((value) => Number.isFinite(value) && value >= 0)
-    .sort((left, right) => left - right);
-  const failed = rows.filter((row) => flowRunStatusClass(String(row.status || '').toLowerCase()) === 'broken').length;
-  const average = durations.length ? durations.reduce((total, value) => total + value, 0) / durations.length : 0;
-  const p95 = percentile(durations, 0.95);
-  const max = durations.length ? durations[durations.length - 1] : 0;
-  el.flowRunsTotals.innerHTML = `
-    <div class="ai-event-total-card">
-      <strong>${escapeHtml(String(rows.length))}</strong>
-      <span>Visible runs</span>
-    </div>
-    <div class="ai-event-total-card">
-      <strong>${escapeHtml(String(failed))}</strong>
-      <span>Failed or cancelled</span>
-    </div>
-    <div class="ai-event-total-card">
-      <strong>${escapeHtml(formatDuration(average))}</strong>
-      <span>Average duration</span>
-    </div>
-    <div class="ai-event-total-card">
-      <strong>${escapeHtml(formatDuration(p95))}</strong>
-      <span>P95 duration</span>
-    </div>
-    <div class="ai-event-total-card">
-      <strong>${escapeHtml(formatDuration(max))}</strong>
-      <span>Max duration</span>
-    </div>
+function renderFlowRunTotalsSortHeader(column, label) {
+  const isActive = state.flowRunTotalsSort.column === column;
+  const direction = isActive ? state.flowRunTotalsSort.direction : 'none';
+  const indicator = direction === 'asc' ? '▲' : direction === 'desc' ? '▼' : '↕';
+  const ariaSort = direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none';
+  return `
+    <th scope="col" aria-sort="${ariaSort}">
+      <button class="table-sort-button" type="button" data-flow-run-total-sort="${escapeAttr(column)}" aria-label="Sort flow run totals by ${escapeAttr(label)}">
+        <span>${escapeHtml(label)}</span>
+        <span class="table-sort-indicator" aria-hidden="true">${indicator}</span>
+      </button>
+    </th>
   `;
 }
 
-function percentile(values, ratio) {
-  if (!values.length) {
-    return 0;
+function toggleFlowRunTotalsSort(column) {
+  if (!column) {
+    return;
   }
-  const index = Math.min(values.length - 1, Math.ceil(values.length * ratio) - 1);
-  return values[index] || 0;
+  if (state.flowRunTotalsSort.column === column) {
+    state.flowRunTotalsSort.direction = state.flowRunTotalsSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.flowRunTotalsSort = {
+      column,
+      direction: ['totalRuns', 'successCount', 'failCount', 'totalRunTime'].includes(column) ? 'desc' : 'asc',
+    };
+  }
+  renderFlowRuns();
+}
+
+function renderFlowRunTotals(rows) {
+  if (!rows.length) {
+    el.flowRunsTotals.innerHTML = empty('No flow run totals match the current filters.');
+    return;
+  }
+  const totals = new Map();
+  for (const row of rows) {
+    const groupLabel = String(row.flowName || '').trim() || 'Unknown flow';
+    const current = totals.get(groupLabel) || {
+      groupLabel,
+      totalRuns: 0,
+      successCount: 0,
+      failCount: 0,
+      totalRunTime: 0,
+    };
+    current.totalRuns += 1;
+    const statusClass = flowRunStatusClass(String(row.status || '').toLowerCase());
+    if (statusClass === 'succeeded') {
+      current.successCount += 1;
+    }
+    if (statusClass === 'broken') {
+      current.failCount += 1;
+    }
+    current.totalRunTime += Number(row.durationMs || 0);
+    totals.set(groupLabel, current);
+  }
+  const rowsToRender = getSortedFlowRunTotalsRows([...totals.values()]);
+  el.flowRunsTotals.innerHTML = `
+    <table class="metadata-table flow-run-totals-table">
+      <thead>
+        <tr>
+          ${renderFlowRunTotalsSortHeader('groupLabel', 'Flow')}
+          ${renderFlowRunTotalsSortHeader('totalRuns', 'Flow run count')}
+          ${renderFlowRunTotalsSortHeader('successCount', 'Success count')}
+          ${renderFlowRunTotalsSortHeader('failCount', 'Fail count')}
+          ${renderFlowRunTotalsSortHeader('totalRunTime', 'Total run time')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rowsToRender.map((row) => `
+          <tr>
+            <td>${escapeHtml(row.groupLabel)}</td>
+            <td>${escapeHtml(String(row.totalRuns))}</td>
+            <td>${escapeHtml(String(row.successCount))}</td>
+            <td>${escapeHtml(String(row.failCount))}</td>
+            <td>${escapeHtml(formatDuration(row.totalRunTime))}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function getSortedFlowRunTotalsRows(rows) {
+  const { column, direction } = state.flowRunTotalsSort;
+  const multiplier = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((left, right) => compareFlowRunTotalsValues(left, right, column) * multiplier);
+}
+
+function compareFlowRunTotalsValues(left, right, column) {
+  if (column === 'totalRuns' || column === 'successCount' || column === 'failCount' || column === 'totalRunTime') {
+    return Number(left[column] || 0) - Number(right[column] || 0);
+  }
+  return String(left.groupLabel || '').localeCompare(String(right.groupLabel || ''), undefined, { numeric: true, sensitivity: 'base' });
 }
 
 function formatDuration(value) {
@@ -1907,6 +2225,479 @@ function formatDuration(value) {
     return `${minutes}m ${seconds}s`;
   }
   return `${seconds}s`;
+}
+
+async function loadAgentSessions(options = {}) {
+  if (!state.selectedEnvironment.orgUrl) {
+    throw new Error('Select an environment first.');
+  }
+  if (options.append && !state.agentSessionsNextPageToken) {
+    return;
+  }
+  state.agentSessionsLoading = true;
+  if (!options.append) {
+    el.agentSessionsTotals.innerHTML = empty('Loading totals...');
+    el.agentSessionsTable.innerHTML = empty('Loading sessions...');
+    state.agentSessions = [];
+    state.agentSessionsNextPageToken = '';
+    state.agentSessionsLoaded = false;
+  }
+
+  const params = getAgentSessionLoadParams(options.append ? state.agentSessionDateRange : null);
+  if (options.append && state.agentSessionsNextPageToken) {
+    params.set('pageToken', state.agentSessionsNextPageToken);
+  }
+
+  try {
+    const data = await api(`/api/agent-sessions${params.toString() ? `?${params.toString()}` : ''}`);
+    const rows = data.rows || [];
+    state.agentSessions = options.append ? [...state.agentSessions, ...rows] : rows;
+    state.agentSessionsLoaded = true;
+    state.agentSessionsNextPageToken = data.nextPageToken || '';
+    applyAgentSessionDateRange(data.dateRange || {});
+    renderAgentSessions();
+    if (options.toastMessage === undefined) {
+      toast(options.append ? 'More sessions loaded.' : 'Agent sessions loaded.');
+    } else if (options.toastMessage) {
+      toast(options.toastMessage);
+    }
+  } catch (error) {
+    if (!options.append) {
+      el.agentSessionsTotals.innerHTML = empty(`Totals could not be loaded. ${cleanApiErrorMessage(error.message)}`);
+      el.agentSessionsTable.innerHTML = empty(`Sessions could not be loaded. ${cleanApiErrorMessage(error.message)}`);
+      el.downloadAgentSessionsButton.disabled = true;
+      el.loadMoreAgentSessionsButton.hidden = true;
+    }
+    throw error;
+  } finally {
+    state.agentSessionsLoading = false;
+  }
+}
+
+function renderAgentSessions() {
+  if (!el.agentSessionsTable) {
+    return;
+  }
+  if (!state.agentSessionsLoaded) {
+    el.agentSessionsSummary.textContent = 'Choose a date range, then click Load sessions to fetch transcripts.';
+    el.agentSessionsTotals.innerHTML = empty('Load sessions to see totals by agent.');
+    el.agentSessionsTable.innerHTML = empty('Load sessions.');
+    el.loadMoreAgentSessionsButton.hidden = true;
+    el.downloadAgentSessionsButton.disabled = true;
+    return;
+  }
+
+  const filtered = getFilteredAgentSessions();
+  const totals = getAgentSessionTotals(filtered);
+  const rangeText = state.agentSessionDateRange.startDate && state.agentSessionDateRange.endDate
+    ? `${state.agentSessionDateRange.startDate} to ${state.agentSessionDateRange.endDate}`
+    : '';
+  const moreLabel = state.agentSessionsNextPageToken ? ' | more available' : '';
+  el.agentSessionsSummary.textContent = `${filtered.length} / ${state.agentSessions.length} session${state.agentSessions.length === 1 ? '' : 's'} | ${totals.length} agent${totals.length === 1 ? '' : 's'}${rangeText ? ` | ${rangeText}` : ''}${moreLabel}`;
+  el.loadMoreAgentSessionsButton.hidden = !state.agentSessionsNextPageToken;
+  renderAgentSessionTotals(totals);
+  el.downloadAgentSessionsButton.disabled = !totals.length;
+
+  if (!filtered.length) {
+    el.agentSessionsTable.innerHTML = empty(state.agentSessions.length ? 'No agent sessions match the current filters.' : 'No agent sessions found for this range.');
+    return;
+  }
+
+  el.agentSessionsTable.innerHTML = `
+    <table class="metadata-table agent-sessions-table">
+      <thead>
+        <tr>
+          <th scope="col">Agent Name</th>
+          <th scope="col">Conversation Start Time</th>
+          <th scope="col">Conversation Id</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${state.agentSessions.map((row) => `
+          <tr class="agent-session-row${row.conversationId === state.selectedAgentSessionId ? ' selected' : ''}" tabindex="0" role="button" data-agent-session-id="${escapeAttr(row.conversationId)}" title="Open transcript">
+            <td>${escapeHtml(row.agentName || 'Unknown agent')}</td>
+            <td>${escapeHtml(formatTranscriptDateTime(row.conversationStartTime))}</td>
+            <td class="agent-session-id">${escapeHtml(row.conversationId || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderAgentSessionTotals(rows) {
+  if (!el.agentSessionsTotals) {
+    return;
+  }
+  if (!rows.length) {
+    el.agentSessionsTotals.innerHTML = empty('No sessions match the current filters.');
+    return;
+  }
+  el.agentSessionsTotals.innerHTML = `
+    <table class="metadata-table agent-session-totals-table">
+      <thead>
+        <tr>
+          <th scope="col">Agent Name</th>
+          <th scope="col">Total Sessions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `
+          <tr>
+            <td>${escapeHtml(row.agentName || 'Unknown agent')}</td>
+            <td>${escapeHtml(String(row.totalSessions || 0))}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function applyAgentSessionDateRange(dateRange) {
+  if (!dateRange || !dateRange.startDate || !dateRange.endDate) {
+    return;
+  }
+  state.agentSessionDateRange = {
+    range: dateRange.range || '7d',
+    startDate: dateRange.startDate,
+    endDate: dateRange.endDate,
+  };
+  el.agentSessionsRange.value = state.agentSessionDateRange.range;
+  el.agentSessionsStart.value = state.agentSessionDateRange.startDate;
+  el.agentSessionsEnd.value = state.agentSessionDateRange.endDate;
+  syncAgentSessionCustomRangeVisibility();
+}
+
+function getAgentSessionLoadParams(dateRange = null) {
+  const params = new URLSearchParams();
+  const range = dateRange?.range || el.agentSessionsRange.value || '7d';
+  params.set('range', range);
+  if (params.get('range') === 'custom') {
+    params.set('start', dateRange?.startDate || el.agentSessionsStart.value || '');
+    params.set('end', dateRange?.endDate || el.agentSessionsEnd.value || '');
+  }
+  return params;
+}
+
+function getFilteredAgentSessions() {
+  const query = el.agentSessionsSearch.value.trim().toLowerCase();
+  return state.agentSessions.filter((row) => {
+    const agentName = String(row.agentName || '').trim().toLowerCase();
+    return !query || agentName.includes(query);
+  });
+}
+
+function getAgentSessionTotals(rows) {
+  const totals = new Map();
+  for (const row of rows) {
+    const key = String(row.agentName || 'Unknown agent').trim() || 'Unknown agent';
+    totals.set(key, (totals.get(key) || 0) + 1);
+  }
+  return [...totals.entries()]
+    .map(([agentName, totalSessions]) => ({ agentName, totalSessions }))
+    .sort((left, right) => right.totalSessions - left.totalSessions || left.agentName.localeCompare(right.agentName, undefined, { sensitivity: 'base' }));
+}
+
+async function downloadAgentSessionTotalsExcel() {
+  const rows = getAgentSessionTotals(getFilteredAgentSessions());
+  if (!rows.length) {
+    throw new Error('No agent session totals to export.');
+  }
+  const response = await apiFetch('/api/agent-sessions/export', {
+    method: 'POST',
+    body: {
+      rows,
+      dateRange: state.agentSessionDateRange,
+    },
+  });
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  downloadBlob(match?.[1] || `agent-sessions-${safeDownloadFilename(state.agentSessionDateRange.startDate || 'export')}.xlsx`, blob);
+  toast('Agent session totals Excel file downloaded.');
+}
+
+async function openAgentSessionDetail(conversationId) {
+  if (!conversationId) {
+    return;
+  }
+  state.selectedAgentSessionId = conversationId;
+  renderAgentSessions();
+  el.agentSessionDetailModal.hidden = false;
+  el.agentSessionDetailTitle.textContent = 'Agent Session';
+  el.agentSessionDetailMeta.textContent = 'Loading transcript...';
+  el.agentSessionDetailBody.innerHTML = empty('Loading transcript...');
+
+  const cached = state.agentSessionDetailCache.get(conversationId);
+  if (cached) {
+    renderAgentSessionDetailModal(cached);
+    return;
+  }
+
+  let data;
+  try {
+    data = await api(`/api/agent-sessions/${encodeURIComponent(conversationId)}`);
+  } catch (error) {
+    closeAgentSessionDetailModal();
+    throw error;
+  }
+  const detail = data.session || null;
+  if (!detail) {
+    throw new Error('Agent session details are unavailable.');
+  }
+  state.agentSessionDetailCache.set(conversationId, detail);
+  if (state.selectedAgentSessionId === conversationId) {
+    renderAgentSessionDetailModal(detail);
+  }
+}
+
+function renderAgentSessionDetailModal(detail) {
+  const title = detail.agentName || detail.conversationName || 'Agent Session';
+  el.agentSessionDetailTitle.textContent = title;
+  el.agentSessionDetailMeta.textContent = [
+    detail.conversationStartTime ? formatTranscriptDateTime(detail.conversationStartTime) : '',
+    detail.conversationId || '',
+  ].filter(Boolean).join(' | ');
+
+  const redactionTypes = detail.redactions?.types || [];
+  const redactionText = detail.redactions?.count
+    ? `${detail.redactions.count} redaction${detail.redactions.count === 1 ? '' : 's'} applied`
+    : 'No sensitive patterns detected by the sanitizer';
+  const sanitizedNote = `
+    <div class="agent-session-banner">
+      <strong>Sanitized transcript</strong>
+      <p>${escapeHtml(redactionText)}${redactionTypes.length ? ` (${escapeHtml(redactionTypes.join(', '))})` : ''}.</p>
+    </div>
+  `;
+
+  const summaryCards = [
+    ['Agent', detail.agentName || 'Unknown agent'],
+    ['Start time', detail.conversationStartTime ? formatTranscriptDateTime(detail.conversationStartTime) : 'Unknown'],
+    ['Conversation id', detail.conversationId || 'Unknown'],
+    ['Activities', Number.isFinite(Number(detail.activityCount)) ? String(detail.activityCount) : '0'],
+  ].map(([label, value]) => `
+    <div class="agent-session-summary-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `).join('');
+
+  el.agentSessionDetailBody.innerHTML = `
+    ${sanitizedNote}
+    <div class="agent-session-summary-grid">
+      ${summaryCards}
+    </div>
+    ${renderTranscriptPayload(detail.transcript)}
+    ${detail.metadata ? `
+      <details class="agent-session-metadata">
+        <summary>Session metadata</summary>
+        <pre>${escapeHtml(JSON.stringify(detail.metadata, null, 2))}</pre>
+      </details>
+    ` : ''}
+  `;
+}
+
+function renderTranscriptPayload(transcript) {
+  if (!transcript) {
+    return empty('No transcript content found.');
+  }
+  if (Array.isArray(transcript.activities)) {
+    if (!transcript.activities.length) {
+      return empty('No transcript activities found.');
+    }
+    return `
+      <div class="agent-session-transcript">
+        ${transcript.activities.map((activity, index) => renderTranscriptActivity(activity, index)).join('')}
+      </div>
+    `;
+  }
+  if (typeof transcript.text === 'string' && transcript.text.trim()) {
+    return `
+      <section class="agent-session-transcript-panel">
+        <h3>Transcript</h3>
+        <pre>${escapeHtml(transcript.text)}</pre>
+      </section>
+    `;
+  }
+  return `
+    <details class="agent-session-metadata" open>
+      <summary>Transcript JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(transcript, null, 2))}</pre>
+    </details>
+  `;
+}
+
+function renderTranscriptActivity(activity, index) {
+  const type = String(activity?.type || activity?.valueType || 'activity').trim();
+  const speaker = formatTranscriptSpeaker(activity);
+  const timestamp = formatTranscriptTimestamp(activity);
+  const headline = activity?.name || activity?.valueType || type;
+  const classes = ['transcript-activity', `transcript-${sanitizeTranscriptCssToken(type)}`].join(' ');
+  const body = [];
+
+  if (activity?.text) {
+    body.push(`<div class="transcript-activity-text">${escapeHtmlWithLineBreaks(activity.text)}</div>`);
+  }
+
+  const valueBlock = renderTranscriptValueBlock(activity?.value, 'Activity payload');
+  if (valueBlock) {
+    body.push(valueBlock);
+  }
+
+  if (Array.isArray(activity?.attachments) && activity.attachments.length) {
+    body.push(`
+      <div class="transcript-attachment-list">
+        ${activity.attachments.map((attachment, attachmentIndex) => renderTranscriptAttachment(attachment, attachmentIndex)).join('')}
+      </div>
+    `);
+  }
+
+  const extras = renderTranscriptExtras(activity);
+  if (extras) {
+    body.push(extras);
+  }
+
+  return `
+    <article class="${classes}" data-transcript-index="${index}">
+      <div class="transcript-activity-header">
+        <div>
+          <strong>${escapeHtml(headline)}</strong>
+          <span>${escapeHtml(speaker)}</span>
+        </div>
+        <span>${escapeHtml(timestamp || '')}</span>
+      </div>
+      ${body.length ? `<div class="transcript-activity-body">${body.join('')}</div>` : ''}
+    </article>
+  `;
+}
+
+function renderTranscriptAttachment(attachment, index) {
+  const summary = summarizeTranscriptAttachment(attachment);
+  const attachmentPayload = renderTranscriptValueBlock(attachment, `Attachment ${index + 1}`);
+  return `
+    <details class="transcript-attachment-card">
+      <summary>${escapeHtml(summary)}</summary>
+      ${attachmentPayload || ''}
+    </details>
+  `;
+}
+
+function summarizeTranscriptAttachment(attachment) {
+  if (!attachment || typeof attachment !== 'object') {
+    return 'Attachment';
+  }
+  const contentType = String(attachment.contentType || attachment.contenttype || '').trim();
+  const title = String(attachment.title || attachment.name || '').trim();
+  const text = String(attachment.text || attachment.subtitle || '').trim();
+  const fragments = [contentType, title || text].filter(Boolean);
+  return fragments.length ? fragments.join(' | ') : 'Attachment';
+}
+
+function renderTranscriptValueBlock(value, label) {
+  if (value === undefined || value === null || value === '') {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return `
+      <details class="transcript-value-block">
+        <summary>${escapeHtml(label)}</summary>
+        <pre>${escapeHtml(value)}</pre>
+      </details>
+    `;
+  }
+  return `
+    <details class="transcript-value-block">
+      <summary>${escapeHtml(label)}</summary>
+      <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
+    </details>
+  `;
+}
+
+function renderTranscriptExtras(activity) {
+  const extras = { ...activity };
+  for (const key of ['text', 'attachments', 'from', 'timestamp', 'timestampMs', 'type', 'name', 'valueType', 'value']) {
+    delete extras[key];
+  }
+  if (!Object.keys(extras).length) {
+    return '';
+  }
+  return `
+    <details class="transcript-value-block">
+      <summary>Activity details</summary>
+      <pre>${escapeHtml(JSON.stringify(extras, null, 2))}</pre>
+    </details>
+  `;
+}
+
+function formatTranscriptSpeaker(activity) {
+  const from = activity?.from || {};
+  const displayName = String(from.displayName || from.name || '').trim();
+  if (displayName) {
+    return displayName;
+  }
+  const role = Number(from.role);
+  if (Number.isFinite(role)) {
+    return `Role ${role}`;
+  }
+  return activity?.channelId ? String(activity.channelId) : 'Conversation';
+}
+
+function formatTranscriptTimestamp(activity) {
+  const value = activity?.timestampMs || activity?.timestamp || '';
+  if (!value) {
+    return '';
+  }
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric > 1e12 ? numeric : numeric * 1000)
+    : new Date(String(value));
+  if (!date || Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date);
+}
+
+function formatTranscriptDateTime(value) {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date);
+}
+
+function escapeHtmlWithLineBreaks(value) {
+  return escapeHtml(value).replace(/\r?\n/g, '<br />');
+}
+
+function sanitizeTranscriptCssToken(value) {
+  return String(value || 'activity')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'activity';
+}
+
+function closeAgentSessionDetailModal() {
+  el.agentSessionDetailModal.hidden = true;
+  el.agentSessionDetailBody.innerHTML = '';
+  state.selectedAgentSessionId = '';
+  renderAgentSessions();
 }
 
 async function openAiEventDetail(aiEventId) {

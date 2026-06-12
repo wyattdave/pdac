@@ -145,6 +145,9 @@ const xmlParser = new XMLParser({
 });
 const AI_EVENT_ENTITY_LOGICAL_NAME = 'msdyn_aievent';
 const AI_EVENT_ENTITY_SET_NAME = 'msdyn_aievents';
+const AGENT_SESSION_ENTITY_SET_NAME = 'conversationtranscripts';
+const AGENT_SESSION_PAGE_SIZE = 50;
+const AGENT_SESSION_BOT_NAME_CACHE = new Map();
 const ODATA_FORMATTED_VALUE_ANNOTATION = 'OData.Community.Display.V1.FormattedValue';
 const AI_EVENT_BATCH_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
 const FLOW_RUN_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
@@ -542,6 +545,18 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/agent-sessions') {
+    requireOrgUrl();
+    sendJson(res, 200, await listAgentSessions({
+      pageToken: url.searchParams.get('pageToken') || '',
+      pageSize: url.searchParams.get('pageSize') || '',
+      range: url.searchParams.get('range') || '7d',
+      start: url.searchParams.get('start') || '',
+      end: url.searchParams.get('end') || '',
+    }));
+    return;
+  }
+
   if (route === 'POST /api/ai-events/export') {
     const body = await readJson(req);
     const workbook = await exportAiEventsWorkbook(body.rows || []);
@@ -576,6 +591,22 @@ async function handleApi(req, res) {
     const payload = await getAiEventDetail(aiEventDetailMatch[1]);
     console.log('[AI events] sending detail payload:\n' + JSON.stringify(payload, null, 2));
     sendJson(res, 200, payload);
+    return;
+  }
+
+  const agentSessionDetailMatch = url.pathname.match(/^\/api\/agent-sessions\/([0-9a-fA-F-]+)$/);
+  if (req.method === 'GET' && agentSessionDetailMatch) {
+    requireOrgUrl();
+    sendJson(res, 200, await getAgentSessionDetail(agentSessionDetailMatch[1]));
+    return;
+  }
+
+  if (route === 'POST /api/agent-sessions/export') {
+    const body = await readJson(req);
+    const workbook = await exportAgentSessionTotalsWorkbook(body.rows || []);
+    const range = body.dateRange || {};
+    const rangeName = range.startDate && range.endDate ? `${range.startDate}-to-${range.endDate}` : 'export';
+    sendXlsx(res, 200, `agent-sessions-${safeFilename(rangeName)}.xlsx`, workbook);
     return;
   }
 
@@ -4574,6 +4605,37 @@ async function listFlowRuns(filters = {}) {
   };
 }
 
+async function listAgentSessions(filters = {}) {
+  const requestedPageSize = Number(filters.pageSize || AGENT_SESSION_PAGE_SIZE);
+  const pageSize = Number.isFinite(requestedPageSize)
+    ? Math.min(100, Math.max(1, Math.trunc(requestedPageSize)))
+    : AGENT_SESSION_PAGE_SIZE;
+  const dateRange = getAgentSessionDateRange(filters);
+  const path = `${AGENT_SESSION_ENTITY_SET_NAME}?${buildAiEventQueryString({
+    '$select': 'conversationtranscriptid,conversationstarttime,name,metadata,_bot_conversationtranscriptid_value',
+    '$expand': 'bot_conversationtranscriptId($select=name)',
+    '$filter': `conversationstarttime ge ${toODataDateTime(dateRange.start)} and conversationstarttime lt ${toODataDateTime(dateRange.endExclusive)}`,
+    '$orderby': 'conversationstarttime desc,createdon desc',
+  })}`;
+  const page = await dvGetPage(path, filters.pageToken || '', {
+    Prefer: `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=${pageSize}`,
+  });
+  const rows = await mapWithConcurrency(page.rows || [], 4, async (row) => normalizeAgentSessionSummary(row));
+  return {
+    dateRange,
+    rows,
+    nextPageToken: page.nextPageToken,
+  };
+}
+
+function getAgentSessionDateRange(filters = {}) {
+  return getAiEventDateRange({
+    range: filters.range || '7d',
+    start: filters.start || '',
+    end: filters.end || '',
+  });
+}
+
 function getFlowRunDateRange(filters = {}) {
   return getAiEventDateRange({
     range: filters.range || '7d',
@@ -4813,6 +4875,55 @@ function flowRunExportText(value) {
   return String(value ?? '').trim();
 }
 
+async function exportAgentSessionTotalsWorkbook(rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    throw new HttpError(400, 'No agent session totals were provided for export.');
+  }
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet('Agent Totals', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+
+  const columns = [
+    ['Agent Name', 36],
+    ['Total Sessions', 18],
+  ];
+  worksheet.addTable({
+    name: 'AgentSessionTotals',
+    ref: 'A1',
+    headerRow: true,
+    totalsRow: false,
+    style: {
+      theme: 'TableStyleMedium2',
+      showRowStripes: true,
+    },
+    columns: columns.map(([name]) => ({ name, filterButton: true })),
+    rows: rows.map((row) => [
+      String(row.agentName || 'Unknown agent').trim() || 'Unknown agent',
+      Number(row.totalSessions || 0),
+    ]),
+  });
+
+  columns.forEach(([, width], index) => {
+    worksheet.getColumn(index + 1).width = width;
+  });
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+  });
+  for (let rowNumber = 2; rowNumber <= rows.length + 1; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    row.alignment = { vertical: 'top' };
+    row.getCell(2).numFmt = '0';
+  }
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
 async function getAiEventDetail(aiEventId) {
   const config = await getAiEventFieldConfig();
   const selectFields = getAiEventSelectFields(config, { includePayload: true });
@@ -4836,6 +4947,367 @@ async function getAiEventDetail(aiEventId) {
     unresolvedFields: config.unresolved,
     event: normalizeAiEventDetail(data, config),
   };
+}
+
+async function getAgentSessionDetail(conversationTranscriptId) {
+  const id = normalizeGuid(conversationTranscriptId);
+  if (!id) {
+    throw new HttpError(400, 'Conversation transcript id is required.');
+  }
+
+  const response = await dvGet(`${AGENT_SESSION_ENTITY_SET_NAME}(${id})?$select=conversationtranscriptid,conversationstarttime,name,content,metadata,createdon,_bot_conversationtranscriptid_value&$expand=bot_conversationtranscriptId($select=name)`);
+  if (!response?.conversationtranscriptid) {
+    throw new HttpError(404, 'Conversation transcript not found.');
+  }
+
+  const transcript = parseTranscriptContent(response.content);
+  const metadata = parseTranscriptMetadata(response.metadata);
+  const redactionState = { count: 0, types: new Set() };
+  const sanitizedTranscript = sanitizeTranscriptValue(transcript, redactionState);
+  const sanitizedMetadata = sanitizeTranscriptValue(metadata, redactionState);
+  const agentName = sanitizeTranscriptText(await resolveTranscriptAgentName(response, metadata, transcript), redactionState);
+  const activityCount = Array.isArray(sanitizedTranscript?.activities) ? sanitizedTranscript.activities.length : 0;
+
+  return {
+    session: {
+      conversationId: normalizeGuid(response.conversationtranscriptid) || '',
+      conversationStartTime: response.conversationstarttime || '',
+      conversationName: sanitizeTranscriptText(String(response.name || '').trim(), redactionState),
+      agentName,
+      activityCount,
+      redactions: {
+        count: redactionState.count,
+        types: [...redactionState.types],
+      },
+      metadata: sanitizedMetadata && Object.keys(sanitizedMetadata).length ? sanitizedMetadata : null,
+      transcript: sanitizedTranscript,
+    },
+  };
+}
+
+async function normalizeAgentSessionSummary(row) {
+  const metadata = parseTranscriptMetadata(row.metadata);
+  const redactionState = { count: 0, types: new Set() };
+  return {
+    conversationId: normalizeGuid(row.conversationtranscriptid) || '',
+    conversationStartTime: row.conversationstarttime || '',
+    agentName: sanitizeTranscriptText(await resolveTranscriptAgentName(row, metadata), redactionState),
+  };
+}
+
+async function resolveTranscriptAgentName(row, metadata, transcript = null) {
+  const expandedBotName = String(row?.bot_conversationtranscriptId?.name || row?.bot_conversationtranscriptid?.name || '').trim();
+  if (expandedBotName) {
+    return expandedBotName;
+  }
+  const metadataAgentName = findTranscriptValueByKeys(metadata, [
+    'botname',
+    'agentname',
+    'displayname',
+    'friendlyname',
+    'name',
+    'title',
+  ]);
+  if (metadataAgentName) {
+    return metadataAgentName;
+  }
+  const botIds = extractTranscriptBotIds([
+    row?._bot_conversationtranscriptid_value,
+    row?.botid,
+    row?.botId,
+    row?._botid_value,
+    row?.agentid,
+    row?.agentId,
+    row?.name,
+    row?.metadata,
+  ]);
+  for (const botId of botIds) {
+    const botName = await lookupTranscriptBotName(botId);
+    if (botName) {
+      return botName;
+    }
+  }
+
+  const transcriptName = inferTranscriptAgentNameFromTranscript(transcript);
+  if (transcriptName) {
+    return transcriptName;
+  }
+
+  const rowName = String(row?.name || '').trim();
+  if (rowName && !looksLikeTranscriptGuidComposite(rowName)) {
+    return rowName;
+  }
+
+  return 'Unknown agent';
+}
+
+function findTranscriptValueByKeys(value, targetKeys = []) {
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+
+  const normalizedTargets = new Set(targetKeys.map((key) => String(key || '').trim().toLowerCase()).filter(Boolean));
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findTranscriptValueByKeys(item, targetKeys);
+      if (match) {
+        return match;
+      }
+    }
+    return '';
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const normalizedKey = String(key || '').trim().toLowerCase();
+    if (normalizedTargets.has(normalizedKey)) {
+      const directText = String(nestedValue || '').trim();
+      if (directText) {
+        return directText;
+      }
+    }
+    const deepMatch = findTranscriptValueByKeys(nestedValue, targetKeys);
+    if (deepMatch) {
+      return deepMatch;
+    }
+  }
+
+  return '';
+}
+
+function extractTranscriptBotIds(values) {
+  const ids = [];
+  const seen = new Set();
+  const queue = [...values];
+  while (queue.length) {
+    const value = queue.shift();
+    if (value === null || value === undefined) {
+      continue;
+    }
+    if (typeof value === 'object') {
+      if (Array.isArray(value)) {
+        queue.push(...value);
+      } else {
+        queue.push(...Object.values(value));
+      }
+      continue;
+    }
+    const text = String(value).trim();
+    if (!text) {
+      continue;
+    }
+    const matches = text.match(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g) || [];
+    for (const match of matches) {
+      const id = normalizeGuid(match);
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+async function lookupTranscriptBotName(botId) {
+  const id = normalizeGuid(botId);
+  if (!id) {
+    return '';
+  }
+  if (AGENT_SESSION_BOT_NAME_CACHE.has(id)) {
+    return AGENT_SESSION_BOT_NAME_CACHE.get(id) || '';
+  }
+  try {
+    const response = await dvGet(`bots(${id})?$select=botid,name`);
+    const name = String(response?.name || '').trim();
+    AGENT_SESSION_BOT_NAME_CACHE.set(id, name);
+    return name;
+  } catch (error) {
+    console.error('Could not resolve bot name for transcript:', id, error);
+    AGENT_SESSION_BOT_NAME_CACHE.set(id, '');
+    return '';
+  }
+}
+
+function inferTranscriptAgentNameFromTranscript(transcript) {
+  const activities = Array.isArray(transcript?.activities) ? transcript.activities : [];
+  for (const activity of activities) {
+    const explicitName = String(activity?.from?.displayName || activity?.from?.name || '').trim();
+    if (explicitName) {
+      return explicitName;
+    }
+  }
+  for (const activity of activities) {
+    const text = String(activity?.text || '').replace(/\s+/g, ' ').trim();
+    if (!text) {
+      continue;
+    }
+    const match = text.match(/\b(?:hello|hi|hey)[^A-Za-z0-9]{0,12}(?:i['’]?m|i am)\s+([A-Z][A-Za-z0-9 .'\-]{1,80})/i)
+      || text.match(/\bmy name is\s+([A-Z][A-Za-z0-9 .'\-]{1,80})/i);
+    if (match?.[1]) {
+      return match[1].trim().replace(/[!?.:,;]+$/, '');
+    }
+  }
+  return '';
+}
+
+function looksLikeTranscriptGuidComposite(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return false;
+  }
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(text)) {
+    return true;
+  }
+  const parts = text.split('_').filter(Boolean);
+  if (parts.length < 2) {
+    return false;
+  }
+  const lastPart = parts[parts.length - 1];
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(lastPart) || parts.some((part) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(part));
+}
+
+function parseTranscriptMetadata(value) {
+  const parsed = parseStructuredValue(value);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+function parseTranscriptContent(value) {
+  const parsed = parseStructuredValue(value);
+  if (parsed === null || parsed === undefined || parsed === '') {
+    return { text: '' };
+  }
+  if (typeof parsed === 'object') {
+    return parsed;
+  }
+  return { text: String(parsed) };
+}
+
+function parseStructuredValue(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== 'string') {
+    return value;
+  }
+  const text = value.trim();
+  if (!text) {
+    return '';
+  }
+  let current = text;
+  for (let index = 0; index < 3; index += 1) {
+    try {
+      const parsed = JSON.parse(current);
+      if (typeof parsed === 'string' && looksLikeJson(parsed) && parsed.trim() !== current) {
+        current = parsed.trim();
+        continue;
+      }
+      return parsed;
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
+function sanitizeTranscriptValue(value, state, keyPath = '') {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return sanitizeTranscriptText(value, state);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item, index) => sanitizeTranscriptValue(item, state, `${keyPath}[${index}]`));
+  }
+
+  if (typeof value !== 'object') {
+    return value;
+  }
+
+  const result = {};
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (isSensitiveTranscriptField(key)) {
+      recordTranscriptRedaction(state, key);
+      result[key] = '[redacted]';
+      continue;
+    }
+    result[key] = sanitizeTranscriptValue(nestedValue, state, keyPath ? `${keyPath}.${key}` : key);
+  }
+  return result;
+}
+
+function sanitizeTranscriptText(value, state) {
+  let output = String(value);
+  output = output.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, () => {
+    recordTranscriptRedaction(state, 'email');
+    return '[redacted email]';
+  });
+  output = output.replace(/\b(?:\+?\d[\d\s().-]{7,}\d)\b/g, (match) => {
+    if (match.replace(/\D/g, '').length < 7) {
+      return match;
+    }
+    recordTranscriptRedaction(state, 'phone');
+    return '[redacted phone]';
+  });
+  output = output.replace(/\b\d{3}-\d{2}-\d{4}\b/g, () => {
+    recordTranscriptRedaction(state, 'ssn');
+    return '[redacted ssn]';
+  });
+  output = output.replace(/\b(?:\d[ -]*?){13,19}\b/g, (match) => {
+    const digits = match.replace(/\D/g, '');
+    if (digits.length < 13 || digits.length > 19) {
+      return match;
+    }
+    recordTranscriptRedaction(state, 'credit-card');
+    return '[redacted card]';
+  });
+  output = output.replace(/https?:\/\/[^\s<>"']+/gi, (match) => {
+    try {
+      const url = new URL(match);
+      const hadSensitiveParts = Boolean(url.search || url.hash);
+      url.search = '';
+      url.hash = '';
+      if (hadSensitiveParts) {
+        recordTranscriptRedaction(state, 'url');
+      }
+      return url.toString();
+    } catch {
+      return match;
+    }
+  });
+  output = output.replace(/\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/g, () => {
+    recordTranscriptRedaction(state, 'token');
+    return '[redacted token]';
+  });
+  return output;
+}
+
+function isSensitiveTranscriptField(key) {
+  return new Set([
+    'password',
+    'secret',
+    'token',
+    'accesstoken',
+    'refreshtoken',
+    'authorization',
+    'cookie',
+    'setcookie',
+    'apikey',
+    'clientsecret',
+    'privatekey',
+    'connectionstring',
+    'aadobjectid',
+  ]).has(String(key || '').trim().toLowerCase());
+}
+
+function recordTranscriptRedaction(state, type) {
+  if (!state) {
+    return;
+  }
+  state.count += 1;
+  state.types.add(type);
 }
 
 async function getAiEventFieldConfig() {

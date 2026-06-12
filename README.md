@@ -2,7 +2,7 @@
 
 Settings by function not by environment.
 ![home](screenshots/home.png)
-PDAC is a small local admin app for working across Power Platform and Dataverse environments focusing on a functional hierarchy instead of environment. It helps with authentication, users and teams, connections, security roles, solution inspection, solution export/import, and solution component settings.
+PDAC is a small local admin app for working across Power Platform and Dataverse environments with a functional hierarchy instead of environment. It helps with authentication, users and teams, connections, security roles, solution inspection, solution export/import, solution component settings, and admin telemetry for AI Flow, Flow Runs, and Agent Sessions.
 
 ## Run
 
@@ -52,6 +52,9 @@ powerdevbox-admin
 - **Connections**: list environment connections with connector, owner, and health, filter by text or broken state, show only the selected account's connections, open broken owned connections for repair, and delete connections.
 - **Roles**: create roles, download editable permission workbooks or CSVs, upload edited permissions, and rename editable root roles.
 - **Solutions**: list and filter solutions, filter publishers, open the solution in Power Automate, list components, export as managed or unmanaged, and stage a deployment.
+- **AI Flow**: inspect AI usage events, sort by owner or consumption details, and view totals by flow or model with Copilot Studio and AI Builder cost breakdowns.
+- **Flow Runs**: list cloud flow runs, filter by status or trigger, and view per-flow totals for run count, success count, fail count, and total run time.
+- **Agent Sessions**: browse Dataverse conversation transcripts and load a sanitized transcript view for any session.
 - **Tables**: list Dataverse custom or all tables, inspect custom or all columns, generate Mermaid relationship diagrams, and export table-design workbooks.
 - **Solution component actions**: manage supported components from the solution component list.
 - **Import**: analyze a solution ZIP, map connection references, set environment variable values, download/import settings JSON, and import the solution.

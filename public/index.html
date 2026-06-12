@@ -44,6 +44,7 @@
       <button class="tab" type="button" data-tab="import">Imports</button>
       <button class="tab" type="button" data-tab="aiEvents">AI Flow</button>
       <button class="tab" type="button" data-tab="flowRuns">Flow Runs</button>
+      <button class="tab" type="button" data-tab="agentSessions">Agent Sessions</button>
       <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="connections">Connections</button>
       <button class="tab" type="button" data-tab="users">Users and Teams</button>
@@ -56,7 +57,7 @@
           <h2>Home</h2>
           <div class="home-brand">
             <img src="/icon.png" alt="" class="home-logo" />
-            <p class="lead">Settings by function not by environment. Connect once, then work by admin function across roles, solutions, and environment tools.</p>
+            <p class="lead">Settings by function not by environment. Connect once, then work across roles, solutions, AI Flow, Flow Runs, agent sessions, and environment tools from one place.</p>
           </div>
           <div class="home-grid function-grid">
             <div class="mini-card">
@@ -88,8 +89,16 @@
               <p>Analyze a solution ZIP, map connection references and environment variables, then import.</p>
             </div>
             <div class="mini-card">
+              <h3>AI Flow</h3>
+              <p>Review Copilot and AI Builder usage totals by flow or model, then sort and filter the underlying events.</p>
+            </div>
+            <div class="mini-card">
               <h3>Flow Runs</h3>
-              <p>Track cloud flow run status, timing, trigger types, errors, and jump into individual Power Automate runs.</p>
+              <p>Track cloud flow run status, timing, trigger types, errors, per-flow totals, and jump into individual Power Automate runs.</p>
+            </div>
+            <div class="mini-card">
+              <h3>Agent Sessions</h3>
+              <p>Browse Dataverse conversation transcripts, then open a session to review a sanitized transcript view.</p>
             </div>
             <div class="mini-card">
               <h3>Component Actions</h3>
@@ -561,7 +570,11 @@
 
           <p id="aiEventsSummary" class="muted"></p>
           <p id="aiEventsWarnings" class="muted" hidden></p>
-          <div id="aiEventsTotals" class="ai-event-totals"></div>
+          <div class="totals-toolbar">
+            <span class="muted">Totals by</span>
+            <div id="aiEventsTotalsToggle" class="file-format-toggle table-toggle totals-toggle" role="group" aria-label="AI Flow totals grouping"></div>
+          </div>
+          <div id="aiEventsTotals" class="totals-table-wrap ai-flow-totals-wrap"></div>
           <div id="aiEventsTable" class="ai-event-table-wrap"></div>
         </section>
       </section>
@@ -623,8 +636,50 @@
           </div>
 
           <p id="flowRunsSummary" class="muted"></p>
-          <div id="flowRunsTotals" class="ai-event-totals"></div>
+          <div id="flowRunsTotals" class="totals-table-wrap flow-run-totals-wrap"></div>
           <div id="flowRunsTable" class="flow-run-table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="agentSessionsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <h2>Agent Sessions</h2>
+            <div class="actions">
+              <button id="downloadAgentSessionsButton" type="button" class="secondary" disabled>Download Excel</button>
+              <button id="loadAgentSessionsButton" type="button">Load sessions</button>
+              <button id="loadMoreAgentSessionsButton" type="button" class="secondary" hidden>Load more</button>
+            </div>
+          </div>
+          <div class="agent-session-filters">
+            <label>
+              Date range
+              <select id="agentSessionsRange">
+                <option value="today">Today</option>
+                <option value="7d" selected>Last 7 days</option>
+                <option value="28d">Last 28 days</option>
+                <option value="month">Current calendar month</option>
+                <option value="365d">Last 365 days</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <label>
+              Start date
+              <input id="agentSessionsStart" type="date" />
+            </label>
+            <label>
+              End date
+              <input id="agentSessionsEnd" type="date" />
+            </label>
+            <label class="span-2">
+              Search agent name
+              <input id="agentSessionsSearch" placeholder="Filter by agent name" />
+            </label>
+          </div>
+          <p id="agentSessionsSummary" class="muted"></p>
+          <p class="muted agent-sessions-note">Content is only fetched when you open a session. The detail view redacts obvious sensitive data before rendering.</p>
+          <div id="agentSessionsTotals" class="agent-session-totals-wrap"></div>
+          <div id="agentSessionsTable" class="agent-sessions-table-wrap"></div>
         </section>
       </section>
 
@@ -800,6 +855,19 @@
           <button id="aiEventDetailClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
         </div>
         <div id="aiEventDetailBody" class="ai-event-detail-body"></div>
+      </section>
+    </div>
+
+    <div id="agentSessionDetailModal" class="modal-backdrop" hidden>
+      <section class="modal agent-session-modal" role="dialog" aria-modal="true" aria-labelledby="agentSessionDetailTitle">
+        <div class="section-title compact-title">
+          <div>
+            <h2 id="agentSessionDetailTitle">Agent Session</h2>
+            <p id="agentSessionDetailMeta" class="muted"></p>
+          </div>
+          <button id="agentSessionDetailClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+        </div>
+        <div id="agentSessionDetailBody" class="agent-session-detail-body"></div>
       </section>
     </div>
 
