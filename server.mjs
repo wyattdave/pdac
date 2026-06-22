@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -35,7 +35,9 @@ const PORT = Number(process.env.SECURITY_ROLES_PORT || process.env.PORT || 4280)
 const REGION = process.env.PP_REGION || 'prod';
 const SERVICE_RESOURCE = process.env.PP_SERVICE_RESOURCE || 'https://service.powerapps.com/';
 const POWER_PLATFORM_RESOURCE = process.env.PP_API_RESOURCE || 'https://api.powerplatform.com';
-const PUBLIC_DIR = join(fileURLToPath(new URL('.', import.meta.url)), 'public');
+const APP_DIR = fileURLToPath(new URL('.', import.meta.url));
+const PUBLIC_DIR = join(APP_DIR, 'public');
+const REPORT_CACHE_DIR = join(APP_DIR, 'data', 'report-cache');
 const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
 const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
 const USERS_TEAMS_PAGE_SIZE = 50;
@@ -607,6 +609,36 @@ async function handleApi(req, res) {
     const range = body.dateRange || {};
     const rangeName = range.startDate && range.endDate ? `${range.startDate}-to-${range.endDate}` : 'export';
     sendXlsx(res, 200, `agent-sessions-${safeFilename(rangeName)}.xlsx`, workbook);
+    return;
+  }
+
+  const automatedReportMatch = url.pathname.match(/^\/api\/automated-reports\/(ai-events|agent-sessions|solutions|flow-runs)\/(totals|raw|both)$/);
+  if (req.method === 'POST' && automatedReportMatch) {
+    const body = await readJson(req);
+    await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
+    const report = await getOrBuildCachedAutomatedReport(automatedReportMatch[1], automatedReportMatch[2], body);
+    sendAutomatedReportResponse(res, report);
+    return;
+  }
+
+  if (route === 'GET /api/report-cache') {
+    sendJson(res, 200, { files: await listCachedAutomatedReportFiles(selected.accountHomeId) });
+    return;
+  }
+
+  if (route === 'GET /api/reports/summary-cache') {
+    const summary = await buildReportsSummaryFromCachedReports(selected.accountHomeId);
+    if (!summary) {
+      throw new HttpError(404, 'No cached background report data is available for today.');
+    }
+    sendJson(res, 200, summary);
+    return;
+  }
+
+  if (route === 'POST /api/reports/summary') {
+    const body = await readJson(req);
+    await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
+    sendJson(res, 200, await getOrBuildCachedReportsSummary(body));
     return;
   }
 
@@ -1234,6 +1266,27 @@ async function getAccessTokenForSelectedAccount(resource) {
   return result.accessToken;
 }
 
+async function getAccessTokenForAccount(resource, homeAccountId) {
+  const normalizedHomeAccountId = String(homeAccountId || '').trim();
+  if (!normalizedHomeAccountId) {
+    return getAccessTokenForSelectedAccount(resource);
+  }
+  if (!authProvider._msalClient) {
+    throw new Error('Authentication not initialized.');
+  }
+  const account = (await getMsalAccounts()).find((item) => item.homeAccountId === normalizedHomeAccountId);
+  if (!account) {
+    throw new HttpError(401, 'Selected account is no longer signed in. Sign in again.');
+  }
+  const result = await authProvider._msalClient.acquireTokenSilent({
+    account,
+    scopes: [`${resource}/.default`],
+  });
+  authProvider._tenantId = result.tenantId;
+  rememberDataverseAccount(account.homeAccountId);
+  return result.accessToken;
+}
+
 async function getMsalAccounts() {
   if (!authProvider._msalClient) {
     return [];
@@ -1437,6 +1490,7 @@ async function buildSolutionsReportWorkbook(solutionIds, solutionSnapshots = [],
     ['Solution unique name', 36],
     ['Publisher display name', 28],
     ['# of flows', 14],
+    ['# of Code Apps', 16],
     ['# of Canvas Apps', 18],
     ['# of Model Driven Apps', 22],
     ['# of Copilot Studio Agents', 24],
@@ -1532,58 +1586,8 @@ async function buildSolutionReportRows(solutions, components, environment = {}) 
   }
 
   return solutions.map((solution) => {
-    const counts = createSolutionReportCounts();
     const solutionComponents = componentsBySolution.get(normalizeGuid(solution.solutionid)) || [];
-    for (const component of solutionComponents) {
-      const componentType = Number(component.componenttype);
-      const objectId = normalizeGuid(component.objectid) || `${componentType}:${counts.flows.size + counts.tables.size}`;
-      const typeLabel = String(component.typeLabel || SOLUTION_COMPONENT_TYPES[componentType] || '').toLowerCase();
-
-      if (componentType === 29) {
-        counts.flows.add(objectId);
-        continue;
-      }
-
-      if (componentType === 1) {
-        counts.tables.add(objectId);
-        continue;
-      }
-
-      if (componentType === 380 || typeLabel.includes('environment variable definition')) {
-        counts.environmentVariables.add(objectId);
-        continue;
-      }
-
-      if (typeLabel.includes('connection reference')) {
-        counts.connectionReferences.add(objectId);
-        continue;
-      }
-
-      if (typeLabel.includes('model driven app') || typeLabel.includes('model-driven app') || typeLabel.includes('app module')) {
-        counts.modelDrivenApps.add(objectId);
-        continue;
-      }
-
-      if (typeLabel.includes('copilot') || typeLabel === 'bot' || typeLabel.includes(' bot')) {
-        counts.copilotStudioAgents.add(objectId);
-        continue;
-      }
-
-      if (componentType === 300) {
-        counts.canvasApps.add(objectId);
-        continue;
-      }
-
-      if (isAiModelComponent('', typeLabel)) {
-        counts.aiModels.add(objectId);
-        continue;
-      }
-
-      if (isDataflowComponent('', typeLabel)) {
-        counts.dataflows.add(objectId);
-      }
-    }
-
+    const countFields = solutionReportCountFields(solutionComponents);
     return {
       'Environment display name': environment.displayName || '',
       'Environment id': environment.environmentId || '',
@@ -1591,22 +1595,90 @@ async function buildSolutionReportRows(solutions, components, environment = {}) 
       'Solution name': solution.friendlyname || solution.uniquename || '',
       'Solution unique name': solution.uniquename || '',
       'Publisher display name': solution.publisher?.friendlyname || solution.publisher?.uniquename || '',
-      '# of flows': counts.flows.size,
-      '# of Canvas Apps': counts.canvasApps.size,
-      '# of Model Driven Apps': counts.modelDrivenApps.size,
-      '# of Copilot Studio Agents': counts.copilotStudioAgents.size,
-      '# of Dataverse tables': counts.tables.size,
-      '# of AI models': counts.aiModels.size,
-      '# of connection references': counts.connectionReferences.size,
-      '# of environment variables': counts.environmentVariables.size,
-      '# of dataflows': counts.dataflows.size,
+      ...countFields,
     };
   });
+}
+
+function solutionReportCountFields(components) {
+  const counts = countSolutionReportComponents(components);
+  return {
+    '# of flows': counts.flows.size,
+    '# of Code Apps': counts.codeApps.size,
+    '# of Canvas Apps': counts.canvasApps.size,
+    '# of Model Driven Apps': counts.modelDrivenApps.size,
+    '# of Copilot Studio Agents': counts.copilotStudioAgents.size,
+    '# of Dataverse tables': counts.tables.size,
+    '# of AI models': counts.aiModels.size,
+    '# of connection references': counts.connectionReferences.size,
+    '# of environment variables': counts.environmentVariables.size,
+    '# of dataflows': counts.dataflows.size,
+  };
+}
+
+function countSolutionReportComponents(components) {
+  const counts = createSolutionReportCounts();
+  for (const component of components) {
+    const componentType = Number(component.componenttype);
+    const objectId = normalizeGuid(component.objectid) || `${componentType}:${counts.flows.size + counts.tables.size}`;
+    const typeLabel = String(component.typeLabel || SOLUTION_COMPONENT_TYPES[componentType] || '').toLowerCase();
+
+    if (componentType === 29) {
+      counts.flows.add(objectId);
+      continue;
+    }
+
+    if (componentType === 1) {
+      counts.tables.add(objectId);
+      continue;
+    }
+
+    if (componentType === 380 || typeLabel.includes('environment variable definition')) {
+      counts.environmentVariables.add(objectId);
+      continue;
+    }
+
+    if (typeLabel.includes('connection reference')) {
+      counts.connectionReferences.add(objectId);
+      continue;
+    }
+
+    if (typeLabel.includes('model driven app') || typeLabel.includes('model-driven app') || typeLabel.includes('app module')) {
+      counts.modelDrivenApps.add(objectId);
+      continue;
+    }
+
+    if (typeLabel.includes('copilot') || typeLabel === 'bot' || typeLabel.includes(' bot')) {
+      counts.copilotStudioAgents.add(objectId);
+      continue;
+    }
+
+    if (componentType === 300 && typeLabel.includes('code app')) {
+      counts.codeApps.add(objectId);
+      continue;
+    }
+
+    if (componentType === 300) {
+      counts.canvasApps.add(objectId);
+      continue;
+    }
+
+    if (isAiModelComponent('', typeLabel)) {
+      counts.aiModels.add(objectId);
+      continue;
+    }
+
+    if (isDataflowComponent('', typeLabel)) {
+      counts.dataflows.add(objectId);
+    }
+  }
+  return counts;
 }
 
 function createSolutionReportCounts() {
   return {
     flows: new Set(),
+    codeApps: new Set(),
     canvasApps: new Set(),
     modelDrivenApps: new Set(),
     copilotStudioAgents: new Set(),
@@ -4628,6 +4700,725 @@ async function listAgentSessions(filters = {}) {
   };
 }
 
+async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
+  const cacheKey = reportCacheKey('automated', {
+    accountHomeId: reportCacheAccountId(body),
+    group,
+    reportType,
+    environments: reportCacheEnvironments(body),
+    dateRange: body.dateRange || body.filters || {},
+    solutionOptions: body.solutionOptions || body.filters || {},
+  });
+  const cached = await readDailyReportCache(cacheKey);
+  if (cached?.kind === 'automated') {
+    return cachedAutomatedReport(cached.value);
+  }
+
+  const report = await buildAutomatedReport(group, reportType, body);
+  await writeDailyReportCache(cacheKey, 'automated', reportCacheAccountId(body), serialiseAutomatedReport(report));
+  return report;
+}
+
+async function getOrBuildCachedReportsSummary(body = {}) {
+  const cacheKey = reportCacheKey('summary', {
+    version: 3,
+    accountHomeId: reportCacheAccountId(body),
+    environments: reportCacheEnvironments(body),
+  });
+  const cached = await readDailyReportCache(cacheKey);
+  if (cached?.kind === 'summary') {
+    return { ...cached.value, cached: true };
+  }
+
+  const summary = await buildReportsSummary(body);
+  await writeDailyReportCache(cacheKey, 'summary', reportCacheAccountId(body), summary);
+  return { ...summary, cached: false };
+}
+
+function reportCacheAccountId(body = {}) {
+  return String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
+}
+
+function reportCacheEnvironments(body = {}) {
+  return normalizeAutomatedReportEnvironments(body.environments || body.environmentSelections || [])
+    .map((environment) => ({
+      environmentId: environment.environmentId,
+      orgUrl: environment.orgUrl,
+    }))
+    .sort((left, right) => `${left.environmentId}|${left.orgUrl}`.localeCompare(`${right.environmentId}|${right.orgUrl}`));
+}
+
+function reportCacheKey(kind, value) {
+  return createHash('sha256')
+    .update(JSON.stringify({ date: reportCacheDateKey(), kind, value }))
+    .digest('hex');
+}
+
+function reportCacheDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function reportCacheFilePath(cacheKey, dateKey = reportCacheDateKey()) {
+  return join(REPORT_CACHE_DIR, dateKey, `${cacheKey}.json`);
+}
+
+async function readDailyReportCache(cacheKey) {
+  try {
+    return JSON.parse(await readFile(reportCacheFilePath(cacheKey), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function writeDailyReportCache(cacheKey, kind, accountHomeId, value) {
+  const dateKey = reportCacheDateKey();
+  try {
+    await mkdir(join(REPORT_CACHE_DIR, dateKey), { recursive: true });
+    await writeFile(reportCacheFilePath(cacheKey, dateKey), JSON.stringify({
+      version: 1,
+      kind,
+      accountHomeId,
+      createdAt: new Date().toISOString(),
+      value,
+    }));
+  } catch (error) {
+    console.warn(`Unable to persist ${kind} report cache: ${errorMessage(error)}`);
+  }
+}
+
+function serialiseAutomatedReport(report) {
+  const files = Array.isArray(report?.files) ? report.files : [report];
+  return {
+    multiple: Array.isArray(report?.files),
+    files: files.map((file) => ({
+      filename: file.filename,
+      base64: Buffer.from(file.bytes).toString('base64'),
+    })),
+  };
+}
+
+function cachedAutomatedReport(value = {}) {
+  const files = (Array.isArray(value.files) ? value.files : []).map((file) => ({
+    filename: file.filename,
+    bytes: Buffer.from(file.base64 || '', 'base64'),
+  }));
+  return value.multiple ? { files } : files[0];
+}
+
+async function listCachedAutomatedReportFiles(accountHomeId = '') {
+  const entries = await listDailyAutomatedReportCacheEntries(accountHomeId);
+  return entries.flatMap((entry) => (entry.value?.files || []).map((file) => ({
+    filename: file.filename,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    base64: file.base64,
+    completedAt: entry.createdAt,
+  })));
+}
+
+async function listDailyAutomatedReportCacheEntries(accountHomeId = '') {
+  try {
+    const directory = join(REPORT_CACHE_DIR, reportCacheDateKey());
+    const fileNames = await readdir(directory);
+    const entries = await Promise.all(fileNames
+      .filter((fileName) => fileName.endsWith('.json'))
+      .map(async (fileName) => {
+        try {
+          return JSON.parse(await readFile(join(directory, fileName), 'utf8'));
+        } catch {
+          return null;
+        }
+      }));
+    return entries
+      .filter((entry) => entry?.kind === 'automated' && entry.accountHomeId === accountHomeId)
+      .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')));
+  } catch {
+    return [];
+  }
+}
+
+async function buildReportsSummaryFromCachedReports(accountHomeId = '') {
+  const entries = await listDailyAutomatedReportCacheEntries(accountHomeId);
+  if (!entries.length) {
+    return null;
+  }
+  const files = entries.flatMap((entry) => (entry.value?.files || []).map((file) => ({
+    ...file,
+    createdAt: entry.createdAt,
+  })));
+  const latestFile = (pattern) => files.find((file) => pattern.test(String(file.filename || '')));
+  const [aiTotals, aiRaw, agentTotals, solutionTotals, flowTotals] = await Promise.all([
+    readCachedWorkbookRows(latestFile(/^ai-flow-events-totals-by-environment-/i)),
+    readCachedWorkbookRows(latestFile(/^ai-flow-events-raw-stacked-/i)),
+    readCachedWorkbookRows(latestFile(/^agent-sessions-totals-by-environment-/i)),
+    readCachedWorkbookRows(latestFile(/^solutions-totals-by-environment-/i)),
+    readCachedWorkbookRows(latestFile(/^flow-runs-totals-by-environment-/i)),
+  ]);
+  const environments = new Map();
+  const getEnvironment = (row) => {
+    const environmentId = String(row['Environment id'] || '').trim();
+    if (!environmentId) {
+      return null;
+    }
+    if (!environments.has(environmentId)) {
+      environments.set(environmentId, {
+        environmentDisplayName: String(row['Environment display name'] || environmentId).trim() || environmentId,
+        environmentId,
+        environmentUrl: String(row['Environment url'] || '').trim(),
+        flowRuns: { total: 0, successful: 0, failed: 0, successRate: 0, failureRate: 0 },
+        aiFlow: { aiBuilderCredits: 0, copilotStudioCredits: 0 },
+        copilotSessions: 0,
+        solutionCount: 0,
+        flowCount: 0,
+        codeAppCount: 0,
+        canvasAppCount: 0,
+        modelDrivenAppCount: 0,
+        aiModelCount: 0,
+        dataverseTableCount: null,
+        copilotStudioAgentCount: 0,
+      });
+    }
+    return environments.get(environmentId);
+  };
+
+  for (const row of aiTotals) {
+    const target = getEnvironment(row);
+    if (!target) continue;
+    target.aiFlow.aiBuilderCredits = cachedNumber(row['Sum AI Builder Credits used']);
+    target.aiFlow.copilotStudioCredits = cachedNumber(row['Sum Copilot Studio credits used']);
+  }
+  for (const row of agentTotals) {
+    const target = getEnvironment(row);
+    if (target) target.copilotSessions = cachedNumber(row['Total Sessions']);
+  }
+  for (const row of flowTotals) {
+    const target = getEnvironment(row);
+    if (!target) continue;
+    target.flowRuns.total = cachedNumber(row['Total flow runs']);
+    target.flowRuns.successful = cachedNumber(row['Successful flow runs']);
+    target.flowRuns.failed = cachedNumber(row['Failed flow runs']);
+    target.flowRuns.successRate = target.flowRuns.total ? target.flowRuns.successful / target.flowRuns.total : 0;
+    target.flowRuns.failureRate = target.flowRuns.total ? target.flowRuns.failed / target.flowRuns.total : 0;
+  }
+  for (const row of solutionTotals) {
+    const target = getEnvironment(row);
+    if (!target) continue;
+    target.solutionCount = cachedNumber(row['Included solutions']);
+    target.flowCount = cachedNumber(row['# of flows']);
+    target.codeAppCount = cachedNumber(row['# of Code Apps']);
+    target.canvasAppCount = cachedNumber(row['# of Canvas Apps']);
+    target.modelDrivenAppCount = cachedNumber(row['# of Model Driven Apps']);
+    target.aiModelCount = cachedNumber(row['# of AI models']);
+    target.copilotStudioAgentCount = cachedNumber(row['# of Copilot Studio Agents']);
+    if (Object.prototype.hasOwnProperty.call(row, 'Custom Dataverse tables')) {
+      target.dataverseTableCount = cachedNumber(row['Custom Dataverse tables']);
+    }
+  }
+
+  const missingCustomTableCounts = [...environments.values()].filter((environment) =>
+    environment.dataverseTableCount === null && environment.environmentUrl
+  );
+  for (const environment of missingCustomTableCounts) {
+    try {
+      environment.dataverseTableCount = await countCustomDataverseTablesForEnvironment(environment.environmentUrl, accountHomeId);
+      await delay(450);
+    } catch {
+      environment.dataverseTableCount = 0;
+    }
+  }
+
+  const modelMix = new Map();
+  for (const row of aiRaw) {
+    const model = String(row.Model || '').trim() || 'Unspecified model';
+    modelMix.set(model, (modelMix.get(model) || 0) + 1);
+  }
+  const rows = [...environments.values()]
+    .map((environment) => ({ ...environment, dataverseTableCount: Number(environment.dataverseTableCount || 0) }))
+    .sort((left, right) => left.environmentDisplayName.localeCompare(right.environmentDisplayName));
+  if (!rows.length) {
+    return null;
+  }
+  return {
+    cached: true,
+    generatedAt: files[0]?.createdAt || new Date().toISOString(),
+    rows,
+    modelMix: [...modelMix.entries()]
+      .map(([model, eventCount]) => ({ model, eventCount }))
+      .sort((left, right) => right.eventCount - left.eventCount || left.model.localeCompare(right.model)),
+  };
+}
+
+async function readCachedWorkbookRows(file) {
+  if (!file?.base64) {
+    return [];
+  }
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(Buffer.from(file.base64, 'base64'));
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet || worksheet.rowCount < 2) {
+      return [];
+    }
+    const headers = new Map();
+    worksheet.getRow(1).eachCell({ includeEmpty: false }, (cell, columnNumber) => {
+      headers.set(columnNumber, String(cell.text || '').trim());
+    });
+    const rows = [];
+    worksheet.eachRow({ includeEmpty: false }, (worksheetRow, rowNumber) => {
+      if (rowNumber === 1) return;
+      const row = {};
+      for (const [columnNumber, header] of headers) {
+        row[header] = cachedCellValue(worksheetRow.getCell(columnNumber).value);
+      }
+      rows.push(row);
+    });
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+function cachedCellValue(value) {
+  if (value && typeof value === 'object' && 'result' in value) {
+    return value.result;
+  }
+  return value ?? '';
+}
+
+function cachedNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+async function buildAutomatedReport(group, reportType, body = {}) {
+  const environments = normalizeAutomatedReportEnvironments(body.environments || body.environmentSelections || []);
+  if (!environments.length) {
+    throw new HttpError(400, 'Select at least one environment for the report.');
+  }
+
+  const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
+  const dateRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
+  if (group === 'ai-events') {
+    const rowsByEnvironment = await collectAutomatedAiEventRows(environments, dateRange, accountHomeId);
+    if (reportType === 'both') {
+      return {
+        files: [
+          await buildAutomatedAiEventTotalsWorkbook(rowsByEnvironment, dateRange),
+          await buildAutomatedAiEventRawWorkbook(rowsByEnvironment, dateRange),
+        ],
+      };
+    }
+    return reportType === 'totals'
+      ? buildAutomatedAiEventTotalsWorkbook(rowsByEnvironment, dateRange)
+      : buildAutomatedAiEventRawWorkbook(rowsByEnvironment, dateRange);
+  }
+
+  if (group === 'agent-sessions') {
+    const rowsByEnvironment = await collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId);
+    if (reportType === 'both') {
+      return {
+        files: [
+          await buildAutomatedAgentSessionTotalsWorkbook(rowsByEnvironment, dateRange),
+          await buildAutomatedAgentSessionRawWorkbook(rowsByEnvironment, dateRange),
+        ],
+      };
+    }
+    return reportType === 'totals'
+      ? buildAutomatedAgentSessionTotalsWorkbook(rowsByEnvironment, dateRange)
+      : buildAutomatedAgentSessionRawWorkbook(rowsByEnvironment, dateRange);
+  }
+
+  if (group === 'flow-runs') {
+    const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, getFlowRunDateRange({ range: '7d' }), accountHomeId);
+    if (reportType === 'both') {
+      return {
+        files: [
+          await buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment),
+          await buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment),
+        ],
+      };
+    }
+    return reportType === 'totals'
+      ? buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment)
+      : buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment);
+  }
+
+  const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
+  const rowsByEnvironment = await collectAutomatedSolutionRows(environments, solutionOptions, accountHomeId);
+  if (reportType === 'both') {
+    return {
+      files: [
+        await buildAutomatedSolutionTotalsWorkbook(rowsByEnvironment, solutionOptions),
+        await buildAutomatedSolutionRawWorkbook(rowsByEnvironment, solutionOptions),
+      ],
+    };
+  }
+  return reportType === 'totals'
+    ? buildAutomatedSolutionTotalsWorkbook(rowsByEnvironment, solutionOptions)
+    : buildAutomatedSolutionRawWorkbook(rowsByEnvironment, solutionOptions);
+}
+
+function getAutomatedReportDateRange(group, filters = {}) {
+  if (group === 'ai-events') {
+    return getAiEventDateRange(filters);
+  }
+  if (group === 'agent-sessions') {
+    return getAgentSessionDateRange(filters);
+  }
+  if (group === 'flow-runs') {
+    return getFlowRunDateRange({ range: '7d' });
+  }
+  return null;
+}
+
+function normalizeAutomatedReportEnvironments(environments) {
+  return (Array.isArray(environments) ? environments : [])
+    .map((environment) => {
+      const environmentName = String(environment?.environmentName || environment?.name || environment?.environmentId || '').trim();
+      const orgUrl = normalizeOrgUrl(environment?.orgUrl || '');
+      const displayName = String(environment?.displayName || environment?.friendlyName || environmentName || orgUrl).trim();
+      return {
+        environmentName,
+        environmentId: environmentName,
+        displayName,
+        orgUrl,
+      };
+    })
+    .filter((environment) => environment.environmentName && environment.orgUrl);
+}
+
+function normalizeAutomatedSolutionOptions(options = {}) {
+  const excludedPublishers = String(options.excludedPublishers || options.publisherExclusions || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  return {
+    excludedPublishers,
+    includeManaged: Boolean(options.includeManaged),
+    includeMicrosoftOwned: Boolean(options.includeMicrosoftOwned),
+  };
+}
+
+async function collectAutomatedAiEventRows(environments, dateRange, accountHomeId = '') {
+  const groups = [];
+  for (const environment of environments) {
+    const config = await getAiEventFieldConfig(environment.orgUrl, accountHomeId);
+    const selectFields = getAiEventSelectFields(config, { includePayload: false });
+    const data = await targetDvGetAll(
+      environment.orgUrl,
+      buildAiEventListPath(selectFields, dateRange),
+      { Prefer: AI_EVENT_BATCH_PREFER },
+      accountHomeId,
+    );
+    groups.push({
+      environment,
+      rows: data
+        .map((row) => normalizeAiEventSummary(row, config))
+        .filter((row) => Number(row.creditsConsumed || 0) > 0)
+        .map((row) => withReportEnvironmentFields(row, environment)),
+    });
+    await delay(450);
+  }
+  return groups;
+}
+
+async function collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId = '') {
+  const groups = [];
+  for (const environment of environments) {
+    const path = `${AGENT_SESSION_ENTITY_SET_NAME}?${buildAiEventQueryString({
+      '$select': 'conversationtranscriptid,conversationstarttime,name,metadata,_bot_conversationtranscriptid_value',
+      '$expand': 'bot_conversationtranscriptId($select=name)',
+      '$filter': `conversationstarttime ge ${toODataDateTime(dateRange.start)} and conversationstarttime lt ${toODataDateTime(dateRange.endExclusive)}`,
+      '$orderby': 'conversationstarttime desc,createdon desc',
+    })}`;
+    const data = await targetDvGetAll(environment.orgUrl, path, {
+      Prefer: `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=500`,
+    }, accountHomeId);
+    const rows = await mapWithConcurrency(data, 4, async (row) => ({
+      ...await normalizeAgentSessionSummary(row, environment.orgUrl, accountHomeId),
+      ...reportEnvironmentFields(environment),
+    }));
+    groups.push({ environment, rows });
+    await delay(450);
+  }
+  return groups;
+}
+
+async function collectAutomatedFlowRunRows(environments, dateRange, accountHomeId = '') {
+  const groups = [];
+  for (const environment of environments) {
+    const data = await targetDvGetAll(
+      environment.orgUrl,
+      buildFlowRunListPath(dateRange),
+      { Prefer: FLOW_RUN_PREFER },
+      accountHomeId,
+    );
+    groups.push({
+      environment,
+      rows: data.map((row) => withReportEnvironmentFields(
+        normalizeFlowRunSummary(row, environment.environmentName),
+        environment,
+      )),
+    });
+    await delay(450);
+  }
+  return groups;
+}
+
+async function collectAutomatedSolutionRows(environments, options, accountHomeId = '') {
+  const groups = [];
+  for (const environment of environments) {
+    const allSolutions = await listSolutionsForEnvironment(environment.orgUrl, accountHomeId);
+    const filteredSolutions = allSolutions.filter((solution) => shouldIncludeAutomatedSolution(solution, options));
+    const components = await listSolutionComponentsForEnvironment(
+      environment.orgUrl,
+      filteredSolutions.map((solution) => solution.solutionid),
+      accountHomeId,
+    );
+    const canvasAppTypes = await listCanvasAppTypesForEnvironment(
+      environment.orgUrl,
+      components.filter((component) => Number(component.componenttype) === 300).map((component) => component.objectid),
+      accountHomeId,
+    );
+    const typedComponents = components.map((component) => {
+      if (Number(component.componenttype) !== 300 || Number(canvasAppTypes.get(normalizeGuid(component.objectid))?.canvasapptype) !== 4) {
+        return component;
+      }
+      return { ...component, typeLabel: 'Code App' };
+    });
+    const componentsBySolution = groupSolutionComponentsBySolution(typedComponents);
+    const customTableCount = await countCustomDataverseTablesForEnvironment(environment.orgUrl, accountHomeId);
+    groups.push({
+      environment,
+      rows: filteredSolutions.map((solution) => ({
+        ...solution,
+        ...solutionReportCountFields(componentsBySolution.get(normalizeGuid(solution.solutionid)) || []),
+        ...reportEnvironmentFields(environment),
+      })),
+      totalBeforeFilters: allSolutions.length,
+      customTableCount,
+    });
+    await delay(450);
+  }
+  return groups;
+}
+
+async function countCustomDataverseTablesForEnvironment(orgUrl, accountHomeId = '') {
+  const data = await targetDvGetAll(
+    orgUrl,
+    'EntityDefinitions?$select=LogicalName,SchemaName,IsIntersect,IsCustomEntity',
+    {},
+    accountHomeId,
+  );
+  return data.filter((table) =>
+    table.LogicalName && table.SchemaName && !table.IsIntersect && Boolean(table.IsCustomEntity)
+  ).length;
+}
+
+async function listCanvasAppTypesForEnvironment(orgUrl, canvasAppIds, accountHomeId = '') {
+  const ids = [...new Set(canvasAppIds.map((value) => normalizeGuid(value)).filter(Boolean))];
+  if (!ids.length) {
+    return new Map();
+  }
+  const pages = [];
+  for (const chunk of chunkArray(ids, 20)) {
+    const filter = chunk.map((canvasAppId) => `canvasappid eq ${canvasAppId}`).join(' or ');
+    pages.push(...await targetDvGetAll(
+      orgUrl,
+      `canvasapps?$select=canvasappid,canvasapptype&$filter=${filter}`,
+      {},
+      accountHomeId,
+    ));
+  }
+  return new Map(pages.map((app) => [normalizeGuid(app.canvasappid), app]));
+}
+
+async function buildReportsSummary(body = {}) {
+  const environments = normalizeAutomatedReportEnvironments(body.environments || body.environmentSelections || []);
+  if (!environments.length) {
+    throw new HttpError(400, 'Select at least one environment for the reports dashboard.');
+  }
+
+  const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
+  const aiEventDateRange = getAiEventDateRange({ range: 'month' });
+  const agentSessionDateRange = getAgentSessionDateRange({ range: 'month' });
+  const flowRunDateRange = getFlowRunDateRange({ range: '7d' });
+  // Keep the cross-environment dashboard deliberately rate-limited. Each collector
+  // already walks environments sequentially with a short pause between calls.
+  const aiEventGroups = await collectAutomatedAiEventRows(environments, aiEventDateRange, accountHomeId);
+  const agentSessionGroups = await collectAutomatedAgentSessionRows(environments, agentSessionDateRange, accountHomeId);
+  const flowRunGroups = await collectAutomatedFlowRunRows(environments, flowRunDateRange, accountHomeId);
+  const solutionGroups = await collectAutomatedSolutionRows(environments, {
+    excludedPublishers: [],
+    includeManaged: true,
+    includeMicrosoftOwned: true,
+  }, accountHomeId);
+  const groupRowsByEnvironment = (groups) => new Map(groups.map((group) => [group.environment.environmentId, group.rows]));
+  const aiEventsByEnvironment = groupRowsByEnvironment(aiEventGroups);
+  const sessionsByEnvironment = groupRowsByEnvironment(agentSessionGroups);
+  const flowRunsByEnvironment = groupRowsByEnvironment(flowRunGroups);
+  const solutionsByEnvironment = groupRowsByEnvironment(solutionGroups);
+  const customTableCounts = new Map(solutionGroups.map((group) => [group.environment.environmentId, group.customTableCount]));
+  const modelMix = new Map();
+
+  const rows = environments.map((environment) => {
+    const aiEvents = aiEventsByEnvironment.get(environment.environmentId) || [];
+    const flowRuns = flowRunsByEnvironment.get(environment.environmentId) || [];
+    const solutionRows = solutionsByEnvironment.get(environment.environmentId) || [];
+    for (const event of aiEvents) {
+      const model = String(event.model || '').trim() || 'Unspecified model';
+      const current = modelMix.get(model) || { model, eventCount: 0 };
+      current.eventCount += 1;
+      modelMix.set(model, current);
+    }
+    const aiBuilderCredits = sumBy(aiEvents.filter((event) => String(event.creditType || '').trim().toLowerCase() === 'ai builder'), 'creditsConsumed');
+    const copilotStudioCredits = sumBy(aiEvents.filter((event) => String(event.creditType || '').trim().toLowerCase() === 'copilot studio'), 'creditsConsumed');
+    const totalRuns = flowRuns.length;
+    const successfulRuns = flowRuns.filter(isSuccessfulFlowRun).length;
+    const failedRuns = flowRuns.filter(isFailedFlowRun).length;
+    const componentTotals = sumSolutionReportCountFields(solutionRows);
+    return {
+      environmentDisplayName: environment.displayName,
+      environmentId: environment.environmentId,
+      flowRuns: {
+        total: totalRuns,
+        successful: successfulRuns,
+        failed: failedRuns,
+        successRate: totalRuns ? successfulRuns / totalRuns : 0,
+        failureRate: totalRuns ? failedRuns / totalRuns : 0,
+      },
+      aiFlow: {
+        aiBuilderCredits,
+        copilotStudioCredits,
+      },
+      copilotSessions: (sessionsByEnvironment.get(environment.environmentId) || []).length,
+      solutionCount: solutionRows.length,
+      flowCount: Number(componentTotals['# of flows'] || 0),
+      codeAppCount: Number(componentTotals['# of Code Apps'] || 0),
+      canvasAppCount: Number(componentTotals['# of Canvas Apps'] || 0),
+      modelDrivenAppCount: Number(componentTotals['# of Model Driven Apps'] || 0),
+      aiModelCount: Number(componentTotals['# of AI models'] || 0),
+      dataverseTableCount: Number(customTableCounts.get(environment.environmentId) || 0),
+      copilotStudioAgentCount: Number(componentTotals['# of Copilot Studio Agents'] || 0),
+    };
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    dateRanges: {
+      aiFlow: aiEventDateRange,
+      copilotSessions: agentSessionDateRange,
+      flowRuns: flowRunDateRange,
+    },
+    rows,
+    modelMix: [...modelMix.values()].sort((left, right) => right.eventCount - left.eventCount || left.model.localeCompare(right.model)),
+  };
+}
+
+function sumBy(rows, field) {
+  return rows.reduce((total, row) => total + Number(row?.[field] || 0), 0);
+}
+
+async function listSolutionsForEnvironment(orgUrl, accountHomeId = '') {
+  const data = await targetDvGetAll(
+    orgUrl,
+    'solutions?$select=solutionid,friendlyname,uniquename,version,ismanaged,isvisible,createdon,modifiedon,_publisherid_value&$expand=publisherid($select=publisherid,friendlyname,uniquename)&$orderby=friendlyname',
+    {},
+    accountHomeId,
+  );
+  return data.map((solution) => ({
+    solutionid: solution.solutionid,
+    friendlyname: solution.friendlyname,
+    uniquename: solution.uniquename,
+    version: solution.version,
+    ismanaged: Boolean(solution.ismanaged),
+    isvisible: solution.isvisible,
+    createdon: solution.createdon,
+    modifiedon: solution.modifiedon,
+    publisher: {
+      publisherid: solution.publisherid?.publisherid || solution._publisherid_value || '',
+      friendlyname: solution.publisherid?.friendlyname || solution['_publisherid_value@OData.Community.Display.V1.FormattedValue'] || '',
+      uniquename: solution.publisherid?.uniquename || '',
+    },
+  }));
+}
+
+async function listSolutionComponentsForEnvironment(orgUrl, solutionIds, accountHomeId = '') {
+  const normalizedIds = [...new Set(solutionIds.map((value) => normalizeGuid(value)).filter(Boolean))];
+  if (!normalizedIds.length) {
+    return [];
+  }
+
+  const chunks = chunkArray(normalizedIds, 20);
+  const pages = [];
+  for (const chunk of chunks) {
+    const filter = chunk.map((solutionId) => `_solutionid_value eq ${solutionId}`).join(' or ');
+    const rows = await targetDvGetAll(
+      orgUrl,
+      `solutioncomponents?$select=_solutionid_value,solutioncomponentid,componenttype,objectid&$filter=${filter}`,
+      { Prefer: `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}"` },
+      accountHomeId,
+    );
+    pages.push(...rows);
+    await delay(250);
+  }
+  return pages.map((component) => ({
+    solutionid: component._solutionid_value,
+    solutioncomponentid: component.solutioncomponentid,
+    componenttype: Number(component.componenttype),
+    objectid: component.objectid || '',
+    typeLabel: component[`componenttype@${ODATA_FORMATTED_VALUE_ANNOTATION}`] || SOLUTION_COMPONENT_TYPES[Number(component.componenttype)] || '',
+  }));
+}
+
+function groupSolutionComponentsBySolution(components) {
+  const componentsBySolution = new Map();
+  for (const component of components) {
+    const solutionId = normalizeGuid(component.solutionid);
+    if (!solutionId) {
+      continue;
+    }
+    if (!componentsBySolution.has(solutionId)) {
+      componentsBySolution.set(solutionId, []);
+    }
+    componentsBySolution.get(solutionId).push(component);
+  }
+  return componentsBySolution;
+}
+
+function shouldIncludeAutomatedSolution(solution, options) {
+  const publisherNames = [
+    solution.publisher?.friendlyname,
+    solution.publisher?.uniquename,
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  if (!options.includeManaged && solution.ismanaged) {
+    return false;
+  }
+  if (!options.includeMicrosoftOwned && publisherNames.some((name) => isDefaultExcludedPublisher(name))) {
+    return false;
+  }
+  if (options.excludedPublishers.some((excluded) => publisherNames.includes(excluded))) {
+    return false;
+  }
+  return true;
+}
+
+function withReportEnvironmentFields(row, environment) {
+  return {
+    ...row,
+    ...reportEnvironmentFields(environment),
+  };
+}
+
+function reportEnvironmentFields(environment) {
+  return {
+    environmentDisplayName: environment.displayName || '',
+    environmentId: environment.environmentId || environment.environmentName || '',
+    environmentUrl: environment.orgUrl || '',
+  };
+}
+
 function getAgentSessionDateRange(filters = {}) {
   return getAiEventDateRange({
     range: filters.range || '7d',
@@ -4667,7 +5458,7 @@ function buildFlowRunListPath(dateRange) {
   })}`;
 }
 
-function normalizeFlowRunSummary(row) {
+function normalizeFlowRunSummary(row, environmentName = selected.environmentName) {
   const durationMs = normalizeFlowRunDuration(row);
   const resourceId = String(row.resourceid || '').trim();
   const name = String(row.name || '').trim();
@@ -4687,7 +5478,7 @@ function normalizeFlowRunSummary(row) {
     durationMs,
     resourceId,
     workflowId: String(row.workflowid || row._workflow_value || '').trim(),
-    openUrl: makeFlowRunUrl(selected.environmentName, resourceId, name),
+    openUrl: makeFlowRunUrl(environmentName, resourceId, name),
   };
 }
 
@@ -4728,6 +5519,14 @@ function formatFlowRunDateTime(value) {
   const minutes = String(date.getMinutes()).padStart(2, '0');
   const seconds = String(date.getSeconds()).padStart(2, '0');
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
+function formatTranscriptDateTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleString();
 }
 
 function makeFlowRunUrl(environmentName, resourceId, runName) {
@@ -4924,6 +5723,362 @@ async function exportAgentSessionTotalsWorkbook(rows) {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
+async function buildAutomatedAiEventTotalsWorkbook(groups, dateRange) {
+  const rows = groups.map(({ environment, rows: eventRows }) => {
+    let aiBuilderCredits = 0;
+    let copilotStudioCredits = 0;
+    let totalCredits = 0;
+    for (const row of eventRows) {
+      const credits = Number(row.creditsConsumed || 0);
+      const creditType = String(row.creditType || '').trim().toLowerCase();
+      totalCredits += credits;
+      if (creditType === 'ai builder') {
+        aiBuilderCredits += credits;
+      }
+      if (creditType === 'copilot studio') {
+        copilotStudioCredits += credits;
+      }
+    }
+    return {
+      'Environment display name': environment.displayName,
+      'Environment id': environment.environmentId,
+      'Environment url': environment.orgUrl,
+      'Count of Events': eventRows.length,
+      'Sum AI Builder Credits used': aiBuilderCredits,
+      'Sum Copilot Studio credits used': copilotStudioCredits,
+      'Total credits consumed': totalCredits,
+    };
+  });
+  return {
+    filename: `ai-flow-events-totals-by-environment-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
+    bytes: await exportSimpleWorkbook('AI Flow Totals', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Count of Events', 18],
+      ['Sum AI Builder Credits used', 28],
+      ['Sum Copilot Studio credits used', 32],
+      ['Total credits consumed', 24],
+    ], rows, { numericColumns: [4, 5, 6, 7] }),
+  };
+}
+
+async function buildAutomatedAiEventRawWorkbook(groups, dateRange) {
+  const rows = groups.flatMap(({ rows: eventRows }) => eventRows.map((row) => ({
+    'Environment display name': row.environmentDisplayName,
+    'Environment id': row.environmentId,
+    'Environment url': row.environmentUrl,
+    Owner: aiEventExportText(row.ownerName),
+    'Copilot Or AI Builder Credits': aiEventExportText(row.creditType),
+    'Credits Consumed': Number(row.creditsConsumed || 0),
+    'Data Type': aiEventExportText(row.dataType),
+    Source: aiEventExportText(row.source),
+    'Tool name': aiEventExportText(row.toolName),
+    Model: aiEventExportText(row.model),
+    Created: aiEventExportText(row.createdOn),
+  })));
+  return {
+    filename: `ai-flow-events-raw-stacked-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
+    bytes: await exportSimpleWorkbook('AI Flow Raw', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Owner', 28],
+      ['Copilot Or AI Builder Credits', 32],
+      ['Credits Consumed', 18],
+      ['Data Type', 22],
+      ['Source', 24],
+      ['Tool name', 34],
+      ['Model', 28],
+      ['Created', 22],
+    ], rows, { numericColumns: [6] }),
+  };
+}
+
+async function buildAutomatedAgentSessionTotalsWorkbook(groups, dateRange) {
+  const rows = groups.map(({ environment, rows: sessionRows }) => ({
+    'Environment display name': environment.displayName,
+    'Environment id': environment.environmentId,
+    'Environment url': environment.orgUrl,
+    'Total Sessions': sessionRows.length,
+    'Distinct Agents': new Set(sessionRows.map((row) => String(row.agentName || 'Unknown agent'))).size,
+  }));
+  return {
+    filename: `agent-sessions-totals-by-environment-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
+    bytes: await exportSimpleWorkbook('Agent Session Totals', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Total Sessions', 18],
+      ['Distinct Agents', 18],
+    ], rows, { numericColumns: [4, 5] }),
+  };
+}
+
+async function buildAutomatedAgentSessionRawWorkbook(groups, dateRange) {
+  const rows = groups.flatMap(({ rows: sessionRows }) => sessionRows.map((row) => ({
+    'Environment display name': row.environmentDisplayName,
+    'Environment id': row.environmentId,
+    'Environment url': row.environmentUrl,
+    'Agent Name': String(row.agentName || 'Unknown agent').trim() || 'Unknown agent',
+    'Conversation Start Time': formatTranscriptDateTime(row.conversationStartTime),
+    'Conversation Id': row.conversationId || '',
+  })));
+  return {
+    filename: `agent-sessions-raw-stacked-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
+    bytes: await exportSimpleWorkbook('Agent Sessions Raw', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Agent Name', 36],
+      ['Conversation Start Time', 24],
+      ['Conversation Id', 38],
+    ], rows),
+  };
+}
+
+async function buildAutomatedFlowRunTotalsWorkbook(groups) {
+  const rows = groups.map(({ environment, rows: flowRuns }) => {
+    const successfulRuns = flowRuns.filter(isSuccessfulFlowRun).length;
+    const failedRuns = flowRuns.filter(isFailedFlowRun).length;
+    const totalRuns = flowRuns.length;
+    return {
+      'Environment display name': environment.displayName,
+      'Environment id': environment.environmentId,
+      'Environment url': environment.orgUrl,
+      'Total flow runs': totalRuns,
+      'Successful flow runs': successfulRuns,
+      'Failed flow runs': failedRuns,
+      'Success rate': totalRuns ? successfulRuns / totalRuns : 0,
+      'Failure rate': totalRuns ? failedRuns / totalRuns : 0,
+    };
+  });
+  return {
+    filename: `flow-runs-totals-by-environment-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
+    bytes: await exportSimpleWorkbook('Flow Run Totals', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Total flow runs', 18],
+      ['Successful flow runs', 22],
+      ['Failed flow runs', 18],
+      ['Success rate', 16],
+      ['Failure rate', 16],
+    ], rows, { numericColumns: [4, 5, 6, 7, 8], percentageColumns: [7, 8] }),
+  };
+}
+
+async function buildAutomatedFailedFlowRunsWorkbook(groups) {
+  const rows = groups.flatMap(({ rows: flowRuns }) => flowRuns
+    .filter(isFailedFlowRun)
+    .map((row) => ({
+      'Environment display name': row.environmentDisplayName,
+      'Environment id': row.environmentId,
+      'Environment url': row.environmentUrl,
+      'Flow name': row.flowName || '',
+      Trigger: row.triggerType || '',
+      Status: row.status || '',
+      'Error code': row.errorCode || '',
+      'Error message': row.errorMessage || '',
+      'Start time': row.startTimeDisplay || '',
+      'End time': row.endTimeDisplay || '',
+      'Duration seconds': Math.round(Number(row.durationMs || 0) / 1000),
+      'Flow run URL': row.openUrl || '',
+    })));
+  return {
+    filename: `flow-runs-failed-raw-stacked-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
+    bytes: await exportSimpleWorkbook('Failed Flow Runs', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Flow name', 34],
+      ['Trigger', 18],
+      ['Status', 18],
+      ['Error code', 22],
+      ['Error message', 56],
+      ['Start time', 22],
+      ['End time', 22],
+      ['Duration seconds', 18],
+      ['Flow run URL', 92],
+    ], rows, { numericColumns: [11] }),
+  };
+}
+
+function isSuccessfulFlowRun(row) {
+  return String(row?.status || '').trim().toLowerCase() === 'succeeded';
+}
+
+function isFailedFlowRun(row) {
+  const status = String(row?.status || '').trim().toLowerCase();
+  return status.includes('fail') || status.includes('cancel') || status.includes('time out') || status.includes('timedout');
+}
+
+async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
+  const rows = groups.map(({ environment, rows: solutionRows, totalBeforeFilters, customTableCount }) => {
+    const publishers = new Set(solutionRows.map((solution) => solution.publisher?.friendlyname || solution.publisher?.uniquename || '').filter(Boolean));
+    const componentTotals = sumSolutionReportCountFields(solutionRows);
+    return {
+      'Environment display name': environment.displayName,
+      'Environment id': environment.environmentId,
+      'Environment url': environment.orgUrl,
+      'Included solutions': solutionRows.length,
+      'Managed solutions': solutionRows.filter((solution) => solution.ismanaged).length,
+      'Unmanaged solutions': solutionRows.filter((solution) => !solution.ismanaged).length,
+      'Visible solutions': solutionRows.filter((solution) => solution.isvisible !== false).length,
+      'Hidden solutions': solutionRows.filter((solution) => solution.isvisible === false).length,
+      'Distinct publishers': publishers.size,
+      ...componentTotals,
+      'Custom Dataverse tables': Number(customTableCount || 0),
+      'Before filters': totalBeforeFilters,
+      'Publisher exclusions': options.excludedPublishers.join(', '),
+      'Managed included': options.includeManaged ? 'Yes' : 'No',
+      'Microsoft owned included': options.includeMicrosoftOwned ? 'Yes' : 'No',
+    };
+  });
+  return {
+    filename: `solutions-totals-by-environment-${safeFilename(new Date().toISOString().slice(0, 10))}.xlsx`,
+    bytes: await exportSimpleWorkbook('Solution Totals', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Included solutions', 18],
+      ['Managed solutions', 18],
+      ['Unmanaged solutions', 20],
+      ['Visible solutions', 18],
+      ['Hidden solutions', 18],
+      ['Distinct publishers', 20],
+      ['# of flows', 14],
+      ['# of Code Apps', 16],
+      ['# of Canvas Apps', 18],
+      ['# of Model Driven Apps', 22],
+      ['# of Copilot Studio Agents', 24],
+      ['# of Dataverse tables', 20],
+      ['Custom Dataverse tables', 22],
+      ['# of AI models', 16],
+      ['# of connection references', 23],
+      ['# of environment variables', 23],
+      ['# of dataflows', 16],
+      ['Before filters', 16],
+      ['Publisher exclusions', 34],
+      ['Managed included', 18],
+      ['Microsoft owned included', 24],
+    ], rows, { numericColumns: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] }),
+  };
+}
+
+async function buildAutomatedSolutionRawWorkbook(groups, options) {
+  const rows = groups.flatMap(({ rows: solutionRows }) => solutionRows.map((solution) => ({
+    'Environment display name': solution.environmentDisplayName,
+    'Environment id': solution.environmentId,
+    'Environment url': solution.environmentUrl,
+    'Solution name': solution.friendlyname || solution.uniquename || '',
+    'Solution unique name': solution.uniquename || '',
+    Version: solution.version || '',
+    Managed: solution.ismanaged ? 'Yes' : 'No',
+    Visible: solution.isvisible === false ? 'No' : 'Yes',
+    'Publisher display name': solution.publisher?.friendlyname || '',
+    'Publisher unique name': solution.publisher?.uniquename || '',
+    'Created on': formatAiEventDate(solution.createdon),
+    'Modified on': formatAiEventDate(solution.modifiedon),
+    '# of flows': Number(solution['# of flows'] || 0),
+    '# of Code Apps': Number(solution['# of Code Apps'] || 0),
+    '# of Canvas Apps': Number(solution['# of Canvas Apps'] || 0),
+    '# of Model Driven Apps': Number(solution['# of Model Driven Apps'] || 0),
+    '# of Copilot Studio Agents': Number(solution['# of Copilot Studio Agents'] || 0),
+    '# of Dataverse tables': Number(solution['# of Dataverse tables'] || 0),
+    '# of AI models': Number(solution['# of AI models'] || 0),
+    '# of connection references': Number(solution['# of connection references'] || 0),
+    '# of environment variables': Number(solution['# of environment variables'] || 0),
+    '# of dataflows': Number(solution['# of dataflows'] || 0),
+  })));
+  return {
+    filename: `solutions-raw-stacked-${safeFilename(new Date().toISOString().slice(0, 10))}.xlsx`,
+    bytes: await exportSimpleWorkbook('Solutions Raw', [
+      ['Environment display name', 30],
+      ['Environment id', 38],
+      ['Environment url', 44],
+      ['Solution name', 32],
+      ['Solution unique name', 36],
+      ['Version', 18],
+      ['Managed', 12],
+      ['Visible', 12],
+      ['Publisher display name', 28],
+      ['Publisher unique name', 28],
+      ['Created on', 22],
+      ['Modified on', 22],
+      ['# of flows', 14],
+      ['# of Code Apps', 16],
+      ['# of Canvas Apps', 18],
+      ['# of Model Driven Apps', 22],
+      ['# of Copilot Studio Agents', 24],
+      ['# of Dataverse tables', 20],
+      ['# of AI models', 16],
+      ['# of connection references', 23],
+      ['# of environment variables', 23],
+      ['# of dataflows', 16],
+    ], rows, { numericColumns: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22] }),
+  };
+}
+
+function sumSolutionReportCountFields(rows) {
+  const fields = [
+    '# of flows',
+    '# of Code Apps',
+    '# of Canvas Apps',
+    '# of Model Driven Apps',
+    '# of Copilot Studio Agents',
+    '# of Dataverse tables',
+    '# of AI models',
+    '# of connection references',
+    '# of environment variables',
+    '# of dataflows',
+  ];
+  return Object.fromEntries(fields.map((field) => [
+    field,
+    rows.reduce((total, row) => total + Number(row[field] || 0), 0),
+  ]));
+}
+
+async function exportSimpleWorkbook(sheetName, columns, rows, options = {}) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet(sheetName, {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  worksheet.columns = columns.map(([header, width]) => ({ header, key: header, width }));
+  worksheet.addRows(rows);
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: columns.length },
+  };
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    cell.border = bottomBorder();
+  });
+  for (let rowNumber = 2; rowNumber <= rows.length + 1; rowNumber += 1) {
+    worksheet.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+  }
+  for (const columnNumber of options.numericColumns || []) {
+    worksheet.getColumn(columnNumber).numFmt = '0.##';
+  }
+  for (const columnNumber of options.percentageColumns || []) {
+    worksheet.getColumn(columnNumber).numFmt = '0.0%';
+  }
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function dateRangeLabel(dateRange) {
+  if (!dateRange?.startDate || !dateRange?.endDate) {
+    return 'report';
+  }
+  return `${dateRange.startDate}-to-${dateRange.endDate}`;
+}
+
 async function getAiEventDetail(aiEventId) {
   const config = await getAiEventFieldConfig();
   const selectFields = getAiEventSelectFields(config, { includePayload: true });
@@ -4985,17 +6140,17 @@ async function getAgentSessionDetail(conversationTranscriptId) {
   };
 }
 
-async function normalizeAgentSessionSummary(row) {
+async function normalizeAgentSessionSummary(row, orgUrl = selected.orgUrl, accountHomeId = '') {
   const metadata = parseTranscriptMetadata(row.metadata);
   const redactionState = { count: 0, types: new Set() };
   return {
     conversationId: normalizeGuid(row.conversationtranscriptid) || '',
     conversationStartTime: row.conversationstarttime || '',
-    agentName: sanitizeTranscriptText(await resolveTranscriptAgentName(row, metadata), redactionState),
+    agentName: sanitizeTranscriptText(await resolveTranscriptAgentName(row, metadata, null, orgUrl, accountHomeId), redactionState),
   };
 }
 
-async function resolveTranscriptAgentName(row, metadata, transcript = null) {
+async function resolveTranscriptAgentName(row, metadata, transcript = null, orgUrl = selected.orgUrl, accountHomeId = '') {
   const expandedBotName = String(row?.bot_conversationtranscriptId?.name || row?.bot_conversationtranscriptid?.name || '').trim();
   if (expandedBotName) {
     return expandedBotName;
@@ -5022,7 +6177,7 @@ async function resolveTranscriptAgentName(row, metadata, transcript = null) {
     row?.metadata,
   ]);
   for (const botId of botIds) {
-    const botName = await lookupTranscriptBotName(botId);
+    const botName = await lookupTranscriptBotName(botId, orgUrl, accountHomeId);
     if (botName) {
       return botName;
     }
@@ -5108,22 +6263,25 @@ function extractTranscriptBotIds(values) {
   return ids;
 }
 
-async function lookupTranscriptBotName(botId) {
+async function lookupTranscriptBotName(botId, orgUrl = selected.orgUrl, accountHomeId = '') {
   const id = normalizeGuid(botId);
   if (!id) {
     return '';
   }
-  if (AGENT_SESSION_BOT_NAME_CACHE.has(id)) {
-    return AGENT_SESSION_BOT_NAME_CACHE.get(id) || '';
+  const cacheKey = `${normalizeOrgUrl(orgUrl)}:${id}`;
+  if (AGENT_SESSION_BOT_NAME_CACHE.has(cacheKey)) {
+    return AGENT_SESSION_BOT_NAME_CACHE.get(cacheKey) || '';
   }
   try {
-    const response = await dvGet(`bots(${id})?$select=botid,name`);
+    const response = normalizeOrgUrl(orgUrl) === selected.orgUrl
+      ? await dvGet(`bots(${id})?$select=botid,name`)
+      : await targetDvGet(orgUrl, `bots(${id})?$select=botid,name`, accountHomeId);
     const name = String(response?.name || '').trim();
-    AGENT_SESSION_BOT_NAME_CACHE.set(id, name);
+    AGENT_SESSION_BOT_NAME_CACHE.set(cacheKey, name);
     return name;
   } catch (error) {
     console.error('Could not resolve bot name for transcript:', id, error);
-    AGENT_SESSION_BOT_NAME_CACHE.set(id, '');
+    AGENT_SESSION_BOT_NAME_CACHE.set(cacheKey, '');
     return '';
   }
 }
@@ -5310,8 +6468,8 @@ function recordTranscriptRedaction(state, type) {
   state.types.add(type);
 }
 
-async function getAiEventFieldConfig() {
-  const cacheKey = selected.orgUrl;
+async function getAiEventFieldConfig(orgUrl = selected.orgUrl, accountHomeId = '') {
+  const cacheKey = normalizeOrgUrl(orgUrl);
   const cached = aiEventMetadataCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -5319,10 +6477,11 @@ async function getAiEventFieldConfig() {
 
   const response = await dvRequestUrl(
     'GET',
-    `${selected.orgUrl}/api/data/v9.2/EntityDefinitions(LogicalName='${AI_EVENT_ENTITY_LOGICAL_NAME}')/Attributes?$select=LogicalName,DisplayName,AttributeType,IsValidForRead`,
+    `${cacheKey}/api/data/v9.2/EntityDefinitions(LogicalName='${AI_EVENT_ENTITY_LOGICAL_NAME}')/Attributes?$select=LogicalName,DisplayName,AttributeType,IsValidForRead`,
     undefined,
     {},
-    selected.orgUrl,
+    cacheKey,
+    accountHomeId,
   );
   const config = resolveAiEventFieldConfig(response.data.value || []);
   aiEventMetadataCache.set(cacheKey, config);
@@ -6098,9 +7257,21 @@ function dvRequest(method, path, body, extraHeaders = {}) {
   return dvRequestUrl(method, `${selected.orgUrl}/api/data/v9.2/${path}`, body, extraHeaders);
 }
 
-async function targetDvGet(orgUrl, path) {
-  const response = await targetDvRequest('GET', orgUrl, path);
+async function targetDvGet(orgUrl, path, accountHomeId = '') {
+  const response = await targetDvRequest('GET', orgUrl, path, undefined, accountHomeId);
   return response.data;
+}
+
+async function targetDvGetAll(orgUrl, path, extraHeaders = {}, accountHomeId = '') {
+  const rows = [];
+  const normalizedOrgUrl = normalizeOrgUrl(orgUrl);
+  let next = `${normalizedOrgUrl}/api/data/v9.2/${path}`;
+  while (next) {
+    const response = await dvRequestUrl('GET', next, undefined, extraHeaders, normalizedOrgUrl, accountHomeId);
+    rows.push(...(response.data.value || []));
+    next = response.data['@odata.nextLink'] || '';
+  }
+  return rows;
 }
 
 async function targetDvPost(orgUrl, path, body) {
@@ -6108,14 +7279,15 @@ async function targetDvPost(orgUrl, path, body) {
   return response.data;
 }
 
-function targetDvRequest(method, orgUrl, path, body) {
-  return dvRequestUrl(method, `${normalizeOrgUrl(orgUrl)}/api/data/v9.2/${path}`, body, {}, normalizeOrgUrl(orgUrl));
+function targetDvRequest(method, orgUrl, path, body, accountHomeId = '') {
+  return dvRequestUrl(method, `${normalizeOrgUrl(orgUrl)}/api/data/v9.2/${path}`, body, {}, normalizeOrgUrl(orgUrl), accountHomeId);
 }
 
-async function dvRequestUrl(method, url, body, extraHeaders = {}, authResource = selected.orgUrl) {
+async function dvRequestUrl(method, url, body, extraHeaders = {}, authResource = selected.orgUrl, accountHomeId = '') {
   try {
     return await apiHttpRequest(method, url, {
       authResource,
+      accountHomeId,
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
@@ -6132,7 +7304,9 @@ async function dvRequestUrl(method, url, body, extraHeaders = {}, authResource =
 
 async function apiHttpRequest(method, url, options = {}) {
   const authResource = options.authResource || selected.orgUrl;
-  const accessToken = await getAccessTokenForSelectedAccount(authResource);
+  const accessToken = options.accountHomeId
+    ? await getAccessTokenForAccount(authResource, options.accountHomeId)
+    : await getAccessTokenForSelectedAccount(authResource);
   const response = await fetch(url, {
     method,
     headers: {
@@ -6522,6 +7696,10 @@ function chunkArray(values, size) {
   return chunks;
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function mapWithConcurrency(values, limit, mapper) {
   const results = new Array(values.length);
   let nextIndex = 0;
@@ -6556,6 +7734,10 @@ function safeFilename(value) {
   return String(value || 'security-role').replace(/[^\w.-]+/g, '-').replace(/^-|-$/g, '') || 'security-role';
 }
 
+function isDefaultExcludedPublisher(name) {
+  return /microsoft|dynamics/i.test(String(name || ''));
+}
+
 function contentType(path) {
   return {
     '.html': 'text/html; charset=utf-8',
@@ -6584,6 +7766,20 @@ function sendXlsx(res, status, filename, bytes) {
     'Content-Length': bytes.length,
   });
   res.end(bytes);
+}
+
+function sendAutomatedReportResponse(res, report) {
+  if (Array.isArray(report?.files)) {
+    sendJson(res, 200, {
+      files: report.files.map((file) => ({
+        filename: file.filename,
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        base64: Buffer.from(file.bytes).toString('base64'),
+      })),
+    });
+    return;
+  }
+  sendXlsx(res, 200, report.filename, report.bytes);
 }
 
 function sendZip(res, status, filename, bytes) {
