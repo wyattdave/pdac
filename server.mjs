@@ -98,6 +98,7 @@ const SOLUTION_COMPONENT_TYPES = {
   62: 'Site Map',
   66: 'Ribbon Customization',
   70: 'Field Security Profile',
+  80: 'Model-Driven App',
   90: 'Plugin Type',
   91: 'Plugin Assembly',
   92: 'SDK Message Processing Step',
@@ -107,6 +108,7 @@ const SOLUTION_COMPONENT_TYPES = {
   152: 'SLA',
   300: 'Canvas App',
   371: 'Connector',
+  372: 'Connection Reference',
   380: 'Environment Variable Definition',
   381: 'Environment Variable Value',
 };
@@ -139,6 +141,7 @@ const accountEnvironmentSelections = new Map();
 const importPackages = new Map();
 const componentTypeEntityCache = new Map();
 const aiEventMetadataCache = new Map();
+const automatedReportProgress = new Map();
 let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -149,6 +152,7 @@ const AI_EVENT_ENTITY_LOGICAL_NAME = 'msdyn_aievent';
 const AI_EVENT_ENTITY_SET_NAME = 'msdyn_aievents';
 const AGENT_SESSION_ENTITY_SET_NAME = 'conversationtranscripts';
 const AGENT_SESSION_PAGE_SIZE = 50;
+const AUTOMATED_SOLUTION_ENVIRONMENT_CONCURRENCY = 2;
 const AGENT_SESSION_BOT_NAME_CACHE = new Map();
 const ODATA_FORMATTED_VALUE_ANNOTATION = 'OData.Community.Display.V1.FormattedValue';
 const AI_EVENT_BATCH_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
@@ -612,12 +616,30 @@ async function handleApi(req, res) {
     return;
   }
 
+  const automatedReportProgressMatch = url.pathname.match(/^\/api\/automated-reports\/progress\/([A-Za-z0-9-]+)$/);
+  if (req.method === 'GET' && automatedReportProgressMatch) {
+    const progress = automatedReportProgress.get(automatedReportProgressMatch[1]);
+    if (!progress) {
+      throw new HttpError(404, 'Background report progress is not available.');
+    }
+    sendJson(res, 200, progress);
+    return;
+  }
+
   const automatedReportMatch = url.pathname.match(/^\/api\/automated-reports\/(ai-events|agent-sessions|solutions|flow-runs)\/(totals|raw|both)$/);
   if (req.method === 'POST' && automatedReportMatch) {
     const body = await readJson(req);
     await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
-    const report = await getOrBuildCachedAutomatedReport(automatedReportMatch[1], automatedReportMatch[2], body);
-    sendAutomatedReportResponse(res, report);
+    const progressId = String(body.reportRunId || '').trim();
+    setAutomatedReportProgress(progressId, { status: 'starting' });
+    try {
+      const report = await getOrBuildCachedAutomatedReport(automatedReportMatch[1], automatedReportMatch[2], body);
+      setAutomatedReportProgress(progressId, { status: 'complete' });
+      sendAutomatedReportResponse(res, report);
+    } catch (error) {
+      setAutomatedReportProgress(progressId, { status: 'error' });
+      throw error;
+    }
     return;
   }
 
@@ -1621,6 +1643,7 @@ function countSolutionReportComponents(components) {
   for (const component of components) {
     const componentType = Number(component.componenttype);
     const objectId = normalizeGuid(component.objectid) || `${componentType}:${counts.flows.size + counts.tables.size}`;
+    const logicalName = String(component.logicalName || component.recordLogicalName || '').toLowerCase();
     const typeLabel = String(component.typeLabel || SOLUTION_COMPONENT_TYPES[componentType] || '').toLowerCase();
 
     if (componentType === 29) {
@@ -1638,17 +1661,17 @@ function countSolutionReportComponents(components) {
       continue;
     }
 
-    if (typeLabel.includes('connection reference')) {
+    if (logicalName === 'connectionreference') {
       counts.connectionReferences.add(objectId);
       continue;
     }
 
-    if (typeLabel.includes('model driven app') || typeLabel.includes('model-driven app') || typeLabel.includes('app module')) {
+    if (componentType === 80 || logicalName === 'appmodule') {
       counts.modelDrivenApps.add(objectId);
       continue;
     }
 
-    if (typeLabel.includes('copilot') || typeLabel === 'bot' || typeLabel.includes(' bot')) {
+    if (logicalName === 'bot') {
       counts.copilotStudioAgents.add(objectId);
       continue;
     }
@@ -1663,12 +1686,12 @@ function countSolutionReportComponents(components) {
       continue;
     }
 
-    if (isAiModelComponent('', typeLabel)) {
+    if (isAiModelComponent(logicalName, '')) {
       counts.aiModels.add(objectId);
       continue;
     }
 
-    if (isDataflowComponent('', typeLabel)) {
+    if (isDataflowComponent(logicalName, '')) {
       counts.dataflows.add(objectId);
     }
   }
@@ -1767,9 +1790,13 @@ async function listCanvasAppsForReport(canvasAppIds) {
 function isAiModelComponent(logicalName, typeLabel) {
   return [logicalName, typeLabel].some((value) => {
     const text = String(value || '').toLowerCase();
-    return text === 'aimodel' ||
-      text === 'predictionmodel' ||
-      text === 'aibmodel' ||
+    const normalized = text.replace(/[^a-z0-9]/g, '');
+    return normalized === 'aimodel' ||
+      normalized.endsWith('aimodel') ||
+      normalized === 'predictionmodel' ||
+      normalized.endsWith('predictionmodel') ||
+      normalized === 'aibmodel' ||
+      normalized.endsWith('aibmodel') ||
       text === 'ai model' ||
       text === 'prediction model' ||
       text.includes('ai model');
@@ -2623,8 +2650,17 @@ async function resolveEntityForComponentType(componentType) {
     return environmentCache.get(normalizedComponentType);
   }
 
-  const data = await dvGet(`entities?$filter=objecttypecode eq ${normalizedComponentType}`);
-  const row = Array.isArray(data?.value) ? data.value[0] : data;
+  let row;
+  try {
+    const metadata = await dvGet(`EntityDefinitions?$select=LogicalName,EntitySetName,DisplayName&$filter=ObjectTypeCode eq ${normalizedComponentType}`);
+    row = Array.isArray(metadata?.value) ? metadata.value[0] : metadata;
+  } catch {
+    // Some solution component types are not exposed through EntityDefinitions.
+  }
+  if (!row) {
+    const data = await dvGet(`entities?$filter=objecttypecode eq ${normalizedComponentType}`);
+    row = Array.isArray(data?.value) ? data.value[0] : data;
+  }
   if (!row) {
     environmentCache.set(normalizedComponentType, {});
     return {};
@@ -2634,6 +2670,49 @@ async function resolveEntityForComponentType(componentType) {
     collection: row.collectionname || row.entitysetname || row.entitysetnameplural || '',
     typeLabel: row.originallocalizedname || row.localizedname || row.displayname || row.name || row.logicalname || '',
   };
+  environmentCache.set(normalizedComponentType, entity);
+  return entity;
+}
+
+async function resolveEntityForComponentTypeForEnvironment(orgUrl, componentType, accountHomeId = '') {
+  const normalizedComponentType = Number(componentType);
+  const environmentKey = normalizeOrgUrl(orgUrl || '') || 'default';
+  if (!normalizedComponentType) {
+    return {};
+  }
+  let environmentCache = componentTypeEntityCache.get(environmentKey);
+  if (!environmentCache) {
+    environmentCache = new Map();
+    componentTypeEntityCache.set(environmentKey, environmentCache);
+  }
+  if (environmentCache.has(normalizedComponentType)) {
+    return environmentCache.get(normalizedComponentType);
+  }
+
+  let row;
+  try {
+    const metadata = await targetDvGet(
+      environmentKey,
+      `EntityDefinitions?$select=LogicalName,EntitySetName,DisplayName&$filter=ObjectTypeCode eq ${normalizedComponentType}`,
+      accountHomeId,
+    );
+    row = Array.isArray(metadata?.value) ? metadata.value[0] : metadata;
+  } catch {
+    // Some solution component types are not exposed through EntityDefinitions.
+  }
+  if (!row) {
+    const data = await targetDvGet(
+      environmentKey,
+      `entities?$select=logicalname,collectionname,entitysetname,originallocalizedname,localizedname,displayname,name&$filter=objecttypecode eq ${normalizedComponentType}`,
+      accountHomeId,
+    );
+    row = Array.isArray(data?.value) ? data.value[0] : data;
+  }
+  const entity = row ? {
+    logicalName: row.LogicalName || row.logicalname || row.name || row.EntitySetName || row.entitysetname || '',
+    collection: row.EntitySetName || row.collectionname || row.entitysetname || row.entitysetnameplural || '',
+    typeLabel: getLabel(row.DisplayName) || row.originallocalizedname || row.localizedname || row.displayname || row.name || row.LogicalName || row.logicalname || '',
+  } : {};
   environmentCache.set(normalizedComponentType, entity);
   return entity;
 }
@@ -4701,7 +4780,9 @@ async function listAgentSessions(filters = {}) {
 }
 
 async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
+  const reportSchemaVersion = group === 'solutions' ? 3 : 1;
   const cacheKey = reportCacheKey('automated', {
+    version: reportSchemaVersion,
     accountHomeId: reportCacheAccountId(body),
     group,
     reportType,
@@ -4710,12 +4791,15 @@ async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
     solutionOptions: body.solutionOptions || body.filters || {},
   });
   const cached = await readDailyReportCache(cacheKey);
-  if (cached?.kind === 'automated') {
+  if (!body.forceRefresh && cached?.kind === 'automated') {
     return cachedAutomatedReport(cached.value);
   }
 
   const report = await buildAutomatedReport(group, reportType, body);
-  await writeDailyReportCache(cacheKey, 'automated', reportCacheAccountId(body), serialiseAutomatedReport(report));
+  await writeDailyReportCache(cacheKey, 'automated', reportCacheAccountId(body), serialiseAutomatedReport(report, {
+    reportGroup: group,
+    reportSchemaVersion,
+  }));
   return report;
 }
 
@@ -4789,9 +4873,11 @@ async function writeDailyReportCache(cacheKey, kind, accountHomeId, value) {
   }
 }
 
-function serialiseAutomatedReport(report) {
+function serialiseAutomatedReport(report, metadata = {}) {
   const files = Array.isArray(report?.files) ? report.files : [report];
   return {
+    reportGroup: metadata.reportGroup || '',
+    reportSchemaVersion: Number(metadata.reportSchemaVersion || 1),
     multiple: Array.isArray(report?.files),
     files: files.map((file) => ({
       filename: file.filename,
@@ -4847,13 +4933,20 @@ async function buildReportsSummaryFromCachedReports(accountHomeId = '') {
   const files = entries.flatMap((entry) => (entry.value?.files || []).map((file) => ({
     ...file,
     createdAt: entry.createdAt,
+    reportGroup: entry.value?.reportGroup || '',
+    reportSchemaVersion: Number(entry.value?.reportSchemaVersion || 0),
   })));
-  const latestFile = (pattern) => files.find((file) => pattern.test(String(file.filename || '')));
+  const latestFile = (pattern, predicate = () => true) => files.find((file) =>
+    pattern.test(String(file.filename || '')) && predicate(file)
+  );
   const [aiTotals, aiRaw, agentTotals, solutionTotals, flowTotals] = await Promise.all([
     readCachedWorkbookRows(latestFile(/^ai-flow-events-totals-by-environment-/i)),
     readCachedWorkbookRows(latestFile(/^ai-flow-events-raw-stacked-/i)),
     readCachedWorkbookRows(latestFile(/^agent-sessions-totals-by-environment-/i)),
-    readCachedWorkbookRows(latestFile(/^solutions-totals-by-environment-/i)),
+    readCachedWorkbookRows(latestFile(
+      /^solutions-totals-by-environment-/i,
+      (file) => file.reportGroup === 'solutions' && file.reportSchemaVersion >= 3,
+    )),
     readCachedWorkbookRows(latestFile(/^flow-runs-totals-by-environment-/i)),
   ]);
   const environments = new Map();
@@ -4914,18 +5007,6 @@ async function buildReportsSummaryFromCachedReports(accountHomeId = '') {
     target.copilotStudioAgentCount = cachedNumber(row['# of Copilot Studio Agents']);
     if (Object.prototype.hasOwnProperty.call(row, 'Custom Dataverse tables')) {
       target.dataverseTableCount = cachedNumber(row['Custom Dataverse tables']);
-    }
-  }
-
-  const missingCustomTableCounts = [...environments.values()].filter((environment) =>
-    environment.dataverseTableCount === null && environment.environmentUrl
-  );
-  for (const environment of missingCustomTableCounts) {
-    try {
-      environment.dataverseTableCount = await countCustomDataverseTablesForEnvironment(environment.environmentUrl, accountHomeId);
-      await delay(450);
-    } catch {
-      environment.dataverseTableCount = 0;
     }
   }
 
@@ -5000,8 +5081,9 @@ async function buildAutomatedReport(group, reportType, body = {}) {
 
   const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
   const dateRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
+  const reportProgress = createAutomatedReportProgressReporter(body);
   if (group === 'ai-events') {
-    const rowsByEnvironment = await collectAutomatedAiEventRows(environments, dateRange, accountHomeId);
+    const rowsByEnvironment = await collectAutomatedAiEventRows(environments, dateRange, accountHomeId, reportProgress);
     if (reportType === 'both') {
       return {
         files: [
@@ -5016,7 +5098,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   if (group === 'agent-sessions') {
-    const rowsByEnvironment = await collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId);
+    const rowsByEnvironment = await collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId, reportProgress);
     if (reportType === 'both') {
       return {
         files: [
@@ -5031,7 +5113,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   if (group === 'flow-runs') {
-    const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, getFlowRunDateRange({ range: '7d' }), accountHomeId);
+    const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, getFlowRunDateRange({ range: '7d' }), accountHomeId, reportProgress);
     if (reportType === 'both') {
       return {
         files: [
@@ -5046,7 +5128,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
-  const rowsByEnvironment = await collectAutomatedSolutionRows(environments, solutionOptions, accountHomeId);
+  const rowsByEnvironment = await collectAutomatedSolutionRows(environments, solutionOptions, accountHomeId, reportProgress);
   if (reportType === 'both') {
     return {
       files: [
@@ -5058,6 +5140,52 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   return reportType === 'totals'
     ? buildAutomatedSolutionTotalsWorkbook(rowsByEnvironment, solutionOptions)
     : buildAutomatedSolutionRawWorkbook(rowsByEnvironment, solutionOptions);
+}
+
+function createAutomatedReportProgressReporter(body = {}) {
+  const progressId = String(body.reportRunId || '').trim();
+  if (!progressId) {
+    return null;
+  }
+  const activeEnvironments = new Map();
+  const completedEnvironmentIds = new Set();
+  return (environment, index, total, phase = 'start') => {
+    const environmentId = environment.environmentId || environment.environmentName || '';
+    if (phase === 'complete') {
+      activeEnvironments.delete(environmentId);
+      completedEnvironmentIds.add(environmentId);
+    } else {
+      activeEnvironments.set(environmentId, {
+        environmentId,
+        displayName: environment.displayName || environmentId,
+        environmentIndex: index + 1,
+      });
+    }
+    const active = [...activeEnvironments.values()];
+    setAutomatedReportProgress(progressId, {
+      status: 'running',
+      environmentIndex: index + 1,
+      totalEnvironments: total,
+      completedEnvironments: completedEnvironmentIds.size,
+      currentEnvironment: active[0] || null,
+      activeEnvironments: active,
+    });
+  };
+}
+
+function setAutomatedReportProgress(progressId, update) {
+  if (!progressId) {
+    return;
+  }
+  automatedReportProgress.set(progressId, {
+    ...(automatedReportProgress.get(progressId) || {}),
+    ...update,
+    updatedAt: new Date().toISOString(),
+  });
+  if (automatedReportProgress.size > 100) {
+    const oldest = automatedReportProgress.keys().next().value;
+    automatedReportProgress.delete(oldest);
+  }
 }
 
 function getAutomatedReportDateRange(group, filters = {}) {
@@ -5101,9 +5229,10 @@ function normalizeAutomatedSolutionOptions(options = {}) {
   };
 }
 
-async function collectAutomatedAiEventRows(environments, dateRange, accountHomeId = '') {
+async function collectAutomatedAiEventRows(environments, dateRange, accountHomeId = '', onEnvironment = null) {
   const groups = [];
-  for (const environment of environments) {
+  for (const [index, environment] of environments.entries()) {
+    onEnvironment?.(environment, index, environments.length);
     const config = await getAiEventFieldConfig(environment.orgUrl, accountHomeId);
     const selectFields = getAiEventSelectFields(config, { includePayload: false });
     const data = await targetDvGetAll(
@@ -5119,14 +5248,16 @@ async function collectAutomatedAiEventRows(environments, dateRange, accountHomeI
         .filter((row) => Number(row.creditsConsumed || 0) > 0)
         .map((row) => withReportEnvironmentFields(row, environment)),
     });
+    onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
   }
   return groups;
 }
 
-async function collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId = '') {
+async function collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId = '', onEnvironment = null) {
   const groups = [];
-  for (const environment of environments) {
+  for (const [index, environment] of environments.entries()) {
+    onEnvironment?.(environment, index, environments.length);
     const path = `${AGENT_SESSION_ENTITY_SET_NAME}?${buildAiEventQueryString({
       '$select': 'conversationtranscriptid,conversationstarttime,name,metadata,_bot_conversationtranscriptid_value',
       '$expand': 'bot_conversationtranscriptId($select=name)',
@@ -5141,14 +5272,16 @@ async function collectAutomatedAgentSessionRows(environments, dateRange, account
       ...reportEnvironmentFields(environment),
     }));
     groups.push({ environment, rows });
+    onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
   }
   return groups;
 }
 
-async function collectAutomatedFlowRunRows(environments, dateRange, accountHomeId = '') {
+async function collectAutomatedFlowRunRows(environments, dateRange, accountHomeId = '', onEnvironment = null) {
   const groups = [];
-  for (const environment of environments) {
+  for (const [index, environment] of environments.entries()) {
+    onEnvironment?.(environment, index, environments.length);
     const data = await targetDvGetAll(
       environment.orgUrl,
       buildFlowRunListPath(dateRange),
@@ -5162,14 +5295,15 @@ async function collectAutomatedFlowRunRows(environments, dateRange, accountHomeI
         environment,
       )),
     });
+    onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
   }
   return groups;
 }
 
-async function collectAutomatedSolutionRows(environments, options, accountHomeId = '') {
-  const groups = [];
-  for (const environment of environments) {
+async function collectAutomatedSolutionRows(environments, options, accountHomeId = '', onEnvironment = null) {
+  return mapWithConcurrency(environments, AUTOMATED_SOLUTION_ENVIRONMENT_CONCURRENCY, async (environment, index) => {
+    onEnvironment?.(environment, index, environments.length);
     const allSolutions = await listSolutionsForEnvironment(environment.orgUrl, accountHomeId);
     const filteredSolutions = allSolutions.filter((solution) => shouldIncludeAutomatedSolution(solution, options));
     const components = await listSolutionComponentsForEnvironment(
@@ -5177,20 +5311,24 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
       filteredSolutions.map((solution) => solution.solutionid),
       accountHomeId,
     );
-    const canvasAppTypes = await listCanvasAppTypesForEnvironment(
+    const reportComponents = await enrichSolutionReportComponentsForEnvironment(
       environment.orgUrl,
-      components.filter((component) => Number(component.componenttype) === 300).map((component) => component.objectid),
+      components,
       accountHomeId,
     );
-    const typedComponents = components.map((component) => {
+    const canvasAppTypes = await listCanvasAppTypesForEnvironment(
+      environment.orgUrl,
+      reportComponents.filter((component) => Number(component.componenttype) === 300).map((component) => component.objectid),
+      accountHomeId,
+    );
+    const typedComponents = reportComponents.map((component) => {
       if (Number(component.componenttype) !== 300 || Number(canvasAppTypes.get(normalizeGuid(component.objectid))?.canvasapptype) !== 4) {
         return component;
       }
       return { ...component, typeLabel: 'Code App' };
     });
     const componentsBySolution = groupSolutionComponentsBySolution(typedComponents);
-    const customTableCount = await countCustomDataverseTablesForEnvironment(environment.orgUrl, accountHomeId);
-    groups.push({
+    const group = {
       environment,
       rows: filteredSolutions.map((solution) => ({
         ...solution,
@@ -5198,23 +5336,11 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
         ...reportEnvironmentFields(environment),
       })),
       totalBeforeFilters: allSolutions.length,
-      customTableCount,
-    });
+    };
+    onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
-  }
-  return groups;
-}
-
-async function countCustomDataverseTablesForEnvironment(orgUrl, accountHomeId = '') {
-  const data = await targetDvGetAll(
-    orgUrl,
-    'EntityDefinitions?$select=LogicalName,SchemaName,IsIntersect,IsCustomEntity',
-    {},
-    accountHomeId,
-  );
-  return data.filter((table) =>
-    table.LogicalName && table.SchemaName && !table.IsIntersect && Boolean(table.IsCustomEntity)
-  ).length;
+    return group;
+  });
 }
 
 async function listCanvasAppTypesForEnvironment(orgUrl, canvasAppIds, accountHomeId = '') {
@@ -5260,7 +5386,6 @@ async function buildReportsSummary(body = {}) {
   const sessionsByEnvironment = groupRowsByEnvironment(agentSessionGroups);
   const flowRunsByEnvironment = groupRowsByEnvironment(flowRunGroups);
   const solutionsByEnvironment = groupRowsByEnvironment(solutionGroups);
-  const customTableCounts = new Map(solutionGroups.map((group) => [group.environment.environmentId, group.customTableCount]));
   const modelMix = new Map();
 
   const rows = environments.map((environment) => {
@@ -5300,7 +5425,6 @@ async function buildReportsSummary(body = {}) {
       canvasAppCount: Number(componentTotals['# of Canvas Apps'] || 0),
       modelDrivenAppCount: Number(componentTotals['# of Model Driven Apps'] || 0),
       aiModelCount: Number(componentTotals['# of AI models'] || 0),
-      dataverseTableCount: Number(customTableCounts.get(environment.environmentId) || 0),
       copilotStudioAgentCount: Number(componentTotals['# of Copilot Studio Agents'] || 0),
     };
   });
@@ -5370,6 +5494,24 @@ async function listSolutionComponentsForEnvironment(orgUrl, solutionIds, account
     objectid: component.objectid || '',
     typeLabel: component[`componenttype@${ODATA_FORMATTED_VALUE_ANNOTATION}`] || SOLUTION_COMPONENT_TYPES[Number(component.componenttype)] || '',
   }));
+}
+
+async function enrichSolutionReportComponentsForEnvironment(orgUrl, components, accountHomeId = '') {
+  const componentTypes = [...new Set(components
+    .map((component) => Number(component.componenttype))
+    .filter((componentType) => componentType > 0))];
+  const entityDetails = new Map(await mapWithConcurrency(componentTypes, 4, async (componentType) => [
+    componentType,
+    await resolveEntityForComponentTypeForEnvironment(orgUrl, componentType, accountHomeId).catch(() => ({})),
+  ]));
+  return components.map((component) => {
+    const entity = entityDetails.get(Number(component.componenttype)) || {};
+    return {
+      ...component,
+      logicalName: component.logicalName || entity.logicalName || '',
+      typeLabel: component.typeLabel || entity.typeLabel || SOLUTION_COMPONENT_TYPES[Number(component.componenttype)] || '',
+    };
+  });
 }
 
 function groupSolutionComponentsBySolution(components) {
@@ -5914,7 +6056,7 @@ function isFailedFlowRun(row) {
 }
 
 async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
-  const rows = groups.map(({ environment, rows: solutionRows, totalBeforeFilters, customTableCount }) => {
+  const rows = groups.map(({ environment, rows: solutionRows, totalBeforeFilters }) => {
     const publishers = new Set(solutionRows.map((solution) => solution.publisher?.friendlyname || solution.publisher?.uniquename || '').filter(Boolean));
     const componentTotals = sumSolutionReportCountFields(solutionRows);
     return {
@@ -5928,7 +6070,6 @@ async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
       'Hidden solutions': solutionRows.filter((solution) => solution.isvisible === false).length,
       'Distinct publishers': publishers.size,
       ...componentTotals,
-      'Custom Dataverse tables': Number(customTableCount || 0),
       'Before filters': totalBeforeFilters,
       'Publisher exclusions': options.excludedPublishers.join(', '),
       'Managed included': options.includeManaged ? 'Yes' : 'No',
@@ -5953,7 +6094,6 @@ async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
       ['# of Model Driven Apps', 22],
       ['# of Copilot Studio Agents', 24],
       ['# of Dataverse tables', 20],
-      ['Custom Dataverse tables', 22],
       ['# of AI models', 16],
       ['# of connection references', 23],
       ['# of environment variables', 23],
@@ -5962,7 +6102,7 @@ async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
       ['Publisher exclusions', 34],
       ['Managed included', 18],
       ['Microsoft owned included', 24],
-    ], rows, { numericColumns: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] }),
+    ], rows, { numericColumns: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] }),
   };
 }
 

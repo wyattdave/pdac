@@ -48,7 +48,7 @@
       <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="connections">Connections</button>
       <button class="tab" type="button" data-tab="users">Users and Teams</button>
-      <button class="tab reports-tab" type="button" data-tab="reports" disabled aria-disabled="true">Reports</button>
+      <button class="tab reports-tab" type="button" data-tab="reports" aria-disabled="false">Charts</button>
       <button class="tab" type="button" data-tab="auth">Settings</button>
     </nav>
 
@@ -113,12 +113,12 @@
         <section class="panel">
           <div class="section-title">
             <div>
-              <h2>Reports</h2>
+              <h2>Charts</h2>
               <p class="muted">Cross-environment usage and solution inventory charts.</p>
             </div>
           </div>
           <p class="muted reports-date-note">Flow runs cover the last 7 days. AI Flow and Copilot sessions cover the current calendar month. Solution inventory includes managed and Microsoft-owned solutions.</p>
-          <p id="reportsStatus" class="muted" aria-live="polite">Generate the dashboard from Settings to view reports.</p>
+          <p id="reportsStatus" class="muted" aria-live="polite">Run a background report in Settings to populate these charts.</p>
           <div id="reportsCharts" class="reports-chart-grid"></div>
         </section>
       </section>
@@ -148,15 +148,6 @@
             </button>
           </div>
 
-          <div id="automatedReportStatus" class="automated-report-status" aria-live="polite">
-            <div>
-              <span class="summary-label">Automated reports</span>
-              <strong id="automatedReportStatusTitle">Idle</strong>
-            </div>
-            <div id="automatedReportStatusList" class="automated-report-status-list"></div>
-            <div id="automatedReportDownloads" class="actions automated-report-downloads"></div>
-          </div>
-
           <div class="actions">
             <button id="loadEnvironmentsButton" type="button">Load environments</button>
           </div>
@@ -165,7 +156,17 @@
             <input id="environmentSearch" placeholder="Type to filter environments" />
           </label>
           <div id="environmentList" class="list environment-list"></div>
-          <p id="status" class="muted"></p>
+          <div id="status" class="settings-status-spacer" aria-hidden="true"></div>
+          <div class="environment-report-spacer" aria-hidden="true"></div>
+
+          <div id="automatedReportStatus" class="automated-report-status" aria-live="polite">
+            <div>
+              <span class="summary-label">Automated reports</span>
+              <strong id="automatedReportStatusTitle">Idle</strong>
+            </div>
+            <div id="automatedReportStatusList" class="automated-report-status-list"></div>
+            <div id="automatedReportDownloads" class="actions automated-report-downloads"></div>
+          </div>
 
           <section class="automated-report-section">
             <div class="section-title compact-title">
@@ -293,25 +294,14 @@
                   </div>
                 </div>
                 <div id="automatedFlowRunsEnvironments" class="automated-environment-list"></div>
-                <div class="actions">
+                <div class="flow-runs-report-spacer" aria-hidden="true"></div>
+                <div class="actions flow-runs-report-actions">
                   <button type="button" class="secondary" data-automated-run="flow-runs:totals">Run totals</button>
                   <button type="button" class="secondary" data-automated-run="flow-runs:raw">Run failed runs</button>
                   <button type="button" data-automated-run="flow-runs:both">Run both</button>
                 </div>
               </div>
 
-              <div class="automated-report-card report-dashboard-card">
-                <div class="section-title compact-title">
-                  <div>
-                    <h4>Reports Dashboard</h4>
-                    <p class="muted">Build the cross-environment charts for the Reports tab.</p>
-                  </div>
-                </div>
-                <div id="reportsEnvironments" class="automated-environment-list report-environment-list"></div>
-                <div class="actions">
-                  <button id="loadReportsButton" type="button">Build dashboard</button>
-                </div>
-              </div>
             </div>
           </section>
         </section>

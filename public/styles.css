@@ -32,6 +32,27 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: var(--soft-line) var(--panel);
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  height: 12px;
+  width: 12px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--panel);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--soft-line);
+  border: 3px solid var(--panel);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 
 [hidden] {
@@ -180,7 +201,7 @@ footer a:hover {
 .reports-chart-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .report-chart-card {
@@ -711,6 +732,19 @@ select:disabled {
   margin: 12px 0 0;
 }
 
+.settings-status-spacer {
+  color: transparent;
+  font-size: 0;
+  height: 12px;
+  line-height: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.environment-report-spacer {
+  height: 16px;
+}
+
 .selected-environment-bar {
   align-items: center;
   background: var(--bg);
@@ -736,7 +770,7 @@ select:disabled {
   border-radius: 8px;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(180px, 0.4fr) minmax(260px, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   margin-bottom: 14px;
   padding: 12px;
 }
@@ -745,6 +779,12 @@ select:disabled {
   display: block;
   font-size: 13px;
   margin-top: 3px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.automated-report-status > div:first-child {
+  grid-column: 1 / -1;
 }
 
 .automated-report-status-list {
@@ -752,6 +792,13 @@ select:disabled {
   display: grid;
   font-size: 13px;
   gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.automated-report-status-list:empty {
+  display: none;
 }
 
 .automated-report-downloads {
@@ -819,16 +866,54 @@ select:disabled {
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
+  gap: 0;
+  overflow: hidden;
+}
+
+.automated-environment-tools {
+  align-items: end;
+  background: var(--soft);
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px;
+}
+
+.automated-environment-tools .search {
+  margin: 0;
+}
+
+.automated-environment-tools button {
+  white-space: nowrap;
+}
+
+.environment-copy-panel {
+  align-items: end;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px;
+}
+
+.environment-copy-panel button {
+  white-space: nowrap;
+}
+
+.automated-environment-options {
+  display: grid;
   max-height: 220px;
   overflow: auto;
 }
 
-.automated-environment-list .checkbox-label {
+.automated-environment-options .checkbox-label {
   border-bottom: 1px solid var(--line);
   padding: 8px 10px;
 }
 
-.automated-environment-list .checkbox-label:last-child {
+.automated-environment-options .checkbox-label:last-child {
   border-bottom: 0;
 }
 
@@ -844,6 +929,14 @@ select:disabled {
 .automated-report-card .actions button {
   flex: 1 1 92px;
   min-width: 0;
+}
+
+.flow-runs-report-spacer {
+  height: 12px;
+}
+
+.automated-report-card .flow-runs-report-actions {
+  align-items: center;
 }
 
 .summary-label {
@@ -2156,6 +2249,8 @@ select:disabled {
   .automated-report-grid,
   .automated-report-download-row,
   .automated-report-filters,
+  .automated-environment-tools,
+  .environment-copy-panel,
   .reports-chart-grid,
   .component-row {
     grid-template-columns: 1fr;
