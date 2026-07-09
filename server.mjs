@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
+import initSqlJs from 'sql.js';
 import { XMLParser } from 'fast-xml-parser';
 import {
   createConnectionAsync,
@@ -38,6 +39,8 @@ const POWER_PLATFORM_RESOURCE = process.env.PP_API_RESOURCE || 'https://api.powe
 const APP_DIR = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = join(APP_DIR, 'public');
 const REPORT_CACHE_DIR = join(APP_DIR, 'data', 'report-cache');
+const REPORT_TRENDS_DB_PATH = join(APP_DIR, 'data', 'report-trends.sqlite');
+const REPORT_TREND_RETENTION_DAYS = 730;
 const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
 const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
 const USERS_TEAMS_PAGE_SIZE = 50;
@@ -142,6 +145,8 @@ const importPackages = new Map();
 const componentTypeEntityCache = new Map();
 const aiEventMetadataCache = new Map();
 const automatedReportProgress = new Map();
+let reportTrendDbPromise = null;
+let reportTrendWriteQueue = Promise.resolve();
 let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -157,6 +162,79 @@ const AGENT_SESSION_BOT_NAME_CACHE = new Map();
 const ODATA_FORMATTED_VALUE_ANNOTATION = 'OData.Community.Display.V1.FormattedValue';
 const AI_EVENT_BATCH_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
 const FLOW_RUN_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
+const REPORT_TOTAL_TABLE_DEFINITIONS = {
+  'ai-events': {
+    tableName: 'report_ai_flow_event_totals',
+    reportKey: 'ai-events',
+    reportLabel: 'AI Flow events',
+    columns: [
+      ['Environment display name', 'environment_display_name', 'TEXT'],
+      ['Environment id', 'environment_id', 'TEXT'],
+      ['Environment url', 'environment_url', 'TEXT'],
+      ['Count of Events', 'count_of_events', 'REAL'],
+      ['Sum AI Builder Credits used', 'sum_ai_builder_credits_used', 'REAL'],
+      ['Sum Copilot Studio credits used', 'sum_copilot_studio_credits_used', 'REAL'],
+      ['Total credits consumed', 'total_credits_consumed', 'REAL'],
+    ],
+  },
+  'agent-sessions': {
+    tableName: 'report_agent_session_totals',
+    reportKey: 'agent-sessions',
+    reportLabel: 'Agent Sessions',
+    columns: [
+      ['Environment display name', 'environment_display_name', 'TEXT'],
+      ['Environment id', 'environment_id', 'TEXT'],
+      ['Environment url', 'environment_url', 'TEXT'],
+      ['Total Sessions', 'total_sessions', 'REAL'],
+      ['Distinct Agents', 'distinct_agents', 'REAL'],
+    ],
+  },
+  'flow-runs': {
+    tableName: 'report_flow_run_totals',
+    reportKey: 'flow-runs',
+    reportLabel: 'Flow Runs',
+    columns: [
+      ['Environment display name', 'environment_display_name', 'TEXT'],
+      ['Environment id', 'environment_id', 'TEXT'],
+      ['Environment url', 'environment_url', 'TEXT'],
+      ['Total flow runs', 'total_flow_runs', 'REAL'],
+      ['Successful flow runs', 'successful_flow_runs', 'REAL'],
+      ['Failed flow runs', 'failed_flow_runs', 'REAL'],
+      ['Success rate', 'success_rate', 'REAL'],
+      ['Failure rate', 'failure_rate', 'REAL'],
+    ],
+  },
+  solutions: {
+    tableName: 'report_solution_totals',
+    reportKey: 'solutions',
+    reportLabel: 'Solutions',
+    columns: [
+      ['Environment display name', 'environment_display_name', 'TEXT'],
+      ['Environment id', 'environment_id', 'TEXT'],
+      ['Environment url', 'environment_url', 'TEXT'],
+      ['Included solutions', 'included_solutions', 'REAL'],
+      ['Managed solutions', 'managed_solutions', 'REAL'],
+      ['Unmanaged solutions', 'unmanaged_solutions', 'REAL'],
+      ['Visible solutions', 'visible_solutions', 'REAL'],
+      ['Hidden solutions', 'hidden_solutions', 'REAL'],
+      ['Distinct publishers', 'distinct_publishers', 'REAL'],
+      ['# of flows', 'number_of_flows', 'REAL'],
+      ['# of Code Apps', 'number_of_code_apps', 'REAL'],
+      ['# of Canvas Apps', 'number_of_canvas_apps', 'REAL'],
+      ['# of Model Driven Apps', 'number_of_model_driven_apps', 'REAL'],
+      ['# of Copilot Studio Agents', 'number_of_copilot_studio_agents', 'REAL'],
+      ['# of Dataverse tables', 'number_of_dataverse_tables', 'REAL'],
+      ['# of AI models', 'number_of_ai_models', 'REAL'],
+      ['# of connection references', 'number_of_connection_references', 'REAL'],
+      ['# of environment variables', 'number_of_environment_variables', 'REAL'],
+      ['# of dataflows', 'number_of_dataflows', 'REAL'],
+      ['Before filters', 'before_filters', 'REAL'],
+      ['Publisher exclusions', 'publisher_exclusions', 'TEXT'],
+      ['Managed included', 'managed_included', 'TEXT'],
+      ['Microsoft owned included', 'microsoft_owned_included', 'TEXT'],
+    ],
+  },
+};
 const AI_EVENT_FIELD_RULES = {
   creditType: {
     logicalNames: ['msdyn_consumptionsource'],
@@ -661,6 +739,39 @@ async function handleApi(req, res) {
     const body = await readJson(req);
     await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
     sendJson(res, 200, await getOrBuildCachedReportsSummary(body));
+    return;
+  }
+
+  if (route === 'GET /api/report-trends') {
+    const accountHomeId = url.searchParams.get('accountHomeId') || selected.accountHomeId || '';
+    sendJson(res, 200, await listReportTrendSnapshots({
+      accountHomeId,
+      range: url.searchParams.get('range') || '28d',
+      start: url.searchParams.get('start') || '',
+      end: url.searchParams.get('end') || '',
+    }));
+    return;
+  }
+
+  if (route === 'GET /api/sql-tables') {
+    sendJson(res, 200, await listSqlTables());
+    return;
+  }
+
+  if (route === 'GET /api/sql-tables/export') {
+    sendXlsx(res, 200, 'pdac-sql-tables.xlsx', await exportSqlTablesWorkbook());
+    return;
+  }
+
+  const sqlTableExportMatch = url.pathname.match(/^\/api\/sql-tables\/([^/]+)\/export$/);
+  if (req.method === 'GET' && sqlTableExportMatch) {
+    const tableName = decodeURIComponent(sqlTableExportMatch[1] || '');
+    sendXlsx(res, 200, `${safeFilename(tableName || 'sql-table')}.xlsx`, await exportSingleSqlTableWorkbook(tableName));
+    return;
+  }
+
+  if (route === 'DELETE /api/sql-tables/records') {
+    sendJson(res, 200, await deleteSqlTableRecords());
     return;
   }
 
@@ -4791,7 +4902,7 @@ async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
     solutionOptions: body.solutionOptions || body.filters || {},
   });
   const cached = await readDailyReportCache(cacheKey);
-  if (!body.forceRefresh && cached?.kind === 'automated') {
+  if (!body.forceRefresh && !body.saveToDatabase && cached?.kind === 'automated') {
     return cachedAutomatedReport(cached.value);
   }
 
@@ -5073,6 +5184,413 @@ function cachedNumber(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+async function getReportTrendDb() {
+  if (!reportTrendDbPromise) {
+    reportTrendDbPromise = (async () => {
+      await mkdir(join(APP_DIR, 'data'), { recursive: true });
+      const SQL = await initSqlJs({
+        locateFile: (file) => require.resolve(`sql.js/dist/${file}`),
+      });
+      let bytes = null;
+      try {
+        bytes = await readFile(REPORT_TRENDS_DB_PATH);
+      } catch {
+        bytes = null;
+      }
+      const db = bytes?.length ? new SQL.Database(bytes) : new SQL.Database();
+      db.run('DROP TABLE IF EXISTS report_metric_snapshots');
+      for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
+        ensureReportTotalTable(db, definition);
+      }
+      return db;
+    })();
+  }
+  return reportTrendDbPromise;
+}
+
+function ensureReportTotalTable(db, definition) {
+  const totalColumns = definition.columns
+    .map(([, key, type]) => `${quoteSqlIdentifier(key)} ${type} NOT NULL DEFAULT ${type === 'REAL' ? '0' : "''"}`)
+    .join(',\n          ');
+  db.run(`
+    CREATE TABLE IF NOT EXISTS ${quoteSqlIdentifier(definition.tableName)} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_home_id TEXT NOT NULL DEFAULT '',
+      date_ran TEXT NOT NULL,
+      collected_at TEXT NOT NULL,
+      range_key TEXT NOT NULL DEFAULT '',
+      range_label TEXT NOT NULL DEFAULT '',
+      ${totalColumns}
+    );
+    CREATE INDEX IF NOT EXISTS ${quoteSqlIdentifier(`idx_${definition.tableName}_lookup`)}
+      ON ${quoteSqlIdentifier(definition.tableName)}(account_home_id, date_ran, collected_at);
+  `);
+}
+
+async function persistReportTrendDb(db) {
+  await mkdir(join(APP_DIR, 'data'), { recursive: true });
+  await writeFile(REPORT_TRENDS_DB_PATH, Buffer.from(db.export()));
+}
+
+async function enqueueReportTrendWrite(action) {
+  const run = reportTrendWriteQueue.then(action, action);
+  reportTrendWriteQueue = run.catch(() => {});
+  return run;
+}
+
+async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null }) {
+  const definition = reportTotalTableDefinition(group);
+  if (!definition) {
+    return;
+  }
+  const totalRows = Array.isArray(rows) ? rows : [];
+  if (!totalRows.length) {
+    return;
+  }
+  const collectedAt = new Date().toISOString();
+  const dateRan = collectedAt.slice(0, 10);
+  const rangeKey = dateRange ? `${dateRange.range || 'custom'}:${dateRange.startDate || ''}:${dateRange.endDate || ''}` : 'snapshot';
+  const rangeLabel = dateRange ? dateRangeLabel(dateRange) : 'snapshot';
+  const columns = definition.columns.map(([, key]) => key);
+  const placeholders = ['?', '?', '?', '?', '?', ...columns.map(() => '?')].join(', ');
+  const insertColumns = ['account_home_id', 'date_ran', 'collected_at', 'range_key', 'range_label', ...columns]
+    .map(quoteSqlIdentifier)
+    .join(', ');
+  await enqueueReportTrendWrite(async () => {
+    const db = await getReportTrendDb();
+    const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
+    try {
+      db.run('BEGIN TRANSACTION');
+      for (const row of totalRows) {
+        insert.run([
+          String(accountHomeId || '').trim(),
+          dateRan,
+          collectedAt,
+          rangeKey,
+          rangeLabel,
+          ...definition.columns.map(([header, , type]) => sqlReportTotalValue(row[header], type)),
+        ]);
+      }
+      db.run(
+        `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`,
+        [reportTrendRetentionCutoffDate()],
+      );
+      db.run('COMMIT');
+    } catch (error) {
+      try {
+        db.run('ROLLBACK');
+      } catch {}
+      throw error;
+    } finally {
+      insert.free();
+    }
+    await persistReportTrendDb(db);
+  });
+}
+
+function sqlReportTotalValue(value, type) {
+  if (type === 'REAL') {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  }
+  return String(value ?? '');
+}
+
+function reportTotalTableDefinition(group) {
+  return REPORT_TOTAL_TABLE_DEFINITIONS[group] || null;
+}
+
+async function listReportTrendSnapshots(filters = {}) {
+  const dateRange = getReportTrendDateRange(filters);
+  const db = await getReportTrendDb();
+  const accountHomeId = String(filters.accountHomeId || '').trim();
+  const tables = [];
+  let changed = false;
+  for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
+    db.run(`DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`, [reportTrendRetentionCutoffDate()]);
+    changed = true;
+    const result = db.exec(`
+      SELECT *
+      FROM ${quoteSqlIdentifier(definition.tableName)}
+      WHERE account_home_id = ?
+        AND date_ran >= ?
+        AND date_ran <= ?
+      ORDER BY collected_at, environment_display_name
+    `, [
+      accountHomeId,
+      dateRange.startDate,
+      dateRange.endDate,
+    ]);
+    const rows = sqlRows(result[0]).map((row) => ({
+      id: row.id,
+      dateRan: row.date_ran,
+      collectedAt: row.collected_at,
+      rangeKey: row.range_key,
+      rangeLabel: row.range_label,
+      values: Object.fromEntries(definition.columns.map(([label, key, type]) => [
+        key,
+        type === 'REAL' ? Number(row[key] || 0) : String(row[key] ?? ''),
+      ])),
+    }));
+    tables.push({
+      tableName: definition.tableName,
+      reportKey: definition.reportKey,
+      reportLabel: definition.reportLabel,
+      columns: definition.columns.map(([label, key, type]) => ({
+        label,
+        key,
+        type,
+        numeric: type === 'REAL',
+      })),
+      rows,
+    });
+  }
+  if (changed) {
+    await persistReportTrendDb(db);
+  }
+  return {
+    range: {
+      range: dateRange.range,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+    },
+    retentionDays: REPORT_TREND_RETENTION_DAYS,
+    tables,
+    rows: tables.flatMap((table) => table.rows.map((row) => ({
+      tableName: table.tableName,
+      reportKey: table.reportKey,
+      reportLabel: table.reportLabel,
+      dateRan: row.dateRan,
+      collectedAt: row.collectedAt,
+    }))),
+  };
+}
+
+function sqlRows(result) {
+  if (!result?.columns || !Array.isArray(result.values)) {
+    return [];
+  }
+  return result.values.map((values) => Object.fromEntries(result.columns.map((column, index) => [column, values[index]])));
+}
+
+async function listSqlTables() {
+  const db = await getReportTrendDb();
+  const tableNames = getUserSqlTableNames(db);
+  const tables = tableNames.map((name) => getSqlTableInfo(db, name));
+  return {
+    database: 'report-trends.sqlite',
+    tables,
+    totalRows: tables.reduce((sum, table) => sum + table.rowCount, 0),
+    totalStorageBytes: tables.reduce((sum, table) => sum + table.storageBytes, 0),
+  };
+}
+
+function getUserSqlTableNames(db) {
+  const result = db.exec(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  `);
+  return sqlRows(result[0]).map((row) => String(row.name || '')).filter(Boolean);
+}
+
+function getSqlTableInfo(db, name) {
+  const quoted = quoteSqlIdentifier(name);
+  const countResult = db.exec(`SELECT COUNT(*) AS row_count FROM ${quoted}`);
+  const rowCount = Number(sqlRows(countResult[0])[0]?.row_count || 0);
+  const rows = sqlRows(db.exec(`SELECT * FROM ${quoted}`)[0]);
+  const storageBytes = Buffer.byteLength(JSON.stringify(rows), 'utf8');
+  const definition = reportTotalTableDefinitionByName(name);
+  return {
+    name,
+    label: definition?.reportLabel || name,
+    rowCount,
+    storageBytes,
+  };
+}
+
+function reportTotalTableDefinitionByName(tableName) {
+  return Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)
+    .find((definition) => definition.tableName === tableName) || null;
+}
+
+async function exportSqlTablesWorkbook() {
+  const db = await getReportTrendDb();
+  const tableNames = getUserSqlTableNames(db);
+  const tableInfos = tableNames.map((name) => getSqlTableInfo(db, name));
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const summary = workbook.addWorksheet('SQL Tables', {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  summary.columns = [
+    { header: 'Table', key: 'name', width: 36 },
+    { header: 'Rows', key: 'rowCount', width: 14 },
+    { header: 'Storage bytes', key: 'storageBytes', width: 18 },
+  ];
+  summary.addRows(tableInfos);
+  styleSqlWorksheet(summary, 3, tableInfos.length);
+
+  const usedNames = new Set(['SQL Tables']);
+  for (const tableName of tableNames) {
+    const rows = sqlRows(db.exec(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`)[0]);
+    const columns = rows.length
+      ? Object.keys(rows[0])
+      : getSqlTableColumns(db, tableName);
+    const worksheet = workbook.addWorksheet(uniqueWorksheetName(tableName, usedNames), {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    worksheet.columns = columns.map((column) => ({
+      header: column,
+      key: column,
+      width: columnWidth(column),
+    }));
+    worksheet.addRows(rows);
+    styleSqlWorksheet(worksheet, columns.length, rows.length);
+  }
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+async function exportSingleSqlTableWorkbook(tableName) {
+  const db = await getReportTrendDb();
+  const tableNames = getUserSqlTableNames(db);
+  if (!tableNames.includes(tableName)) {
+    throw new HttpError(404, 'SQL table not found.');
+  }
+  const rows = sqlRows(db.exec(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`)[0]);
+  const columns = rows.length
+    ? Object.keys(rows[0])
+    : getSqlTableColumns(db, tableName);
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'PDAC';
+  workbook.created = new Date();
+  const worksheet = workbook.addWorksheet(uniqueWorksheetName(tableName, new Set()), {
+    views: [{ state: 'frozen', ySplit: 1 }],
+  });
+  worksheet.columns = columns.map((column) => ({
+    header: column,
+    key: column,
+    width: columnWidth(column),
+  }));
+  worksheet.addRows(rows);
+  styleSqlWorksheet(worksheet, columns.length, rows.length);
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+function styleSqlWorksheet(worksheet, columnCount, rowCount) {
+  if (columnCount > 0) {
+    worksheet.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: columnCount },
+    };
+  }
+  const headerRow = worksheet.getRow(1);
+  headerRow.height = 22;
+  headerRow.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF111827' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    cell.border = bottomBorder();
+  });
+  for (let rowNumber = 2; rowNumber <= rowCount + 1; rowNumber += 1) {
+    worksheet.getRow(rowNumber).alignment = { vertical: 'top', wrapText: true };
+  }
+}
+
+function getSqlTableColumns(db, tableName) {
+  return sqlRows(db.exec(`PRAGMA table_info(${quoteSqlLiteral(tableName)})`)[0])
+    .map((row) => String(row.name || ''))
+    .filter(Boolean);
+}
+
+function uniqueWorksheetName(name, usedNames) {
+  const base = String(name || 'Table').replace(/[\[\]*?:\/\\]/g, ' ').trim().slice(0, 31) || 'Table';
+  let candidate = base;
+  let index = 2;
+  while (usedNames.has(candidate)) {
+    const suffix = ` ${index}`;
+    candidate = `${base.slice(0, 31 - suffix.length)}${suffix}`;
+    index += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+async function deleteSqlTableRecords() {
+  return enqueueReportTrendWrite(async () => {
+    const db = await getReportTrendDb();
+    const tableNames = getUserSqlTableNames(db);
+    const before = tableNames.map((name) => getSqlTableInfo(db, name));
+    try {
+      db.run('BEGIN TRANSACTION');
+      for (const tableName of tableNames) {
+        db.run(`DELETE FROM ${quoteSqlIdentifier(tableName)}`);
+      }
+      db.run('COMMIT');
+    } catch (error) {
+      try {
+        db.run('ROLLBACK');
+      } catch {}
+      throw error;
+    }
+    await persistReportTrendDb(db);
+    return {
+      deletedRows: before.reduce((sum, table) => sum + table.rowCount, 0),
+      tables: before.map((table) => table.name),
+    };
+  });
+}
+
+function quoteSqlIdentifier(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function quoteSqlLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function getReportTrendDateRange(filters = {}) {
+  const range = String(filters.range || '28d').trim().toLowerCase();
+  if (range === 'custom') {
+    const start = parseDateOnly(filters.start, 'start');
+    const end = parseDateOnly(filters.end, 'end');
+    if (end < start) {
+      throw new HttpError(400, 'Custom trend range end must be on or after start.');
+    }
+    return {
+      range,
+      startDate: toDateOnlyString(start),
+      endDate: toDateOnlyString(end),
+    };
+  }
+  const today = atStartOfDay(new Date());
+  if (range === 'today') {
+    return { range, startDate: toDateOnlyString(today), endDate: toDateOnlyString(today) };
+  }
+  if (range === '7d') {
+    return { range, startDate: toDateOnlyString(addDays(today, -6)), endDate: toDateOnlyString(today) };
+  }
+  if (range === '365d') {
+    return { range, startDate: toDateOnlyString(addDays(today, -364)), endDate: toDateOnlyString(today) };
+  }
+  if (range === 'month') {
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { range, startDate: toDateOnlyString(monthStart), endDate: toDateOnlyString(today) };
+  }
+  if (range === '730d' || range === '2y') {
+    return { range: '730d', startDate: toDateOnlyString(addDays(today, -729)), endDate: toDateOnlyString(today) };
+  }
+  return { range: '28d', startDate: toDateOnlyString(addDays(today, -27)), endDate: toDateOnlyString(today) };
+}
+
+function reportTrendRetentionCutoffDate() {
+  return toDateOnlyString(addDays(atStartOfDay(new Date()), -REPORT_TREND_RETENTION_DAYS));
+}
+
 async function buildAutomatedReport(group, reportType, body = {}) {
   const environments = normalizeAutomatedReportEnvironments(body.environments || body.environmentSelections || []);
   if (!environments.length) {
@@ -5082,8 +5600,17 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
   const dateRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
   const reportProgress = createAutomatedReportProgressReporter(body);
+  const saveTrends = Boolean(body.saveToDatabase);
   if (group === 'ai-events') {
     const rowsByEnvironment = await collectAutomatedAiEventRows(environments, dateRange, accountHomeId, reportProgress);
+    if (saveTrends && reportType !== 'raw') {
+      await saveAutomatedReportTrendSnapshot({
+        accountHomeId,
+        group,
+        rows: buildAutomatedAiEventTotalsRows(rowsByEnvironment),
+        dateRange,
+      });
+    }
     if (reportType === 'both') {
       return {
         files: [
@@ -5099,6 +5626,14 @@ async function buildAutomatedReport(group, reportType, body = {}) {
 
   if (group === 'agent-sessions') {
     const rowsByEnvironment = await collectAutomatedAgentSessionRows(environments, dateRange, accountHomeId, reportProgress);
+    if (saveTrends && reportType !== 'raw') {
+      await saveAutomatedReportTrendSnapshot({
+        accountHomeId,
+        group,
+        rows: buildAutomatedAgentSessionTotalsRows(rowsByEnvironment),
+        dateRange,
+      });
+    }
     if (reportType === 'both') {
       return {
         files: [
@@ -5113,7 +5648,16 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   if (group === 'flow-runs') {
-    const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, getFlowRunDateRange({ range: '7d' }), accountHomeId, reportProgress);
+    const flowRunDateRange = getFlowRunDateRange({ range: '7d' });
+    const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, flowRunDateRange, accountHomeId, reportProgress);
+    if (saveTrends && reportType !== 'raw') {
+      await saveAutomatedReportTrendSnapshot({
+        accountHomeId,
+        group,
+        rows: buildAutomatedFlowRunTotalsRows(rowsByEnvironment),
+        dateRange: flowRunDateRange,
+      });
+    }
     if (reportType === 'both') {
       return {
         files: [
@@ -5129,6 +5673,13 @@ async function buildAutomatedReport(group, reportType, body = {}) {
 
   const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
   const rowsByEnvironment = await collectAutomatedSolutionRows(environments, solutionOptions, accountHomeId, reportProgress);
+  if (saveTrends && reportType !== 'raw') {
+    await saveAutomatedReportTrendSnapshot({
+      accountHomeId,
+      group,
+      rows: buildAutomatedSolutionTotalsRows(rowsByEnvironment, solutionOptions),
+    });
+  }
   if (reportType === 'both') {
     return {
       files: [
@@ -5865,15 +6416,13 @@ async function exportAgentSessionTotalsWorkbook(rows) {
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
-async function buildAutomatedAiEventTotalsWorkbook(groups, dateRange) {
-  const rows = groups.map(({ environment, rows: eventRows }) => {
+function buildAutomatedAiEventTotalsRows(groups) {
+  return groups.map(({ environment, rows: eventRows }) => {
     let aiBuilderCredits = 0;
     let copilotStudioCredits = 0;
-    let totalCredits = 0;
     for (const row of eventRows) {
       const credits = Number(row.creditsConsumed || 0);
       const creditType = String(row.creditType || '').trim().toLowerCase();
-      totalCredits += credits;
       if (creditType === 'ai builder') {
         aiBuilderCredits += credits;
       }
@@ -5881,6 +6430,7 @@ async function buildAutomatedAiEventTotalsWorkbook(groups, dateRange) {
         copilotStudioCredits += credits;
       }
     }
+    const totalCredits = Math.floor(aiBuilderCredits / 15) + copilotStudioCredits;
     return {
       'Environment display name': environment.displayName,
       'Environment id': environment.environmentId,
@@ -5891,6 +6441,10 @@ async function buildAutomatedAiEventTotalsWorkbook(groups, dateRange) {
       'Total credits consumed': totalCredits,
     };
   });
+}
+
+async function buildAutomatedAiEventTotalsWorkbook(groups, dateRange) {
+  const rows = buildAutomatedAiEventTotalsRows(groups);
   return {
     filename: `ai-flow-events-totals-by-environment-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
     bytes: await exportSimpleWorkbook('AI Flow Totals', [
@@ -5937,14 +6491,18 @@ async function buildAutomatedAiEventRawWorkbook(groups, dateRange) {
   };
 }
 
-async function buildAutomatedAgentSessionTotalsWorkbook(groups, dateRange) {
-  const rows = groups.map(({ environment, rows: sessionRows }) => ({
+function buildAutomatedAgentSessionTotalsRows(groups) {
+  return groups.map(({ environment, rows: sessionRows }) => ({
     'Environment display name': environment.displayName,
     'Environment id': environment.environmentId,
     'Environment url': environment.orgUrl,
     'Total Sessions': sessionRows.length,
     'Distinct Agents': new Set(sessionRows.map((row) => String(row.agentName || 'Unknown agent'))).size,
   }));
+}
+
+async function buildAutomatedAgentSessionTotalsWorkbook(groups, dateRange) {
+  const rows = buildAutomatedAgentSessionTotalsRows(groups);
   return {
     filename: `agent-sessions-totals-by-environment-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
     bytes: await exportSimpleWorkbook('Agent Session Totals', [
@@ -5979,8 +6537,8 @@ async function buildAutomatedAgentSessionRawWorkbook(groups, dateRange) {
   };
 }
 
-async function buildAutomatedFlowRunTotalsWorkbook(groups) {
-  const rows = groups.map(({ environment, rows: flowRuns }) => {
+function buildAutomatedFlowRunTotalsRows(groups) {
+  return groups.map(({ environment, rows: flowRuns }) => {
     const successfulRuns = flowRuns.filter(isSuccessfulFlowRun).length;
     const failedRuns = flowRuns.filter(isFailedFlowRun).length;
     const totalRuns = flowRuns.length;
@@ -5995,6 +6553,10 @@ async function buildAutomatedFlowRunTotalsWorkbook(groups) {
       'Failure rate': totalRuns ? failedRuns / totalRuns : 0,
     };
   });
+}
+
+async function buildAutomatedFlowRunTotalsWorkbook(groups) {
+  const rows = buildAutomatedFlowRunTotalsRows(groups);
   return {
     filename: `flow-runs-totals-by-environment-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
     bytes: await exportSimpleWorkbook('Flow Run Totals', [
@@ -6055,8 +6617,8 @@ function isFailedFlowRun(row) {
   return status.includes('fail') || status.includes('cancel') || status.includes('time out') || status.includes('timedout');
 }
 
-async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
-  const rows = groups.map(({ environment, rows: solutionRows, totalBeforeFilters }) => {
+function buildAutomatedSolutionTotalsRows(groups, options) {
+  return groups.map(({ environment, rows: solutionRows, totalBeforeFilters }) => {
     const publishers = new Set(solutionRows.map((solution) => solution.publisher?.friendlyname || solution.publisher?.uniquename || '').filter(Boolean));
     const componentTotals = sumSolutionReportCountFields(solutionRows);
     return {
@@ -6076,6 +6638,10 @@ async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
       'Microsoft owned included': options.includeMicrosoftOwned ? 'Yes' : 'No',
     };
   });
+}
+
+async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
+  const rows = buildAutomatedSolutionTotalsRows(groups, options);
   return {
     filename: `solutions-totals-by-environment-${safeFilename(new Date().toISOString().slice(0, 10))}.xlsx`,
     bytes: await exportSimpleWorkbook('Solution Totals', [

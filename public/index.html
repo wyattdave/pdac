@@ -48,7 +48,9 @@
       <button class="tab" type="button" data-tab="tables">Tables</button>
       <button class="tab" type="button" data-tab="connections">Connections</button>
       <button class="tab" type="button" data-tab="users">Users and Teams</button>
-      <button class="tab reports-tab" type="button" data-tab="reports" aria-disabled="false">Charts</button>
+      <button class="tab" type="button" data-tab="reports">Reports</button>
+      <button class="tab charts-tab" type="button" data-tab="charts" aria-disabled="false">Charts</button>
+      <button class="tab reports-tab" type="button" data-tab="trends" aria-disabled="false">Trends</button>
       <button class="tab" type="button" data-tab="auth">Settings</button>
     </nav>
 
@@ -113,12 +115,259 @@
         <section class="panel">
           <div class="section-title">
             <div>
+              <h2>Reports</h2>
+              <p class="muted">Run cross-environment reports in the background.</p>
+            </div>
+          </div>
+
+          <div id="automatedReportStatus" class="automated-report-status" aria-live="polite">
+            <div>
+              <span class="summary-label">Report queue</span>
+              <strong id="automatedReportStatusTitle">Idle</strong>
+            </div>
+            <div id="automatedReportStatusList" class="automated-report-status-list"></div>
+            <div id="automatedReportDownloads" class="actions automated-report-downloads"></div>
+          </div>
+
+          <section class="automated-report-section">
+            <div class="section-title compact-title">
+              <div>
+                <h3>Scheduled reports</h3>
+                <p class="muted">Run selected reports once per day after environments are loaded.</p>
+              </div>
+              <label class="checkbox-label">
+                <input id="automatedReportsRunOnLoad" type="checkbox" />
+                Run background reports on load
+              </label>
+            </div>
+
+            <div class="automated-report-grid">
+              <div class="automated-report-card" data-report-card="aiEvents">
+                <div class="automated-report-layout">
+                  <div class="automated-report-settings">
+                    <div class="section-title compact-title">
+                      <div>
+                        <h4>AI Flow events</h4>
+                        <p class="muted">Totals by environment and stacked event rows.</p>
+                      </div>
+                    </div>
+                    <div class="automated-report-filters">
+                      <label>
+                        Date range
+                        <select id="automatedAiEventsRange">
+                          <option value="month">Current calendar month</option>
+                          <option value="today">Today</option>
+                          <option value="7d">Last 7 days</option>
+                          <option value="28d">Last 28 days</option>
+                          <option value="365d">Last 365 days</option>
+                          <option value="custom">Custom range</option>
+                        </select>
+                      </label>
+                      <label>
+                        Start date
+                        <input id="automatedAiEventsStart" type="date" />
+                      </label>
+                      <label>
+                        End date
+                        <input id="automatedAiEventsEnd" type="date" />
+                      </label>
+                    </div>
+                    <div class="automated-report-options">
+                      <label class="checkbox-label">
+                        <input id="automatedAiEventsAutoDownload" type="checkbox" data-automated-auto-download="aiEvents" />
+                        Auto download when ready
+                      </label>
+                      <label class="checkbox-label">
+                        <input id="automatedAiEventsSaveDatabase" type="checkbox" data-automated-save-database="aiEvents" />
+                        Save to database
+                      </label>
+                    </div>
+                    <div class="actions">
+                      <button type="button" class="secondary" data-automated-run="ai-events:totals">Run totals</button>
+                      <button type="button" class="secondary" data-automated-run="ai-events:raw">Run raw</button>
+                      <button type="button" data-automated-run="ai-events:both">Run both</button>
+                    </div>
+                    <div id="automatedAiEventsDownloads" class="automated-report-card-downloads"></div>
+                  </div>
+                  <div id="automatedAiEventsEnvironments" class="automated-environment-list"></div>
+                </div>
+              </div>
+
+              <div class="automated-report-card" data-report-card="agentSessions">
+                <div class="automated-report-layout">
+                  <div class="automated-report-settings">
+                    <div class="section-title compact-title">
+                      <div>
+                        <h4>Agent Sessions</h4>
+                        <p class="muted">Totals by environment and stacked session rows.</p>
+                      </div>
+                    </div>
+                    <div class="automated-report-filters">
+                      <label>
+                        Date range
+                        <select id="automatedAgentSessionsRange">
+                          <option value="today">Today</option>
+                          <option value="7d">Last 7 days</option>
+                          <option value="28d">Last 28 days</option>
+                          <option value="month" selected>Current calendar month</option>
+                          <option value="365d">Last 365 days</option>
+                          <option value="custom">Custom range</option>
+                        </select>
+                      </label>
+                      <label>
+                        Start date
+                        <input id="automatedAgentSessionsStart" type="date" />
+                      </label>
+                      <label>
+                        End date
+                        <input id="automatedAgentSessionsEnd" type="date" />
+                      </label>
+                    </div>
+                    <div class="automated-report-options">
+                      <label class="checkbox-label">
+                        <input id="automatedAgentSessionsAutoDownload" type="checkbox" data-automated-auto-download="agentSessions" />
+                        Auto download when ready
+                      </label>
+                      <label class="checkbox-label">
+                        <input id="automatedAgentSessionsSaveDatabase" type="checkbox" data-automated-save-database="agentSessions" />
+                        Save to database
+                      </label>
+                    </div>
+                    <div class="actions">
+                      <button type="button" class="secondary" data-automated-run="agent-sessions:totals">Run totals</button>
+                      <button type="button" class="secondary" data-automated-run="agent-sessions:raw">Run raw</button>
+                      <button type="button" data-automated-run="agent-sessions:both">Run both</button>
+                    </div>
+                    <div id="automatedAgentSessionsDownloads" class="automated-report-card-downloads"></div>
+                  </div>
+                  <div id="automatedAgentSessionsEnvironments" class="automated-environment-list"></div>
+                </div>
+              </div>
+
+              <div class="automated-report-card" data-report-card="solutions">
+                <div class="automated-report-layout">
+                  <div class="automated-report-settings">
+                    <div class="section-title compact-title">
+                      <div>
+                        <h4>Solutions</h4>
+                        <p class="muted">Totals by environment and stacked solution rows.</p>
+                      </div>
+                    </div>
+                    <div class="automated-report-filters solutions-report-filters">
+                      <label class="span-2">
+                        Exclude publishers
+                        <input id="automatedSolutionsPublisherExclusions" placeholder="dave, Microsoft" />
+                      </label>
+                      <label class="checkbox-label">
+                        <input id="automatedSolutionsIncludeManaged" type="checkbox" />
+                        Show managed solutions
+                      </label>
+                      <label class="checkbox-label">
+                        <input id="automatedSolutionsIncludeMicrosoft" type="checkbox" />
+                        Show Microsoft owned
+                      </label>
+                    </div>
+                    <div class="automated-report-options">
+                      <label class="checkbox-label">
+                        <input id="automatedSolutionsAutoDownload" type="checkbox" data-automated-auto-download="solutions" />
+                        Auto download when ready
+                      </label>
+                      <label class="checkbox-label">
+                        <input id="automatedSolutionsSaveDatabase" type="checkbox" data-automated-save-database="solutions" />
+                        Save to database
+                      </label>
+                    </div>
+                    <div class="actions">
+                      <button type="button" class="secondary" data-automated-run="solutions:totals">Run totals</button>
+                      <button type="button" class="secondary" data-automated-run="solutions:raw">Run raw</button>
+                      <button type="button" data-automated-run="solutions:both">Run both</button>
+                    </div>
+                    <div id="automatedSolutionsDownloads" class="automated-report-card-downloads"></div>
+                  </div>
+                  <div id="automatedSolutionsEnvironments" class="automated-environment-list"></div>
+                </div>
+              </div>
+
+              <div class="automated-report-card" data-report-card="flowRuns">
+                <div class="automated-report-layout">
+                  <div class="automated-report-settings">
+                    <div class="section-title compact-title">
+                      <div>
+                        <h4>Flow Runs</h4>
+                        <p class="muted">Last 7 days: totals by environment and a raw list of failed runs only.</p>
+                      </div>
+                    </div>
+                    <div class="automated-report-options">
+                      <label class="checkbox-label">
+                        <input id="automatedFlowRunsAutoDownload" type="checkbox" data-automated-auto-download="flowRuns" />
+                        Auto download when ready
+                      </label>
+                      <label class="checkbox-label">
+                        <input id="automatedFlowRunsSaveDatabase" type="checkbox" data-automated-save-database="flowRuns" />
+                        Save to database
+                      </label>
+                    </div>
+                    <div class="actions flow-runs-report-actions">
+                      <button type="button" class="secondary" data-automated-run="flow-runs:totals">Run totals</button>
+                      <button type="button" class="secondary" data-automated-run="flow-runs:raw">Run failed runs</button>
+                      <button type="button" data-automated-run="flow-runs:both">Run both</button>
+                    </div>
+                    <div id="automatedFlowRunsDownloads" class="automated-report-card-downloads"></div>
+                  </div>
+                  <div id="automatedFlowRunsEnvironments" class="automated-environment-list"></div>
+                </div>
+              </div>
+
+            </div>
+          </section>
+        </section>
+      </section>
+
+      <section id="chartsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <div>
               <h2>Charts</h2>
               <p class="muted">Cross-environment usage and solution inventory charts.</p>
             </div>
           </div>
           <p class="muted reports-date-note">Flow runs cover the last 7 days. AI Flow and Copilot sessions cover the current calendar month. Solution inventory includes managed and Microsoft-owned solutions.</p>
-          <p id="reportsStatus" class="muted" aria-live="polite">Run a background report in Settings to populate these charts.</p>
+          <p id="chartsStatus" class="muted" aria-live="polite">Run a background report to populate these charts.</p>
+          <div id="chartsGrid" class="reports-chart-grid"></div>
+        </section>
+      </section>
+
+      <section id="trendsTab" class="tab-panel">
+        <section class="panel">
+          <div class="section-title">
+            <div>
+              <h2>Trends</h2>
+              <p class="muted">Stored report totals over time.</p>
+            </div>
+          </div>
+          <div class="trend-controls">
+            <label>
+              Date range
+              <select id="trendRange">
+                <option value="28d">Last 28 days</option>
+                <option value="today">Today</option>
+                <option value="7d">Last 7 days</option>
+                <option value="month">Current calendar month</option>
+                <option value="365d">Last 365 days</option>
+                <option value="730d">Last 2 years</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <label>
+              Start date
+              <input id="trendStart" type="date" />
+            </label>
+            <label>
+              End date
+              <input id="trendEnd" type="date" />
+            </label>
+          </div>
+          <p id="reportsStatus" class="muted" aria-live="polite">Enable Save to database on a report, then run it to populate trends.</p>
           <div id="reportsCharts" class="reports-chart-grid"></div>
         </section>
       </section>
@@ -159,150 +408,19 @@
           <div id="status" class="settings-status-spacer" aria-hidden="true"></div>
           <div class="environment-report-spacer" aria-hidden="true"></div>
 
-          <div id="automatedReportStatus" class="automated-report-status" aria-live="polite">
-            <div>
-              <span class="summary-label">Automated reports</span>
-              <strong id="automatedReportStatusTitle">Idle</strong>
-            </div>
-            <div id="automatedReportStatusList" class="automated-report-status-list"></div>
-            <div id="automatedReportDownloads" class="actions automated-report-downloads"></div>
-          </div>
-
-          <section class="automated-report-section">
+          <section class="settings-sql-section">
             <div class="section-title compact-title">
               <div>
-                <h3>Automated reports</h3>
-                <p class="muted">Run cross-environment reports in the background.</p>
+                <h3>SQL tables</h3>
+                <p id="sqlTablesSummary" class="muted">Local report database tables.</p>
               </div>
-              <label class="checkbox-label">
-                <input id="automatedReportsRunOnLoad" type="checkbox" />
-                Run background reports on load
-              </label>
-              <label class="checkbox-label">
-                <input id="automatedReportsAutoDownload" type="checkbox" />
-                Auto download when ready
-              </label>
+              <div class="actions">
+                <button id="refreshSqlTablesButton" class="secondary" type="button">Refresh</button>
+                <button id="exportSqlTablesButton" class="secondary" type="button">Export Excel</button>
+                <button id="deleteSqlRecordsButton" class="danger-button" type="button">Delete all records</button>
+              </div>
             </div>
-
-            <div class="automated-report-grid">
-              <div class="automated-report-card">
-                <div class="section-title compact-title">
-                  <div>
-                    <h4>AI Flow events</h4>
-                    <p class="muted">Totals by environment and stacked event rows.</p>
-                  </div>
-                </div>
-                <div class="automated-report-filters">
-                  <label>
-                    Date range
-                    <select id="automatedAiEventsRange">
-                      <option value="month">Current calendar month</option>
-                      <option value="today">Today</option>
-                      <option value="7d">Last 7 days</option>
-                      <option value="28d">Last 28 days</option>
-                      <option value="365d">Last 365 days</option>
-                      <option value="custom">Custom range</option>
-                    </select>
-                  </label>
-                  <label>
-                    Start date
-                    <input id="automatedAiEventsStart" type="date" />
-                  </label>
-                  <label>
-                    End date
-                    <input id="automatedAiEventsEnd" type="date" />
-                  </label>
-                </div>
-                <div id="automatedAiEventsEnvironments" class="automated-environment-list"></div>
-                <div class="actions">
-                  <button type="button" class="secondary" data-automated-run="ai-events:totals">Run totals</button>
-                  <button type="button" class="secondary" data-automated-run="ai-events:raw">Run raw</button>
-                  <button type="button" data-automated-run="ai-events:both">Run both</button>
-                </div>
-              </div>
-
-              <div class="automated-report-card">
-                <div class="section-title compact-title">
-                  <div>
-                    <h4>Agent Sessions</h4>
-                    <p class="muted">Totals by environment and stacked session rows.</p>
-                  </div>
-                </div>
-                <div class="automated-report-filters">
-                  <label>
-                    Date range
-                    <select id="automatedAgentSessionsRange">
-                      <option value="today">Today</option>
-                      <option value="7d">Last 7 days</option>
-                      <option value="28d">Last 28 days</option>
-                      <option value="month" selected>Current calendar month</option>
-                      <option value="365d">Last 365 days</option>
-                      <option value="custom">Custom range</option>
-                    </select>
-                  </label>
-                  <label>
-                    Start date
-                    <input id="automatedAgentSessionsStart" type="date" />
-                  </label>
-                  <label>
-                    End date
-                    <input id="automatedAgentSessionsEnd" type="date" />
-                  </label>
-                </div>
-                <div id="automatedAgentSessionsEnvironments" class="automated-environment-list"></div>
-                <div class="actions">
-                  <button type="button" class="secondary" data-automated-run="agent-sessions:totals">Run totals</button>
-                  <button type="button" class="secondary" data-automated-run="agent-sessions:raw">Run raw</button>
-                  <button type="button" data-automated-run="agent-sessions:both">Run both</button>
-                </div>
-              </div>
-
-              <div class="automated-report-card">
-                <div class="section-title compact-title">
-                  <div>
-                    <h4>Solutions</h4>
-                    <p class="muted">Totals by environment and stacked solution rows.</p>
-                  </div>
-                </div>
-                <div class="automated-report-filters solutions-report-filters">
-                  <label class="span-2">
-                    Exclude publishers
-                    <input id="automatedSolutionsPublisherExclusions" placeholder="dave, Microsoft" />
-                  </label>
-                  <label class="checkbox-label">
-                    <input id="automatedSolutionsIncludeManaged" type="checkbox" />
-                    Show managed solutions
-                  </label>
-                  <label class="checkbox-label">
-                    <input id="automatedSolutionsIncludeMicrosoft" type="checkbox" />
-                    Show Microsoft owned
-                  </label>
-                </div>
-                <div id="automatedSolutionsEnvironments" class="automated-environment-list"></div>
-                <div class="actions">
-                  <button type="button" class="secondary" data-automated-run="solutions:totals">Run totals</button>
-                  <button type="button" class="secondary" data-automated-run="solutions:raw">Run raw</button>
-                  <button type="button" data-automated-run="solutions:both">Run both</button>
-                </div>
-              </div>
-
-              <div class="automated-report-card">
-                <div class="section-title compact-title">
-                  <div>
-                    <h4>Flow Runs</h4>
-                    <p class="muted">Last 7 days: totals by environment and a raw list of failed runs only.</p>
-                  </div>
-                </div>
-                <div id="automatedFlowRunsEnvironments" class="automated-environment-list"></div>
-                <div class="flow-runs-report-spacer" aria-hidden="true"></div>
-                <div class="actions flow-runs-report-actions">
-                  <button type="button" class="secondary" data-automated-run="flow-runs:totals">Run totals</button>
-                  <button type="button" class="secondary" data-automated-run="flow-runs:raw">Run failed runs</button>
-                  <button type="button" data-automated-run="flow-runs:both">Run both</button>
-                </div>
-              </div>
-
-            </div>
+            <div id="sqlTablesList" class="sql-table-list"></div>
           </section>
         </section>
       </section>
@@ -961,6 +1079,25 @@
         <div class="actions modal-actions">
           <button id="connectionDeleteConfirm" class="danger-button" type="button">Delete connection</button>
           <button id="connectionDeleteCancel" class="secondary" type="button">Cancel</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="sqlDeleteModal" class="modal-backdrop" hidden>
+      <section class="modal delete-modal" role="dialog" aria-modal="true" aria-labelledby="sqlDeleteTitle">
+        <div class="section-title compact-title">
+          <div>
+            <h2 id="sqlDeleteTitle">Delete SQL Records</h2>
+            <p id="sqlDeleteMeta" class="muted"></p>
+          </div>
+          <button id="sqlDeleteClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
+        </div>
+        <div class="guide delete-warning">
+          <p>This deletes all records from the local SQL report tables. Saved trend data will be cleared, but the database schema will stay in place.</p>
+        </div>
+        <div class="actions modal-actions">
+          <button id="sqlDeleteConfirm" class="danger-button" type="button">Delete all records</button>
+          <button id="sqlDeleteCancel" class="secondary" type="button">Cancel</button>
         </div>
       </section>
     </div>

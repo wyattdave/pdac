@@ -204,6 +204,14 @@ footer a:hover {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.trend-controls {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, 0.5fr) minmax(160px, 0.5fr);
+  margin-bottom: 12px;
+}
+
 .report-chart-card {
   background: var(--soft);
   border: 1px solid var(--line);
@@ -214,9 +222,84 @@ footer a:hover {
   padding: 14px;
 }
 
+.report-chart-card-hidden {
+  background: var(--panel);
+}
+
+.report-chart-header {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.report-chart-actions {
+  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.report-chart-toggle {
+  min-height: 34px;
+  padding: 7px 12px;
+}
+
 .report-chart-card .muted {
   font-size: 13px;
   padding: 3px 0 0;
+}
+
+.report-environment-picker {
+  position: relative;
+}
+
+.report-environment-picker summary {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  font-weight: 650;
+  min-height: 34px;
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+.report-environment-menu {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.18);
+  display: grid;
+  gap: 10px;
+  min-width: 260px;
+  padding: 10px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+}
+
+.report-environment-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.report-environment-actions button {
+  min-height: 30px;
+  padding: 5px 10px;
+}
+
+.report-environment-options {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow: auto;
 }
 
 .report-chart-canvas {
@@ -745,6 +828,41 @@ select:disabled {
   height: 16px;
 }
 
+.settings-sql-section {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 18px;
+}
+
+.sql-table-list {
+  display: grid;
+  gap: 8px;
+}
+
+.sql-table-row {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  padding: 12px;
+}
+
+.sql-table-metric {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sql-table-download {
+  min-height: 34px;
+  padding: 7px 12px;
+}
+
 .selected-environment-bar {
   align-items: center;
   background: var(--bg);
@@ -836,7 +954,7 @@ select:disabled {
 .automated-report-grid {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .automated-report-card {
@@ -851,6 +969,18 @@ select:disabled {
   margin-bottom: 0;
 }
 
+.automated-report-layout {
+  align-items: start;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(280px, 0.75fr) minmax(340px, 1.25fr);
+}
+
+.automated-report-settings {
+  display: grid;
+  gap: 12px;
+}
+
 .automated-report-filters {
   display: grid;
   gap: 10px;
@@ -860,6 +990,11 @@ select:disabled {
 .automated-report-filters label:first-child,
 .automated-report-filters .span-2 {
   grid-column: 1 / -1;
+}
+
+.automated-report-options {
+  display: grid;
+  gap: 8px;
 }
 
 .automated-environment-list {
@@ -888,18 +1023,9 @@ select:disabled {
   white-space: nowrap;
 }
 
-.environment-copy-panel {
-  align-items: end;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  display: grid;
+.automated-environment-clipboard {
+  display: flex;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding: 8px;
-}
-
-.environment-copy-panel button {
-  white-space: nowrap;
 }
 
 .automated-environment-options {
@@ -937,6 +1063,10 @@ select:disabled {
 
 .automated-report-card .flow-runs-report-actions {
   align-items: center;
+}
+
+.automated-report-card-downloads:empty {
+  display: none;
 }
 
 .summary-label {
@@ -2247,13 +2377,25 @@ select:disabled {
   .selected-environment-bar,
   .automated-report-status,
   .automated-report-grid,
+  .automated-report-layout,
   .automated-report-download-row,
   .automated-report-filters,
   .automated-environment-tools,
-  .environment-copy-panel,
+  .sql-table-row,
+  .report-chart-header,
   .reports-chart-grid,
+  .trend-controls,
   .component-row {
     grid-template-columns: 1fr;
+  }
+
+  .report-chart-actions {
+    justify-content: flex-start;
+  }
+
+  .report-environment-menu {
+    left: 0;
+    right: auto;
   }
 
   .ai-event-detail-body {

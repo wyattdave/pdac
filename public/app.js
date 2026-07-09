@@ -57,25 +57,52 @@ const el = {
   selectedEnvironmentId: document.querySelector('#selectedEnvironmentId'),
   selectedEnvironmentUrl: document.querySelector('#selectedEnvironmentUrl'),
   copyEnvironmentButton: document.querySelector('#copyEnvironmentButton'),
+  sqlTablesSummary: document.querySelector('#sqlTablesSummary'),
+  refreshSqlTablesButton: document.querySelector('#refreshSqlTablesButton'),
+  exportSqlTablesButton: document.querySelector('#exportSqlTablesButton'),
+  deleteSqlRecordsButton: document.querySelector('#deleteSqlRecordsButton'),
+  sqlTablesList: document.querySelector('#sqlTablesList'),
+  sqlDeleteModal: document.querySelector('#sqlDeleteModal'),
+  sqlDeleteTitle: document.querySelector('#sqlDeleteTitle'),
+  sqlDeleteMeta: document.querySelector('#sqlDeleteMeta'),
+  sqlDeleteClose: document.querySelector('#sqlDeleteClose'),
+  sqlDeleteConfirm: document.querySelector('#sqlDeleteConfirm'),
+  sqlDeleteCancel: document.querySelector('#sqlDeleteCancel'),
   automatedReportStatusTitle: document.querySelector('#automatedReportStatusTitle'),
   automatedReportStatusList: document.querySelector('#automatedReportStatusList'),
   automatedReportDownloads: document.querySelector('#automatedReportDownloads'),
   automatedReportsRunOnLoad: document.querySelector('#automatedReportsRunOnLoad'),
-  automatedReportsAutoDownload: document.querySelector('#automatedReportsAutoDownload'),
   automatedAiEventsRange: document.querySelector('#automatedAiEventsRange'),
   automatedAiEventsStart: document.querySelector('#automatedAiEventsStart'),
   automatedAiEventsEnd: document.querySelector('#automatedAiEventsEnd'),
+  automatedAiEventsAutoDownload: document.querySelector('#automatedAiEventsAutoDownload'),
+  automatedAiEventsSaveDatabase: document.querySelector('#automatedAiEventsSaveDatabase'),
   automatedAiEventsEnvironments: document.querySelector('#automatedAiEventsEnvironments'),
+  automatedAiEventsDownloads: document.querySelector('#automatedAiEventsDownloads'),
   automatedAgentSessionsRange: document.querySelector('#automatedAgentSessionsRange'),
   automatedAgentSessionsStart: document.querySelector('#automatedAgentSessionsStart'),
   automatedAgentSessionsEnd: document.querySelector('#automatedAgentSessionsEnd'),
+  automatedAgentSessionsAutoDownload: document.querySelector('#automatedAgentSessionsAutoDownload'),
+  automatedAgentSessionsSaveDatabase: document.querySelector('#automatedAgentSessionsSaveDatabase'),
   automatedAgentSessionsEnvironments: document.querySelector('#automatedAgentSessionsEnvironments'),
+  automatedAgentSessionsDownloads: document.querySelector('#automatedAgentSessionsDownloads'),
   automatedSolutionsPublisherExclusions: document.querySelector('#automatedSolutionsPublisherExclusions'),
   automatedSolutionsIncludeManaged: document.querySelector('#automatedSolutionsIncludeManaged'),
   automatedSolutionsIncludeMicrosoft: document.querySelector('#automatedSolutionsIncludeMicrosoft'),
+  automatedSolutionsAutoDownload: document.querySelector('#automatedSolutionsAutoDownload'),
+  automatedSolutionsSaveDatabase: document.querySelector('#automatedSolutionsSaveDatabase'),
   automatedSolutionsEnvironments: document.querySelector('#automatedSolutionsEnvironments'),
+  automatedSolutionsDownloads: document.querySelector('#automatedSolutionsDownloads'),
+  automatedFlowRunsAutoDownload: document.querySelector('#automatedFlowRunsAutoDownload'),
+  automatedFlowRunsSaveDatabase: document.querySelector('#automatedFlowRunsSaveDatabase'),
   automatedFlowRunsEnvironments: document.querySelector('#automatedFlowRunsEnvironments'),
+  automatedFlowRunsDownloads: document.querySelector('#automatedFlowRunsDownloads'),
   reportsEnvironments: document.querySelector('#reportsEnvironments'),
+  trendRange: document.querySelector('#trendRange'),
+  trendStart: document.querySelector('#trendStart'),
+  trendEnd: document.querySelector('#trendEnd'),
+  chartsStatus: document.querySelector('#chartsStatus'),
+  chartsGrid: document.querySelector('#chartsGrid'),
   reportsStatus: document.querySelector('#reportsStatus'),
   reportsCharts: document.querySelector('#reportsCharts'),
   status: document.querySelector('#status'),
@@ -246,9 +273,18 @@ const state = {
       flowRuns: null,
       reports: null,
     },
+    reportOptions: {
+      aiEvents: { autoDownload: false, saveToDatabase: false },
+      agentSessions: { autoDownload: false, saveToDatabase: false },
+      solutions: { autoDownload: false, saveToDatabase: false },
+      flowRuns: { autoDownload: false, saveToDatabase: false },
+    },
     charts: [],
+    trendCharts: [],
+    chartDashboardData: null,
     dashboardData: null,
   },
+  sqlTables: [],
   businessUnits: [],
   businessUnitsLoaded: false,
   users: [],
@@ -268,6 +304,7 @@ const state = {
   connectionUser: null,
   connectionWarnings: [],
   pendingConnectionDeleteId: '',
+  pendingSqlDelete: false,
   roles: [],
   selectedTeamId: '',
   roleAssignmentPrincipal: null,
@@ -340,10 +377,10 @@ const state = {
 const LAST_ACCOUNT_KEY = 'pdacLastAccountHomeId';
 const LAST_ENVIRONMENT_PREFIX = 'pdacLastEnvironment';
 const AUTOMATED_REPORTS_RUN_ON_LOAD_KEY = 'pdacAutomatedReportsRunOnLoad';
-const AUTOMATED_REPORTS_AUTO_DOWNLOAD_KEY = 'pdacAutomatedReportsAutoDownload';
 const AUTOMATED_REPORTS_LAST_AUTO_RUN_DATE_KEY = 'pdacAutomatedReportsLastAutoRunDate';
 const AUTOMATED_SOLUTIONS_PUBLISHER_EXCLUSIONS_KEY = 'pdacAutomatedSolutionsPublisherExclusions';
 const AUTOMATED_REPORT_SETTINGS_KEY = 'pdacAutomatedReportSettings';
+const REPORT_CHART_SETTINGS_KEY = 'pdacReportChartSettings';
 const USERS_TEAMS_SEARCH_DELAY_MS = 220;
 
 let userSearchTimer = 0;
@@ -369,6 +406,24 @@ el.copyEnvironmentButton.addEventListener('click', () => copySelectedEnvironment
   toast(error.message);
   console.error(error);
 }));
+el.refreshSqlTablesButton?.addEventListener('click', () => withBusy(el.refreshSqlTablesButton, loadSqlTables, 'Refreshing'));
+el.exportSqlTablesButton?.addEventListener('click', () => withBusy(el.exportSqlTablesButton, exportSqlTables, 'Exporting'));
+el.sqlTablesList?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-sql-table-export]');
+  if (!button) {
+    return;
+  }
+  withBusy(button, () => exportSqlTable(button.dataset.sqlTableExport || ''), 'Downloading');
+});
+el.deleteSqlRecordsButton?.addEventListener('click', openSqlDeleteModal);
+el.sqlDeleteClose?.addEventListener('click', closeSqlDeleteModal);
+el.sqlDeleteCancel?.addEventListener('click', closeSqlDeleteModal);
+el.sqlDeleteConfirm?.addEventListener('click', () => {
+  confirmDeleteSqlRecords().catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
 el.signInButton.addEventListener('click', () => withBusy(el.signInButton, signIn));
 el.signInDifferentButton.addEventListener('click', () => withBusy(el.signInDifferentButton, signInDifferent));
 el.logoutButton.addEventListener('click', () => withBusy(el.logoutButton, logout));
@@ -494,8 +549,8 @@ el.automatedReportsRunOnLoad.addEventListener('change', () => {
     clearAutomatedReportTimer();
   }
 });
-el.automatedReportsAutoDownload.addEventListener('change', () => {
-  localStorage.setItem(AUTOMATED_REPORTS_AUTO_DOWNLOAD_KEY, el.automatedReportsAutoDownload.checked ? 'true' : 'false');
+document.querySelectorAll('[data-automated-auto-download], [data-automated-save-database]').forEach((input) => {
+  input.addEventListener('change', saveAutomatedReportSettings);
 });
 el.automatedSolutionsPublisherExclusions.addEventListener('input', () => {
   localStorage.setItem(AUTOMATED_SOLUTIONS_PUBLISHER_EXCLUSIONS_KEY, el.automatedSolutionsPublisherExclusions.value || '');
@@ -514,6 +569,23 @@ el.automatedAgentSessionsEnvironments.addEventListener('change', () => handleAut
 el.automatedSolutionsEnvironments.addEventListener('change', () => handleAutomatedEnvironmentSelection('solutions'));
 el.automatedFlowRunsEnvironments.addEventListener('change', () => handleAutomatedEnvironmentSelection('flowRuns'));
 el.reportsEnvironments?.addEventListener('change', () => handleAutomatedEnvironmentSelection('reports'));
+el.trendRange?.addEventListener('change', () => {
+  syncTrendRangeVisibility();
+  loadCachedReportsDashboard().catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.trendStart?.addEventListener('change', () => loadCachedReportsDashboard().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+}));
+el.trendEnd?.addEventListener('change', () => loadCachedReportsDashboard().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+}));
+el.reportsCharts?.addEventListener('click', handleReportChartClick);
+el.reportsCharts?.addEventListener('change', handleReportChartChange);
 document.addEventListener('input', (event) => {
   const search = event.target.closest('[data-automated-environment-search]');
   if (search) {
@@ -527,14 +599,20 @@ document.addEventListener('input', (event) => {
   }
 });
 document.addEventListener('click', (event) => {
-  const openButton = event.target.closest('[data-environment-copy-target]');
-  if (openButton) {
-    toggleAutomatedEnvironmentCopyPanel(openButton.dataset.environmentCopyTarget || '');
-    return;
-  }
   const copyButton = event.target.closest('[data-copy-automated-environments]');
   if (copyButton) {
-    copyAutomatedReportEnvironments(copyButton.dataset.copyAutomatedEnvironments || '');
+    copyAutomatedReportEnvironments(copyButton.dataset.copyAutomatedEnvironments || '').catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
+    return;
+  }
+  const pasteButton = event.target.closest('[data-paste-automated-environments]');
+  if (pasteButton) {
+    pasteAutomatedReportEnvironments(pasteButton.dataset.pasteAutomatedEnvironments || '').catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
   }
 });
 el.roleSearch.addEventListener('input', filterRoles);
@@ -734,6 +812,8 @@ document.addEventListener('keydown', (event) => {
     closeTableDocumentModal();
   } else if (!el.connectionDeleteModal.hidden) {
     closeConnectionDeleteModal();
+  } else if (el.sqlDeleteModal && !el.sqlDeleteModal.hidden) {
+    closeSqlDeleteModal();
   }
 });
 el.loadComponentsButton.addEventListener('click', () => withBusy(el.loadComponentsButton, loadSolutionComponents));
@@ -817,8 +897,12 @@ renderAgentSessions();
 renderFlowRuns();
 renderAutomatedReportControls();
 renderAutomatedReportStatus();
+updateChartsTabAvailability();
 updateReportsTabAvailability();
 await loadStatus();
+loadSqlTables().catch((error) => {
+  console.warn('Unable to load SQL tables.', error);
+});
 
 async function loadStatus() {
   const status = await api('/api/status');
@@ -1235,6 +1319,13 @@ async function writeClipboard(text) {
   textarea.remove();
 }
 
+async function readClipboard() {
+  if (!navigator.clipboard?.readText) {
+    throw new Error('Clipboard paste is not available in this browser.');
+  }
+  return navigator.clipboard.readText();
+}
+
 function activateTab(name) {
   el.tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
   el.tabPanels.forEach((panel) => panel.classList.toggle('active', panel.id === `${name}Tab`));
@@ -1476,8 +1567,10 @@ function clearEnvironmentData() {
   state.selectedAgentSessionId = '';
   state.flowRuns = [];
   state.flowRunsLoaded = false;
+  state.automatedReports.chartDashboardData = null;
   state.automatedReports.dashboardData = null;
   destroyReportCharts();
+  destroyTrendCharts();
   state.selectedTableLogicalName = '';
   state.selectedTableDetails = null;
   state.selectedTableDiagram = null;
@@ -1597,8 +1690,8 @@ function resetAutomatedReportFilters() {
 
 function initAutomatedReportSettings() {
   el.automatedReportsRunOnLoad.checked = localStorage.getItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY) === 'true';
-  el.automatedReportsAutoDownload.checked = localStorage.getItem(AUTOMATED_REPORTS_AUTO_DOWNLOAD_KEY) === 'true';
   restoreAutomatedReportSettings();
+  syncTrendRangeVisibility();
   scheduleNextAutomatedReportRun();
 }
 
@@ -1616,6 +1709,7 @@ function restoreAutomatedReportSettings() {
   const aiEvents = settings.aiEvents || {};
   const agentSessions = settings.agentSessions || {};
   const solutions = settings.solutions || {};
+  const reportOptions = settings.reportOptions || {};
   const environments = settings.environments || {};
   el.automatedAiEventsRange.value = selectValueOrDefault(el.automatedAiEventsRange, aiEvents.range, el.automatedAiEventsRange.value);
   el.automatedAiEventsStart.value = aiEvents.start || el.automatedAiEventsStart.value;
@@ -1626,6 +1720,22 @@ function restoreAutomatedReportSettings() {
   el.automatedSolutionsPublisherExclusions.value = solutions.excludedPublishers ?? localStorage.getItem(AUTOMATED_SOLUTIONS_PUBLISHER_EXCLUSIONS_KEY) ?? '';
   el.automatedSolutionsIncludeManaged.checked = Boolean(solutions.includeManaged);
   el.automatedSolutionsIncludeMicrosoft.checked = Boolean(solutions.includeMicrosoftOwned);
+  for (const groupKey of automatedReportGroupKeys()) {
+    const options = reportOptions[groupKey] || {};
+    const autoDownloadInput = automatedReportOptionInput(groupKey, 'autoDownload');
+    const saveDatabaseInput = automatedReportOptionInput(groupKey, 'saveToDatabase');
+    const migratedGlobalAutoDownload = localStorage.getItem('pdacAutomatedReportsAutoDownload') === 'true';
+    state.automatedReports.reportOptions[groupKey] = {
+      autoDownload: options.autoDownload ?? migratedGlobalAutoDownload,
+      saveToDatabase: Boolean(options.saveToDatabase),
+    };
+    if (autoDownloadInput) {
+      autoDownloadInput.checked = Boolean(state.automatedReports.reportOptions[groupKey].autoDownload);
+    }
+    if (saveDatabaseInput) {
+      saveDatabaseInput.checked = Boolean(state.automatedReports.reportOptions[groupKey].saveToDatabase);
+    }
+  }
   for (const groupKey of ['aiEvents', 'agentSessions', 'solutions', 'flowRuns', 'reports']) {
     if (Array.isArray(environments[groupKey])) {
       state.automatedReports.selectedEnvironmentIds[groupKey] = new Set(environments[groupKey]);
@@ -1661,9 +1771,39 @@ function saveAutomatedReportSettings() {
       includeManaged: el.automatedSolutionsIncludeManaged.checked,
       includeMicrosoftOwned: el.automatedSolutionsIncludeMicrosoft.checked,
     },
+    reportOptions: Object.fromEntries(automatedReportGroupKeys().map((groupKey) => {
+      const options = {
+        autoDownload: Boolean(automatedReportOptionInput(groupKey, 'autoDownload')?.checked),
+        saveToDatabase: Boolean(automatedReportOptionInput(groupKey, 'saveToDatabase')?.checked),
+      };
+      state.automatedReports.reportOptions[groupKey] = options;
+      return [groupKey, options];
+    })),
     environments,
   };
   localStorage.setItem(AUTOMATED_REPORT_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function automatedReportOptionInput(groupKey, option) {
+  const lookup = {
+    aiEvents: {
+      autoDownload: el.automatedAiEventsAutoDownload,
+      saveToDatabase: el.automatedAiEventsSaveDatabase,
+    },
+    agentSessions: {
+      autoDownload: el.automatedAgentSessionsAutoDownload,
+      saveToDatabase: el.automatedAgentSessionsSaveDatabase,
+    },
+    solutions: {
+      autoDownload: el.automatedSolutionsAutoDownload,
+      saveToDatabase: el.automatedSolutionsSaveDatabase,
+    },
+    flowRuns: {
+      autoDownload: el.automatedFlowRunsAutoDownload,
+      saveToDatabase: el.automatedFlowRunsSaveDatabase,
+    },
+  };
+  return lookup[groupKey]?.[option] || null;
 }
 
 function handleAutomatedReportSettingsChange() {
@@ -1701,24 +1841,16 @@ function renderAutomatedEnvironmentSelector(groupKey, container) {
     return;
   }
   const selected = getAutomatedSelectedEnvironmentIds(groupKey);
-  const sourceOptions = automatedReportGroupKeys()
-    .filter((sourceKey) => sourceKey !== groupKey)
-    .map((sourceKey) => `<option value="${escapeAttr(sourceKey)}">${escapeHtml(automatedGroupLabel(sourceKey))}</option>`)
-    .join('');
   container.innerHTML = `
     <div class="automated-environment-tools">
       <label class="search">
         Search environments
         <input data-automated-environment-search="${escapeAttr(groupKey)}" placeholder="Type to filter environments" value="${escapeAttr(previousSearch)}" />
       </label>
-      <button class="secondary" type="button" data-environment-copy-target="${escapeAttr(groupKey)}">Copy environments</button>
-    </div>
-    <div class="environment-copy-panel" data-environment-copy-panel="${escapeAttr(groupKey)}" hidden>
-      <label>
-        Copy selected environments from
-        <select data-environment-copy-source="${escapeAttr(groupKey)}">${sourceOptions}</select>
-      </label>
-      <button type="button" data-copy-automated-environments="${escapeAttr(groupKey)}">Copy selected environments</button>
+      <div class="automated-environment-clipboard">
+        <button class="secondary" type="button" data-copy-automated-environments="${escapeAttr(groupKey)}">Copy</button>
+        <button class="secondary" type="button" data-paste-automated-environments="${escapeAttr(groupKey)}">Paste</button>
+      </div>
     </div>
     <div class="automated-environment-options">
       ${environments.map((environment) => `
@@ -1738,29 +1870,64 @@ function automatedReportGroupKeys() {
   return ['aiEvents', 'agentSessions', 'solutions', 'flowRuns'];
 }
 
-function toggleAutomatedEnvironmentCopyPanel(groupKey) {
-  const container = automatedEnvironmentContainer(groupKey);
-  const panel = container?.querySelector('[data-environment-copy-panel]');
-  if (!panel) {
-    return;
+async function copyAutomatedReportEnvironments(groupKey) {
+  if (!automatedReportGroupKeys().includes(groupKey)) {
+    throw new Error('Choose a valid report section.');
   }
-  panel.hidden = !panel.hidden;
-  if (!panel.hidden) {
-    panel.querySelector('select')?.focus();
+  const environmentIds = [...getAutomatedSelectedEnvironmentIds(groupKey)];
+  if (!environmentIds.length) {
+    throw new Error('Select at least one environment to copy.');
   }
+  const environments = environmentIds
+    .map((environmentName) => state.environments.find((environment) => environment.name === environmentName))
+    .filter(Boolean)
+    .map((environment) => ({
+      name: environment.name,
+      displayName: environment.displayName || environment.name,
+      orgUrl: environment.orgUrl || '',
+    }));
+  await writeClipboard(JSON.stringify({
+    type: 'pdac-report-environments',
+    version: 1,
+    environments,
+  }, null, 2));
+  toast(`${environments.length} environment${environments.length === 1 ? '' : 's'} copied.`);
 }
 
-function copyAutomatedReportEnvironments(targetGroupKey) {
-  const container = automatedEnvironmentContainer(targetGroupKey);
-  const sourceGroupKey = container?.querySelector('[data-environment-copy-source]')?.value || '';
-  if (!automatedReportGroupKeys().includes(targetGroupKey) || !automatedReportGroupKeys().includes(sourceGroupKey)) {
-    return;
+async function pasteAutomatedReportEnvironments(groupKey) {
+  if (!automatedReportGroupKeys().includes(groupKey)) {
+    throw new Error('Choose a valid report section.');
   }
-  state.automatedReports.selectedEnvironmentIds[targetGroupKey] = new Set(getAutomatedSelectedEnvironmentIds(sourceGroupKey));
+  const text = await readClipboard();
+  const environmentIds = parseAutomatedEnvironmentClipboard(text);
+  state.automatedReports.selectedEnvironmentIds[groupKey] = new Set(environmentIds);
   pruneAutomatedReportEnvironmentSelections();
   saveAutomatedReportSettings();
-  renderAutomatedEnvironmentSelector(targetGroupKey, container);
-  toast(`Copied selected environments from ${automatedGroupLabel(sourceGroupKey)}.`);
+  const container = automatedEnvironmentContainer(groupKey);
+  renderAutomatedEnvironmentSelector(groupKey, container);
+  toast(`${environmentIds.length} environment${environmentIds.length === 1 ? '' : 's'} pasted to ${automatedGroupLabel(groupKey)}.`);
+}
+
+function parseAutomatedEnvironmentClipboard(text) {
+  let data;
+  try {
+    data = JSON.parse(String(text || ''));
+  } catch {
+    throw new Error('Clipboard does not contain valid report environments.');
+  }
+  if (data?.type !== 'pdac-report-environments' || !Array.isArray(data.environments)) {
+    throw new Error('Clipboard does not contain valid report environments.');
+  }
+  const available = new Set(state.environments
+    .filter((environment) => environment.orgUrl && isEnvironmentVisible(environment))
+    .map((environment) => environment.name));
+  const environmentIds = data.environments
+    .map((environment) => String(environment?.name || environment?.environmentName || '').trim())
+    .filter((environmentName) => available.has(environmentName));
+  if (!environmentIds.length) {
+    throw new Error('Clipboard environments are not valid for the loaded environment list.');
+  }
+  return [...new Set(environmentIds)];
 }
 
 function getAutomatedSelectedEnvironmentIds(groupKey) {
@@ -1844,6 +2011,7 @@ async function queueAutomatedReports(value) {
   }
   const types = [reportType === 'both' ? 'both' : reportType];
   const environments = getAutomatedReportEnvironments(groupKey);
+  const reportOptions = getAutomatedReportOptions(groupKey);
   removeAutomatedReportDownloads(apiGroup);
   for (const type of types) {
     state.automatedReports.queue.push({
@@ -1853,7 +2021,8 @@ async function queueAutomatedReports(value) {
       label: automatedReportJobLabel(groupKey, type),
       environments,
       reportRunId: createAutomatedReportRunId(),
-      body: { ...buildAutomatedReportBody(groupKey, environments), forceRefresh: true },
+      autoDownload: reportOptions.autoDownload,
+      body: { ...buildAutomatedReportBody(groupKey, environments), forceRefresh: true, saveToDatabase: reportOptions.saveToDatabase },
     });
   }
   renderAutomatedReportStatus();
@@ -1918,6 +2087,7 @@ function queueAutomatedReportsOnLoad() {
   localStorage.setItem(AUTOMATED_REPORTS_LAST_AUTO_RUN_DATE_KEY, today);
   for (const [apiGroup, groupKey] of runnableGroups) {
     const environments = getAutomatedReportEnvironmentsForAutoRun(groupKey);
+    const reportOptions = getAutomatedReportOptions(groupKey);
     removeAutomatedReportDownloads(apiGroup);
     state.automatedReports.queue.push({
       apiGroup,
@@ -1926,7 +2096,8 @@ function queueAutomatedReportsOnLoad() {
       label: automatedReportJobLabel(groupKey, 'both'),
       environments,
       reportRunId: createAutomatedReportRunId(),
-      body: buildAutomatedReportBody(groupKey, environments),
+      autoDownload: reportOptions.autoDownload,
+      body: { ...buildAutomatedReportBody(groupKey, environments), saveToDatabase: reportOptions.saveToDatabase },
     });
   }
   renderAutomatedReportStatus();
@@ -1950,6 +2121,15 @@ function getAutomatedReportEnvironmentsForAutoRun(groupKey) {
   }
 }
 
+function getAutomatedReportOptions(groupKey) {
+  const options = {
+    autoDownload: Boolean(automatedReportOptionInput(groupKey, 'autoDownload')?.checked),
+    saveToDatabase: Boolean(automatedReportOptionInput(groupKey, 'saveToDatabase')?.checked),
+  };
+  state.automatedReports.reportOptions[groupKey] = options;
+  return options;
+}
+
 async function runAutomatedReportQueue() {
   state.automatedReports.running = true;
   try {
@@ -1965,10 +2145,13 @@ async function runAutomatedReportQueue() {
       }
     }
   } finally {
-    state.automatedReports.currentLabel = 'Preparing charts from cached report data';
+    state.automatedReports.currentLabel = 'Refreshing trends';
     renderAutomatedReportStatus();
     try {
-      await loadCachedReportsDashboard();
+      await Promise.all([
+        loadCachedChartsDashboard(),
+        loadCachedReportsDashboard(),
+      ]);
     } catch (error) {
       console.warn('Unable to refresh cached dashboard.', error);
     } finally {
@@ -1998,6 +2181,8 @@ async function runAutomatedReportJob(job) {
           label: file.filename || job.label,
           filename: file.filename || `${safeFilename(job.label)}.xlsx`,
           blob: base64ToBlob(file.base64 || '', file.contentType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+          groupKey: job.groupKey,
+          autoDownload: Boolean(job.autoDownload),
         });
       }
     } else {
@@ -2005,7 +2190,7 @@ async function runAutomatedReportJob(job) {
       const disposition = response.headers.get('content-disposition') || '';
       const match = disposition.match(/filename="([^"]+)"/);
       const filename = match?.[1] || `${safeFilename(job.label)}.xlsx`;
-      addAutomatedReportDownload({ label: job.label, filename, blob });
+      addAutomatedReportDownload({ label: job.label, filename, blob, groupKey: job.groupKey, autoDownload: Boolean(job.autoDownload) });
     }
     toast(`${job.label} ready.`);
     renderAutomatedReportStatus();
@@ -2053,31 +2238,64 @@ async function loadCachedAutomatedReportDownloads() {
       filename: file.filename || 'report.xlsx',
       blob: base64ToBlob(file.base64 || '', file.contentType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
       completedAt: file.completedAt ? new Date(file.completedAt) : new Date(),
+      groupKey: automatedGroupStateKey(automatedReportFamily(file.filename || '')),
       autoDownload: false,
     });
   }
   renderAutomatedReportStatus();
-  await loadCachedReportsDashboard();
+  await Promise.all([
+    loadCachedChartsDashboard(),
+    loadCachedReportsDashboard(),
+  ]);
 }
 
 async function loadCachedReportsDashboard() {
   try {
-    el.reportsStatus.textContent = 'Preparing charts from cached report data...';
-    const data = await api('/api/reports/summary-cache', { quiet: true });
+    el.reportsStatus.textContent = 'Loading stored trends...';
+    const params = new URLSearchParams({
+      accountHomeId: resolveRequestAccountId(),
+      range: el.trendRange?.value || '28d',
+    });
+    if (params.get('range') === 'custom') {
+      params.set('start', el.trendStart?.value || '');
+      params.set('end', el.trendEnd?.value || '');
+    }
+    const data = await api(`/api/report-trends?${params.toString()}`, { quiet: true });
     if (!Array.isArray(data.rows) || !data.rows.length) {
+      state.automatedReports.dashboardData = data;
       updateReportsTabAvailability();
+      renderReportsPlaceholder();
       return;
     }
     state.automatedReports.dashboardData = data;
     updateReportsTabAvailability();
     renderReportsDashboard(data);
+    const range = data.range?.startDate && data.range?.endDate ? `${data.range.startDate} to ${data.range.endDate}` : 'selected range';
+    el.reportsStatus.textContent = `Loaded stored trends for ${range}.`;
+  } catch (error) {
+    console.warn('Unable to load stored trends.', error);
+    updateReportsTabAvailability();
+  }
+}
+
+async function loadCachedChartsDashboard() {
+  try {
+    el.chartsStatus.textContent = 'Preparing charts from cached report data...';
+    const data = await api('/api/reports/summary-cache', { quiet: true });
+    if (!Array.isArray(data.rows) || !data.rows.length) {
+      updateChartsTabAvailability();
+      return;
+    }
+    state.automatedReports.chartDashboardData = data;
+    updateChartsTabAvailability();
+    renderChartsDashboard(data);
     const generated = data.generatedAt ? new Date(data.generatedAt).toLocaleString() : 'today';
-    el.reportsStatus.textContent = `Loaded dashboard from today's cached background reports (${generated}).`;
+    el.chartsStatus.textContent = `Loaded dashboard from today's cached background reports (${generated}).`;
   } catch (error) {
     if (!/No cached background report data/i.test(error.message || '')) {
-      console.warn('Unable to load cached dashboard.', error);
+      console.warn('Unable to load cached chart dashboard.', error);
     }
-    updateReportsTabAvailability();
+    updateChartsTabAvailability();
   }
 }
 
@@ -2114,7 +2332,7 @@ function automatedReportFamily(value) {
   return '';
 }
 
-function addAutomatedReportDownload({ label, filename, blob, completedAt = new Date(), autoDownload = true }) {
+function addAutomatedReportDownload({ label, filename, blob, completedAt = new Date(), groupKey = '', autoDownload = false }) {
   if (!autoDownload && state.automatedReports.history.some((item) =>
     item.filename === filename && item.completedAt?.getTime?.() === completedAt?.getTime?.()
   )) {
@@ -2126,8 +2344,9 @@ function addAutomatedReportDownload({ label, filename, blob, completedAt = new D
     filename,
     url,
     completedAt,
+    groupKey: groupKey || automatedGroupStateKey(automatedReportFamily(filename)),
   });
-  if (autoDownload && el.automatedReportsAutoDownload.checked) {
+  if (autoDownload) {
     autoDownloadAutomatedReport(url, filename);
   }
   while (state.automatedReports.history.length > 8) {
@@ -2204,15 +2423,40 @@ function renderAutomatedReportStatus() {
     lines.push(state.automatedReports.history.length ? 'Downloads are ready.' : 'No report is running.');
   }
   el.automatedReportStatusList.innerHTML = lines.map((line) => `<span>${escapeHtml(line)}</span>`).join('');
-  el.automatedReportDownloads.innerHTML = groupAutomatedReportDownloads(state.automatedReports.history).map((row) => `
-    <div class="automated-report-download-row">
-      ${row.map((item) => `
-        <a href="${escapeAttr(item.url)}" download="${escapeAttr(item.filename)}" title="${escapeAttr(item.completedAt.toLocaleString())}">
-          ${escapeHtml(item.filename)}
-        </a>
-      `).join('')}
-    </div>
-  `).join('');
+  if (el.automatedReportDownloads) {
+    el.automatedReportDownloads.innerHTML = '';
+  }
+  renderAutomatedReportCardDownloads();
+}
+
+function renderAutomatedReportCardDownloads() {
+  for (const groupKey of automatedReportGroupKeys()) {
+    const container = automatedReportDownloadsContainer(groupKey);
+    if (!container) {
+      continue;
+    }
+    const items = state.automatedReports.history
+      .filter((item) => item.groupKey === groupKey)
+      .slice(0, 4);
+    container.innerHTML = items.length ? `
+      <div class="automated-report-download-row">
+        ${items.map((item) => `
+          <a href="${escapeAttr(item.url)}" download="${escapeAttr(item.filename)}" title="${escapeAttr(item.completedAt.toLocaleString())}">
+            ${escapeHtml(item.filename)}
+          </a>
+        `).join('')}
+      </div>
+    ` : '';
+  }
+}
+
+function automatedReportDownloadsContainer(groupKey) {
+  return {
+    aiEvents: el.automatedAiEventsDownloads,
+    agentSessions: el.automatedAgentSessionsDownloads,
+    solutions: el.automatedSolutionsDownloads,
+    flowRuns: el.automatedFlowRunsDownloads,
+  }[groupKey] || null;
 }
 
 function groupAutomatedReportDownloads(items) {
@@ -2269,16 +2513,30 @@ function automatedReportJobLabel(groupKey, type) {
 }
 
 function updateReportsTabAvailability() {
-  const tab = [...el.tabs].find((item) => item.dataset.tab === 'reports');
+  const tab = [...el.tabs].find((item) => item.dataset.tab === 'trends');
   const hasData = Array.isArray(state.automatedReports.dashboardData?.rows) && state.automatedReports.dashboardData.rows.length > 0;
   if (tab) {
     tab.disabled = false;
     tab.setAttribute('aria-disabled', 'false');
-    tab.title = hasData ? 'Open charts' : 'Run a background report in Settings to populate the charts';
+    tab.title = hasData ? 'Open trends' : 'Enable Save to database on a report, then run it to populate trends';
   }
   if (!hasData && el.reportsStatus) {
-    el.reportsStatus.textContent = 'Run a background report in Settings to populate these charts.';
+    el.reportsStatus.textContent = 'Enable Save to database on a report, then run it to populate trends.';
     renderReportsPlaceholder();
+  }
+}
+
+function updateChartsTabAvailability() {
+  const tab = [...el.tabs].find((item) => item.dataset.tab === 'charts');
+  const hasData = Array.isArray(state.automatedReports.chartDashboardData?.rows) && state.automatedReports.chartDashboardData.rows.length > 0;
+  if (tab) {
+    tab.disabled = false;
+    tab.setAttribute('aria-disabled', 'false');
+    tab.title = hasData ? 'Open charts' : 'Run a background report to populate the charts';
+  }
+  if (!hasData && el.chartsStatus) {
+    el.chartsStatus.textContent = 'Run a background report to populate these charts.';
+    renderChartsPlaceholder();
   }
 }
 
@@ -2289,19 +2547,26 @@ function destroyReportCharts() {
   state.automatedReports.charts = [];
 }
 
-function renderReportsDashboard(data = {}) {
+function destroyTrendCharts() {
+  for (const chart of state.automatedReports.trendCharts) {
+    chart?.destroy?.();
+  }
+  state.automatedReports.trendCharts = [];
+}
+
+function renderChartsDashboard(data = {}) {
   const rows = Array.isArray(data.rows) ? data.rows : [];
   const modelMix = Array.isArray(data.modelMix) ? data.modelMix : [];
   if (!rows.length) {
-    renderReportsPlaceholder();
+    renderChartsPlaceholder();
     return;
   }
-
+  destroyReportCharts();
   const charts = [
     {
       id: 'flow-runs',
       title: 'Flow runs by environment',
-      subtitle: 'Last 7 days · logarithmic run scale',
+      subtitle: 'Last 7 days - logarithmic run scale',
       type: 'bar',
       labels: rows.map(reportEnvironmentLabel),
       datasets: [
@@ -2325,7 +2590,7 @@ function renderReportsDashboard(data = {}) {
     {
       id: 'model-mix',
       title: 'AI Flow model mix',
-      subtitle: 'All selected environments · event count',
+      subtitle: 'All selected environments - event count',
       type: 'pie',
       labels: modelMix.map((row) => row.model),
       datasets: [reportDataset('Events', modelMix.map((row) => number(row.eventCount)), reportPalette(modelMix.length))],
@@ -2339,30 +2604,32 @@ function renderReportsDashboard(data = {}) {
     reportMetricChart('ai-model-count', 'AI model count by environment', 'Solution components', rows, 'aiModelCount', '#4f46e5'),
     reportMetricChart('copilot-agent-count', 'Copilot Studio agent count by environment', 'Solution components', rows, 'copilotStudioAgentCount', '#8b5cf6'),
   ];
-  el.reportsCharts.innerHTML = charts.map((chart) => `
+  el.chartsGrid.innerHTML = charts.map((chart) => `
     <section class="report-chart-card">
       <div>
         <h3>${escapeHtml(chart.title)}</h3>
         <p class="muted">${escapeHtml(chart.subtitle || '')}</p>
       </div>
-      <div class="report-chart-canvas"><canvas id="reportChart-${escapeAttr(chart.id)}"></canvas></div>
+      <div class="report-chart-canvas"><canvas id="summaryChart-${escapeAttr(chart.id)}"></canvas></div>
     </section>
   `).join('');
 
   const ChartConstructor = globalThis.Chart;
   if (!ChartConstructor) {
-    el.reportsStatus.textContent = 'Chart.js could not be loaded. Check your internet connection, then reload the page.';
+    el.chartsStatus.textContent = 'Chart.js could not be loaded. Check your internet connection, then reload the page.';
     return;
   }
   state.automatedReports.charts = charts.map((chart) => new ChartConstructor(
-    document.querySelector(`#reportChart-${chart.id}`),
+    document.querySelector(`#summaryChart-${chart.id}`),
     reportChartConfig(chart),
   ));
 }
 
-function renderReportsPlaceholder() {
+function renderChartsPlaceholder() {
   destroyReportCharts();
-  el.reportsCharts.innerHTML = empty('Run a background report in Settings to populate these charts.');
+  if (el.chartsGrid) {
+    el.chartsGrid.innerHTML = empty('Run a background report to populate these charts.');
+  }
 }
 
 function reportMetricChart(id, title, subtitle, rows, field, color) {
@@ -2380,6 +2647,461 @@ function reportEnvironmentLabel(row) {
   return String(row.environmentDisplayName || row.environmentId || 'Unknown environment');
 }
 
+function renderReportsDashboard(data = {}) {
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  if (!rows.length) {
+    renderReportsPlaceholder();
+    return;
+  }
+  destroyTrendCharts();
+  const charts = buildTrendCharts(Array.isArray(data.tables) ? data.tables : [], data.range || {});
+  if (!charts.length) {
+    renderReportsPlaceholder();
+    return;
+  }
+  el.reportsCharts.innerHTML = charts.map((chart) => `
+    <section class="report-chart-card${chart.hidden ? ' report-chart-card-hidden' : ''}" data-report-chart-card="${escapeAttr(chart.id)}">
+      <div class="report-chart-header">
+        <div>
+          <h3>${escapeHtml(chart.title)}</h3>
+          <p class="muted">${escapeHtml(chart.subtitle || '')}</p>
+        </div>
+        <div class="report-chart-actions">
+          ${renderReportChartEnvironmentPicker(chart)}
+          <button class="secondary report-chart-toggle" type="button" data-report-chart-toggle="${escapeAttr(chart.id)}">
+            ${chart.hidden ? 'Show' : 'Hide'}
+          </button>
+        </div>
+      </div>
+      ${chart.hidden ? '' : `<div class="report-chart-canvas"><canvas data-report-chart-canvas="${escapeAttr(chart.id)}"></canvas></div>`}
+    </section>
+  `).join('');
+
+  const ChartConstructor = globalThis.Chart;
+  const visibleCharts = charts.filter((chart) => !chart.hidden);
+  if (visibleCharts.length && !ChartConstructor) {
+    el.reportsStatus.textContent = 'Chart.js could not be loaded. Check your internet connection, then reload the page.';
+    return;
+  }
+  state.automatedReports.trendCharts = visibleCharts.map((chart) => new ChartConstructor(
+    findReportChartCanvas(chart.id),
+    reportChartConfig(chart),
+  ));
+}
+
+function renderReportsPlaceholder() {
+  destroyTrendCharts();
+  el.reportsCharts.innerHTML = empty('Enable Save to database on a report, then run it to populate trends.');
+}
+
+function buildTrendCharts(tables, range = {}) {
+  const tableMap = new Map((Array.isArray(tables) ? tables : []).map((table) => [table.tableName, table]));
+  const charts = [
+    buildAiRollingCreditChart(tableMap.get('report_ai_flow_event_totals'), range, {
+      id: 'ai-builder-credits-rolling',
+      title: 'AI Builder credits',
+      valueKey: 'sum_ai_builder_credits_used',
+      color: '#2563eb',
+    }),
+    buildAiRollingCreditChart(tableMap.get('report_ai_flow_event_totals'), range, {
+      id: 'copilot-studio-credits-rolling',
+      title: 'Copilot Studio credits',
+      valueKey: 'sum_copilot_studio_credits_used',
+      color: '#9333ea',
+    }),
+    buildStackedEnvironmentBarChart(tableMap.get('report_agent_session_totals'), range, {
+      id: 'agent-sessions-by-environment',
+      title: 'Agent sessions',
+      valueKey: 'total_sessions',
+      yTitle: 'Sessions',
+    }),
+    buildFlowRunStatusChart(tableMap.get('report_flow_run_totals'), range),
+    ...solutionTrendDefinitions().map((definition) => buildStackedEnvironmentBarChart(
+      tableMap.get('report_solution_totals'),
+      range,
+      definition,
+    )),
+  ];
+  return charts.filter(Boolean);
+}
+
+function buildAiRollingCreditChart(table, range, options) {
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  if (!rows.length) {
+    return null;
+  }
+  const environments = chartEnvironmentOptions(rows);
+  const selectedEnvironmentIds = selectedReportChartEnvironmentIds(options.id, environments);
+  const filteredRows = filterTrendRowsByEnvironment(rows, selectedEnvironmentIds);
+  const dateLabels = trendDateLabels(range, rows);
+  if (!dateLabels.length) {
+    return null;
+  }
+  const daily = sumRowsByDate(filteredRows, options.valueKey);
+  const actualData = [];
+  let runningTotal = 0;
+  let lastActualIndex = -1;
+  for (const [index, date] of dateLabels.entries()) {
+    runningTotal += daily.get(date) || 0;
+    if (daily.has(date)) {
+      lastActualIndex = index;
+    }
+    actualData.push(lastActualIndex >= 0 && index <= lastActualIndex ? runningTotal : null);
+  }
+  const predictionData = predictedUsageData(dateLabels, actualData, lastActualIndex);
+  return withReportChartSettings({
+    id: options.id,
+    title: options.title,
+    subtitle: `Rolling total with projected usage to ${formatDateLabel(dateLabels[dateLabels.length - 1])}`,
+    type: 'line',
+    labels: dateLabels.map(formatDateLabel),
+    unit: 'Credits',
+    xTitle: 'Date',
+    yTitle: 'Credits',
+    environments,
+    selectedEnvironmentIds,
+    datasets: [
+      reportDataset('Actual rolling total', actualData, options.color, {
+        tension: 0.25,
+        spanGaps: true,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+      }),
+      reportDataset('Predicted usage', predictionData, options.color, {
+        borderDash: [6, 5],
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        tension: 0.2,
+      }),
+    ],
+  });
+}
+
+function predictedUsageData(dateLabels, actualData, lastActualIndex) {
+  const prediction = dateLabels.map(() => null);
+  if (lastActualIndex < 0) {
+    return prediction;
+  }
+  const currentTotal = number(actualData[lastActualIndex]);
+  const elapsedDays = lastActualIndex + 1;
+  const dailyRate = elapsedDays ? currentTotal / elapsedDays : 0;
+  prediction[lastActualIndex] = currentTotal;
+  for (let index = lastActualIndex + 1; index < dateLabels.length; index += 1) {
+    prediction[index] = dailyRate * (index + 1);
+  }
+  return prediction;
+}
+
+function buildStackedEnvironmentBarChart(table, range, options) {
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  if (!rows.length) {
+    return null;
+  }
+  const environments = chartEnvironmentOptions(rows);
+  const selectedEnvironmentIds = selectedReportChartEnvironmentIds(options.id, environments);
+  const selectedEnvironments = environments.filter((environment) => selectedEnvironmentIds.has(environment.id));
+  const filteredRows = filterTrendRowsByEnvironment(rows, selectedEnvironmentIds);
+  const dateLabels = trendDateLabels(range, rows);
+  if (!dateLabels.length) {
+    return null;
+  }
+  const values = sumRowsByDateAndEnvironment(filteredRows, options.valueKey);
+  const palette = reportPalette(Math.max(selectedEnvironments.length, 1));
+  return withReportChartSettings({
+    id: options.id,
+    title: options.title,
+    subtitle: `${selectedEnvironments.length} of ${environments.length} environment${environments.length === 1 ? '' : 's'} selected`,
+    type: 'bar',
+    stacked: true,
+    labels: dateLabels.map(formatDateLabel),
+    unit: options.yTitle || 'Count',
+    xTitle: 'Date',
+    yTitle: options.yTitle || 'Count',
+    environments,
+    selectedEnvironmentIds,
+    datasets: selectedEnvironments.map((environment, index) => reportDataset(
+      environment.label,
+      dateLabels.map((date) => values.get(`${environment.id}:${date}`) || 0),
+      palette[index],
+      { stack: 'environment' },
+    )),
+  });
+}
+
+function buildFlowRunStatusChart(table, range) {
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  if (!rows.length) {
+    return null;
+  }
+  const id = 'flow-runs-success-failed';
+  const environments = chartEnvironmentOptions(rows);
+  const selectedEnvironmentIds = selectedReportChartEnvironmentIds(id, environments);
+  const filteredRows = filterTrendRowsByEnvironment(rows, selectedEnvironmentIds);
+  const dateLabels = trendDateLabels(range, rows);
+  if (!dateLabels.length) {
+    return null;
+  }
+  const successful = sumRowsByDate(filteredRows, 'successful_flow_runs');
+  const failed = sumRowsByDate(filteredRows, 'failed_flow_runs');
+  return withReportChartSettings({
+    id,
+    title: 'Flow run totals',
+    subtitle: `${selectedEnvironmentIds.size} of ${environments.length} environment${environments.length === 1 ? '' : 's'} selected`,
+    type: 'bar',
+    stacked: true,
+    labels: dateLabels.map(formatDateLabel),
+    unit: 'Runs',
+    xTitle: 'Date',
+    yTitle: 'Runs',
+    environments,
+    selectedEnvironmentIds,
+    datasets: [
+      reportDataset('Successful', dateLabels.map((date) => successful.get(date) || 0), '#16a34a', { stack: 'status' }),
+      reportDataset('Failed', dateLabels.map((date) => failed.get(date) || 0), '#dc2626', { stack: 'status' }),
+    ],
+  });
+}
+
+function solutionTrendDefinitions() {
+  return [
+    { id: 'solutions-count-by-environment', title: 'Solution count', valueKey: 'included_solutions', yTitle: 'Solutions' },
+    { id: 'solutions-flow-count-by-environment', title: 'Flow count', valueKey: 'number_of_flows', yTitle: 'Flows' },
+    { id: 'solutions-canvas-app-count-by-environment', title: 'Canvas app count', valueKey: 'number_of_canvas_apps', yTitle: 'Canvas apps' },
+    { id: 'solutions-model-driven-app-count-by-environment', title: 'Model driven app count', valueKey: 'number_of_model_driven_apps', yTitle: 'Model driven apps' },
+    { id: 'solutions-code-app-count-by-environment', title: 'Code app count', valueKey: 'number_of_code_apps', yTitle: 'Code Apps' },
+    { id: 'solutions-agent-count-by-environment', title: 'Agent count', valueKey: 'number_of_copilot_studio_agents', yTitle: 'Agents' },
+    { id: 'solutions-ai-model-count-by-environment', title: 'AI model count', valueKey: 'number_of_ai_models', yTitle: 'AI models' },
+    { id: 'solutions-dataflow-count-by-environment', title: 'Dataflow count', valueKey: 'number_of_dataflows', yTitle: 'Dataflows' },
+    { id: 'solutions-dataverse-table-count-by-environment', title: 'Dataverse table count', valueKey: 'number_of_dataverse_tables', yTitle: 'Dataverse tables' },
+  ];
+}
+
+function withReportChartSettings(chart) {
+  const settings = readReportChartSettings();
+  return {
+    ...chart,
+    hidden: Boolean(settings.hidden?.[chart.id]),
+  };
+}
+
+function readReportChartSettings() {
+  try {
+    const settings = JSON.parse(localStorage.getItem(REPORT_CHART_SETTINGS_KEY) || '{}');
+    return {
+      hidden: settings.hidden && typeof settings.hidden === 'object' ? settings.hidden : {},
+      environments: settings.environments && typeof settings.environments === 'object' ? settings.environments : {},
+    };
+  } catch {
+    return { hidden: {}, environments: {} };
+  }
+}
+
+function writeReportChartSettings(settings) {
+  localStorage.setItem(REPORT_CHART_SETTINGS_KEY, JSON.stringify({
+    hidden: settings.hidden || {},
+    environments: settings.environments || {},
+  }));
+}
+
+function selectedReportChartEnvironmentIds(chartId, environments) {
+  const ids = environments.map((environment) => environment.id);
+  const saved = readReportChartSettings().environments?.[chartId];
+  if (!Array.isArray(saved)) {
+    return new Set(ids);
+  }
+  const validIds = new Set(ids);
+  return new Set(saved.filter((id) => validIds.has(id)));
+}
+
+function setReportChartEnvironmentIds(chartId, environmentIds) {
+  const settings = readReportChartSettings();
+  settings.environments[chartId] = environmentIds;
+  writeReportChartSettings(settings);
+}
+
+function toggleReportChartVisibility(chartId) {
+  const settings = readReportChartSettings();
+  settings.hidden[chartId] = !settings.hidden?.[chartId];
+  writeReportChartSettings(settings);
+  rerenderReportsDashboard();
+}
+
+function renderReportChartEnvironmentPicker(chart) {
+  const selected = chart.selectedEnvironmentIds || new Set();
+  const total = chart.environments?.length || 0;
+  return `
+    <details class="report-environment-picker">
+      <summary>${selected.size}/${total} environments</summary>
+      <div class="report-environment-menu">
+        <div class="report-environment-actions">
+          <button class="secondary" type="button" data-report-chart-env-action="all" data-report-chart-id="${escapeAttr(chart.id)}">All</button>
+          <button class="secondary" type="button" data-report-chart-env-action="none" data-report-chart-id="${escapeAttr(chart.id)}">None</button>
+        </div>
+        <div class="report-environment-options">
+          ${(chart.environments || []).map((environment) => `
+            <label class="checkbox-label">
+              <input type="checkbox" data-report-chart-environment="${escapeAttr(chart.id)}" value="${escapeAttr(environment.id)}"${selected.has(environment.id) ? ' checked' : ''} />
+              ${escapeHtml(environment.label)}
+            </label>
+          `).join('')}
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function handleReportChartClick(event) {
+  const toggleButton = event.target.closest('[data-report-chart-toggle]');
+  if (toggleButton) {
+    toggleReportChartVisibility(toggleButton.dataset.reportChartToggle || '');
+    return;
+  }
+  const environmentAction = event.target.closest('[data-report-chart-env-action]');
+  if (!environmentAction) {
+    return;
+  }
+  const chartId = environmentAction.dataset.reportChartId || '';
+  const card = environmentAction.closest('[data-report-chart-card]');
+  const checkboxes = findReportChartEnvironmentInputs(card, chartId);
+  const nextIds = environmentAction.dataset.reportChartEnvAction === 'all'
+    ? checkboxes.map((checkbox) => checkbox.value)
+    : [];
+  setReportChartEnvironmentIds(chartId, nextIds);
+  rerenderReportsDashboard();
+}
+
+function handleReportChartChange(event) {
+  const checkbox = event.target.closest('[data-report-chart-environment]');
+  if (!checkbox) {
+    return;
+  }
+  const chartId = checkbox.dataset.reportChartEnvironment || '';
+  const card = checkbox.closest('[data-report-chart-card]');
+  const selectedIds = findReportChartEnvironmentInputs(card, chartId)
+    .filter((input) => input.checked)
+    .map((input) => input.value);
+  setReportChartEnvironmentIds(chartId, selectedIds);
+  rerenderReportsDashboard();
+}
+
+function findReportChartCanvas(chartId) {
+  return [...el.reportsCharts.querySelectorAll('[data-report-chart-canvas]')]
+    .find((canvas) => canvas.dataset.reportChartCanvas === chartId) || null;
+}
+
+function findReportChartEnvironmentInputs(card, chartId) {
+  return [...(card?.querySelectorAll('[data-report-chart-environment]') || [])]
+    .filter((input) => input.dataset.reportChartEnvironment === chartId);
+}
+
+function rerenderReportsDashboard() {
+  const data = state.automatedReports.dashboardData;
+  if (data && Array.isArray(data.rows) && data.rows.length) {
+    renderReportsDashboard(data);
+  } else {
+    renderReportsPlaceholder();
+  }
+}
+
+function chartEnvironmentOptions(rows) {
+  return [...new Map(rows.map((row) => {
+    const id = String(row.values?.environment_id || '').trim() ||
+      String(row.values?.environment_display_name || '').trim() ||
+      'unknown';
+    const label = String(row.values?.environment_display_name || '').trim() || id;
+    return [id, { id, label }];
+  })).values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function filterTrendRowsByEnvironment(rows, selectedEnvironmentIds) {
+  return rows.filter((row) => selectedEnvironmentIds.has(String(row.values?.environment_id || '').trim() || String(row.values?.environment_display_name || '').trim() || 'unknown'));
+}
+
+function sumRowsByDate(rows, valueKey) {
+  const totals = new Map();
+  for (const row of rows) {
+    const date = trendRowDate(row);
+    if (!date) {
+      continue;
+    }
+    totals.set(date, (totals.get(date) || 0) + number(row.values?.[valueKey]));
+  }
+  return totals;
+}
+
+function sumRowsByDateAndEnvironment(rows, valueKey) {
+  const totals = new Map();
+  for (const row of rows) {
+    const date = trendRowDate(row);
+    const environmentId = String(row.values?.environment_id || '').trim() || String(row.values?.environment_display_name || '').trim() || 'unknown';
+    if (!date) {
+      continue;
+    }
+    const key = `${environmentId}:${date}`;
+    totals.set(key, (totals.get(key) || 0) + number(row.values?.[valueKey]));
+  }
+  return totals;
+}
+
+function trendRowDate(row) {
+  return String(row.dateRan || row.collectedAt || '').slice(0, 10);
+}
+
+function trendDateLabels(range, rows) {
+  const start = parseDateOnlyValue(range?.startDate);
+  const end = parseDateOnlyValue(range?.endDate);
+  if (start && end && start <= end) {
+    const dates = [];
+    for (let cursor = start; cursor <= end; cursor = addTrendDays(cursor, 1)) {
+      dates.push(formatDateInputValue(cursor));
+    }
+    return dates;
+  }
+  return [...new Set(rows.map(trendRowDate).filter(Boolean))].sort();
+}
+
+function parseDateOnlyValue(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return null;
+  }
+  const [year, month, day] = text.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function addTrendDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatDateLabel(value) {
+  const date = parseDateOnlyValue(value);
+  if (!date) {
+    return String(value || '');
+  }
+  return date.toLocaleDateString([], {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+  });
+}
+
+function formatTrendTimestamp(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value || '');
+  }
+  return date.toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function reportDataset(label, data, backgroundColor, options = {}) {
   return {
     label,
@@ -2388,6 +3110,7 @@ function reportDataset(label, data, backgroundColor, options = {}) {
     borderColor: backgroundColor,
     borderWidth: 1,
     borderRadius: 4,
+    fill: false,
     ...options,
   };
 }
@@ -2421,13 +3144,21 @@ function reportChartConfig(chart) {
           title: { display: true, text: 'Copilot Studio credits' },
         },
       } : {
-        x: { stacked: Boolean(chart.stacked) },
+        x: {
+          stacked: Boolean(chart.stacked),
+          title: { display: Boolean(chart.xTitle), text: chart.xTitle || '' },
+        },
         y: {
           type: chart.logarithmic ? 'logarithmic' : 'linear',
           beginAtZero: true,
           min: chart.logarithmic ? 1 : undefined,
           stacked: chart.logarithmic ? false : Boolean(chart.stacked),
+          title: { display: Boolean(chart.yTitle || chart.unit), text: chart.yTitle || chart.unit || 'Units' },
         },
+      },
+      interaction: {
+        intersect: false,
+        mode: chart.type === 'bar' ? 'index' : 'nearest',
       },
     },
   };
@@ -2441,6 +3172,16 @@ function number(value) {
 function reportPalette(count) {
   const colors = ['#2563eb', '#16a34a', '#9333ea', '#d97706', '#db2777', '#0f766e', '#dc2626', '#4f46e5', '#0891b2', '#65a30d'];
   return Array.from({ length: count }, (_, index) => colors[index % colors.length]);
+}
+
+function syncTrendRangeVisibility() {
+  const isCustom = el.trendRange?.value === 'custom';
+  if (el.trendStart) {
+    el.trendStart.disabled = !isCustom;
+  }
+  if (el.trendEnd) {
+    el.trendEnd.disabled = !isCustom;
+  }
 }
 
 function syncAgentSessionCustomRangeVisibility() {
@@ -4216,6 +4957,93 @@ async function confirmDeleteConnection() {
     closeConnectionDeleteModal();
     renderConnections();
     toast('Connection deleted.');
+  }, 'Deleting');
+}
+
+async function loadSqlTables() {
+  if (!el.sqlTablesList) {
+    return;
+  }
+  el.sqlTablesSummary.textContent = 'Loading local SQL tables...';
+  const data = await api('/api/sql-tables', { quiet: true });
+  state.sqlTables = Array.isArray(data.tables) ? data.tables : [];
+  renderSqlTables(data);
+}
+
+function renderSqlTables(data = {}) {
+  if (!el.sqlTablesList) {
+    return;
+  }
+  const tables = state.sqlTables || [];
+  const totalRows = Number(data.totalRows ?? tables.reduce((sum, table) => sum + Number(table.rowCount || 0), 0));
+  const totalStorageBytes = Number(data.totalStorageBytes ?? tables.reduce((sum, table) => sum + Number(table.storageBytes || 0), 0));
+  el.sqlTablesSummary.textContent = tables.length
+    ? `${tables.length} table${tables.length === 1 ? '' : 's'} | ${totalRows.toLocaleString()} row${totalRows === 1 ? '' : 's'} | ${formatBytes(totalStorageBytes)}`
+    : 'No local SQL tables found.';
+  if (el.exportSqlTablesButton) {
+    el.exportSqlTablesButton.disabled = !tables.length;
+  }
+  if (el.deleteSqlRecordsButton) {
+    el.deleteSqlRecordsButton.disabled = !tables.length || totalRows < 1;
+  }
+  el.sqlTablesList.innerHTML = tables.length ? tables.map((table) => `
+    <div class="sql-table-row">
+      <div>
+        <span class="role-name">${escapeHtml(table.label || table.name || 'Table')}</span>
+        <span class="role-id">Local report database</span>
+      </div>
+      <span class="sql-table-metric">${Number(table.rowCount || 0).toLocaleString()} row${Number(table.rowCount || 0) === 1 ? '' : 's'}</span>
+      <span class="sql-table-metric">${formatBytes(table.storageBytes || 0)}</span>
+      <button class="secondary sql-table-download" type="button" data-sql-table-export="${escapeAttr(table.name || '')}">Download</button>
+    </div>
+  `).join('') : empty('No local SQL tables found.');
+}
+
+async function exportSqlTables() {
+  await downloadFile('/api/sql-tables/export', 'pdac-sql-tables.xlsx');
+}
+
+async function exportSqlTable(tableName) {
+  if (!tableName) {
+    throw new Error('Select a SQL table to download.');
+  }
+  await downloadFile(`/api/sql-tables/${encodeURIComponent(tableName)}/export`, `${tableName}.xlsx`);
+}
+
+function openSqlDeleteModal() {
+  const totalRows = state.sqlTables.reduce((sum, table) => sum + Number(table.rowCount || 0), 0);
+  if (!totalRows) {
+    toast('There are no SQL records to delete.');
+    return;
+  }
+  state.pendingSqlDelete = true;
+  el.sqlDeleteTitle.textContent = 'Delete SQL Records';
+  el.sqlDeleteMeta.textContent = `${totalRows.toLocaleString()} row${totalRows === 1 ? '' : 's'} across ${state.sqlTables.length} table${state.sqlTables.length === 1 ? '' : 's'}`;
+  el.sqlDeleteModal.hidden = false;
+  el.sqlDeleteConfirm.focus();
+}
+
+function closeSqlDeleteModal() {
+  state.pendingSqlDelete = false;
+  if (el.sqlDeleteModal) {
+    el.sqlDeleteModal.hidden = true;
+  }
+  if (el.sqlDeleteMeta) {
+    el.sqlDeleteMeta.textContent = '';
+  }
+}
+
+async function confirmDeleteSqlRecords() {
+  if (!state.pendingSqlDelete) {
+    closeSqlDeleteModal();
+    return;
+  }
+  await withBusy(el.sqlDeleteConfirm, async () => {
+    const result = await api('/api/sql-tables/records', { method: 'DELETE' });
+    closeSqlDeleteModal();
+    await loadSqlTables();
+    await loadCachedReportsDashboard();
+    toast(`${Number(result.deletedRows || 0).toLocaleString()} SQL record${Number(result.deletedRows || 0) === 1 ? '' : 's'} deleted.`);
   }, 'Deleting');
 }
 
@@ -6511,6 +7339,21 @@ function escapeAttr(value) {
 
 function safeFilename(value) {
   return String(value || 'security-role').replace(/[^\w.-]+/g, '-').replace(/^-|-$/g, '') || 'security-role';
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = bytes;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function readJsonStorage(key, fallback) {

@@ -1,6 +1,6 @@
 {
   "name": "powerdevbox-admin",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Local Power DevBox Admin Center for Power Platform and Dataverse administration.",
   "license": "MIT",
   "homepage": "https://github.com/wyattdave/pdac#readme",
@@ -37,7 +37,8 @@
     "exceljs": "^4.4.0",
     "fast-xml-parser": "^5.8.0",
     "jszip": "^3.10.1",
-    "open": "^8.4.0"
+    "open": "^8.4.0",
+    "sql.js": "^1.14.1"
   },
   "overrides": {
     "uuid": "11.1.1"
