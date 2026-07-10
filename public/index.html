@@ -135,18 +135,20 @@
                 <h3>Scheduled reports</h3>
                 <p class="muted">The server checks hourly and runs selected database reports once per day, even when this page is closed.</p>
               </div>
-              <label>
-                Server mode
-                <select id="reportServerMode">
-                  <option value="off">Off</option>
-                  <option value="running">On when server is running</option>
-                  <option value="always">Always on</option>
-                </select>
-              </label>
-              <label class="checkbox-label">
-                <input id="automatedReportsRunOnLoad" type="checkbox" />
-                Run daily reports in the background
-              </label>
+              <div class="scheduled-report-controls">
+                <label>
+                  Server mode
+                  <select id="reportServerMode">
+                    <option value="off">Off</option>
+                    <option value="running">On when server is running</option>
+                    <option value="always">Always on</option>
+                  </select>
+                </label>
+                <label class="checkbox-label scheduled-report-daily-toggle">
+                  <input id="automatedReportsRunOnLoad" type="checkbox" />
+                  Run daily reports in the background
+                </label>
+              </div>
             </div>
 
             <div class="automated-report-grid">

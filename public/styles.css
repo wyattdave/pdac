@@ -951,6 +951,27 @@ select:disabled {
   padding-top: 18px;
 }
 
+.scheduled-report-controls {
+  display: grid;
+  flex: 0 0 min(100%, 340px);
+  gap: 12px;
+  min-width: min(100%, 340px);
+}
+
+.scheduled-report-controls > label:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+#reportServerMode {
+  min-width: 300px;
+  width: 100%;
+}
+
+.scheduled-report-daily-toggle {
+  justify-self: start;
+}
+
 .automated-report-grid {
   display: grid;
   gap: 12px;
