@@ -12,6 +12,25 @@ Run directly from npm:
 npx powerdevbox-admin
 ```
 
+Or install the published npm package globally, then run it from any PowerShell session:
+
+```powershell
+npm install --global powerdevbox-admin@latest
+powerdevbox-admin
+```
+
+PDAC opens at:
+
+```text
+http://localhost:4280
+```
+
+Update a global installation later with:
+
+```powershell
+npm update --global powerdevbox-admin
+```
+
 Or install/link it locally and run the `powerdevbox-admin` or `pdac` command:
 
 ```powershell
