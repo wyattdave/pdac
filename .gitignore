@@ -1,3 +1,5 @@
 node_modules/
 data/report-cache/
 data/report-trends.sqlite
+data/automated-report-schedule.json
+data/server.log

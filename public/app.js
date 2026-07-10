@@ -71,6 +71,7 @@ const el = {
   automatedReportStatusTitle: document.querySelector('#automatedReportStatusTitle'),
   automatedReportStatusList: document.querySelector('#automatedReportStatusList'),
   automatedReportDownloads: document.querySelector('#automatedReportDownloads'),
+  reportServerMode: document.querySelector('#reportServerMode'),
   automatedReportsRunOnLoad: document.querySelector('#automatedReportsRunOnLoad'),
   automatedAiEventsRange: document.querySelector('#automatedAiEventsRange'),
   automatedAiEventsStart: document.querySelector('#automatedAiEventsStart'),
@@ -265,7 +266,6 @@ const state = {
     activeRunId: '',
     queue: [],
     history: [],
-    autoRunTimerId: 0,
     selectedEnvironmentIds: {
       aiEvents: null,
       agentSessions: null,
@@ -376,8 +376,9 @@ const state = {
 
 const LAST_ACCOUNT_KEY = 'pdacLastAccountHomeId';
 const LAST_ENVIRONMENT_PREFIX = 'pdacLastEnvironment';
+const REPORT_SERVER_MODE_KEY = 'pdacReportServerMode';
 const AUTOMATED_REPORTS_RUN_ON_LOAD_KEY = 'pdacAutomatedReportsRunOnLoad';
-const AUTOMATED_REPORTS_LAST_AUTO_RUN_DATE_KEY = 'pdacAutomatedReportsLastAutoRunDate';
+const AUTOMATED_REPORT_AUTO_DOWNLOAD_DATE_PREFIX = 'pdacAutomatedReportAutoDownloadDate';
 const AUTOMATED_SOLUTIONS_PUBLISHER_EXCLUSIONS_KEY = 'pdacAutomatedSolutionsPublisherExclusions';
 const AUTOMATED_REPORT_SETTINGS_KEY = 'pdacAutomatedReportSettings';
 const REPORT_CHART_SETTINGS_KEY = 'pdacReportChartSettings';
@@ -416,6 +417,15 @@ el.sqlTablesList?.addEventListener('click', (event) => {
   withBusy(button, () => exportSqlTable(button.dataset.sqlTableExport || ''), 'Downloading');
 });
 el.deleteSqlRecordsButton?.addEventListener('click', openSqlDeleteModal);
+el.reportServerMode?.addEventListener('change', () => updateReportServerMode().catch((error) => {
+  toast(error.message, 'error');
+  console.error(error);
+  loadReportServerMode().catch(() => {});
+}));
+el.automatedReportsRunOnLoad?.addEventListener('change', () => {
+  localStorage.setItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY, el.automatedReportsRunOnLoad.checked ? 'true' : 'false');
+  saveAutomatedReportSettings();
+});
 el.sqlDeleteClose?.addEventListener('click', closeSqlDeleteModal);
 el.sqlDeleteCancel?.addEventListener('click', closeSqlDeleteModal);
 el.sqlDeleteConfirm?.addEventListener('click', () => {
@@ -539,15 +549,6 @@ document.querySelectorAll('[data-automated-run]').forEach((button) => {
     toast(error.message, 'error');
     console.error(error);
   }));
-});
-el.automatedReportsRunOnLoad.addEventListener('change', () => {
-  localStorage.setItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY, el.automatedReportsRunOnLoad.checked ? 'true' : 'false');
-  if (el.automatedReportsRunOnLoad.checked) {
-    scheduleNextAutomatedReportRun();
-    queueAutomatedReportsOnLoad();
-  } else {
-    clearAutomatedReportTimer();
-  }
 });
 document.querySelectorAll('[data-automated-auto-download], [data-automated-save-database]').forEach((input) => {
   input.addEventListener('change', saveAutomatedReportSettings);
@@ -900,9 +901,48 @@ renderAutomatedReportStatus();
 updateChartsTabAvailability();
 updateReportsTabAvailability();
 await loadStatus();
+await loadReportServerMode();
 loadSqlTables().catch((error) => {
   console.warn('Unable to load SQL tables.', error);
 });
+
+async function loadReportServerMode() {
+  if (!el.reportServerMode) return;
+  const [startup, schedule] = await Promise.all([
+    api('/api/startup', { quiet: true }),
+    api('/api/automated-reports/schedule', { quiet: true }),
+  ]);
+  const storedMode = localStorage.getItem(REPORT_SERVER_MODE_KEY);
+  const mode = startup.enabled
+    ? 'always'
+    : storedMode === 'running'
+      ? 'running'
+      : schedule.enabled ? 'running' : 'off';
+  el.reportServerMode.value = mode;
+  localStorage.setItem(REPORT_SERVER_MODE_KEY, mode);
+  if (!startup.supported) {
+    el.reportServerMode.querySelector('option[value="always"]')?.setAttribute('disabled', '');
+  }
+  el.automatedReportsRunOnLoad.disabled = mode === 'off';
+}
+
+async function updateReportServerMode() {
+  const mode = el.reportServerMode.value;
+  el.reportServerMode.disabled = true;
+  try {
+    await api('/api/startup', { method: 'PUT', body: { enabled: mode === 'always' } });
+    localStorage.setItem(REPORT_SERVER_MODE_KEY, mode);
+    saveAutomatedReportSettings();
+    el.automatedReportsRunOnLoad.disabled = mode === 'off';
+    toast(mode === 'always'
+      ? 'Always-on mode enabled. The background server will take over if this terminal server stops.'
+      : mode === 'running'
+        ? 'Reports will run while the server is running.'
+        : 'Scheduled database reports are off.');
+  } finally {
+    el.reportServerMode.disabled = false;
+  }
+}
 
 async function loadStatus() {
   const status = await api('/api/status');
@@ -1379,7 +1419,7 @@ async function loadEnvironments(options = {}) {
   renderEnvironmentPicker();
   renderEnvironmentList();
   loadCachedAutomatedReportDownloads().catch((error) => console.warn('Unable to load cached reports.', error));
-  queueAutomatedReportsOnLoad();
+  saveAutomatedReportSettings();
 }
 
 async function reconcileSelectedEnvironment(options = {}) {
@@ -1692,7 +1732,6 @@ function initAutomatedReportSettings() {
   el.automatedReportsRunOnLoad.checked = localStorage.getItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY) === 'true';
   restoreAutomatedReportSettings();
   syncTrendRangeVisibility();
-  scheduleNextAutomatedReportRun();
 }
 
 function readAutomatedReportSettings() {
@@ -1782,6 +1821,42 @@ function saveAutomatedReportSettings() {
     environments,
   };
   localStorage.setItem(AUTOMATED_REPORT_SETTINGS_KEY, JSON.stringify(settings));
+  syncAutomatedReportSchedule(settings).catch((error) => console.warn('Unable to save background report schedule.', error));
+}
+
+async function syncAutomatedReportSchedule(settings) {
+  const groupMap = {
+    'ai-events': 'aiEvents',
+    'agent-sessions': 'agentSessions',
+    solutions: 'solutions',
+    'flow-runs': 'flowRuns',
+  };
+  const groups = {};
+  for (const [apiGroup, groupKey] of Object.entries(groupMap)) {
+    const selectedIds = new Set(settings.environments?.[groupKey] || []);
+    groups[apiGroup] = {
+      environments: state.environments
+        .filter((environment) => selectedIds.has(environment.name) && environment.orgUrl)
+        .map((environment) => ({
+          name: environment.name,
+          environmentName: environment.name,
+          displayName: environment.displayName || environment.name,
+          orgUrl: environment.orgUrl,
+        })),
+      dateRange: groupKey === 'aiEvents' ? settings.aiEvents : groupKey === 'agentSessions' ? settings.agentSessions : {},
+      solutionOptions: groupKey === 'solutions' ? settings.solutions : {},
+      saveToDatabase: Boolean(settings.reportOptions?.[groupKey]?.saveToDatabase),
+    };
+  }
+  await api('/api/automated-reports/schedule', {
+    method: 'PUT',
+    body: {
+      enabled: el.reportServerMode?.value !== 'off' && el.automatedReportsRunOnLoad.checked,
+      accountHomeId: resolveRequestAccountId(),
+      groups,
+    },
+    quiet: true,
+  });
 }
 
 function automatedReportOptionInput(groupKey, option) {
@@ -2039,88 +2114,6 @@ async function queueAutomatedReports(value) {
   }
 }
 
-function todayAutomatedReportKey() {
-  return formatDateInputValue(new Date());
-}
-
-function clearAutomatedReportTimer() {
-  if (state.automatedReports.autoRunTimerId) {
-    clearTimeout(state.automatedReports.autoRunTimerId);
-    state.automatedReports.autoRunTimerId = 0;
-  }
-}
-
-function scheduleNextAutomatedReportRun() {
-  clearAutomatedReportTimer();
-  if (!el.automatedReportsRunOnLoad.checked) {
-    return;
-  }
-  const now = new Date();
-  const nextDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
-  state.automatedReports.autoRunTimerId = setTimeout(() => {
-    state.automatedReports.autoRunTimerId = 0;
-    queueAutomatedReportsOnLoad();
-    scheduleNextAutomatedReportRun();
-  }, nextDay.getTime() - now.getTime());
-}
-
-function queueAutomatedReportsOnLoad() {
-  if (!el.automatedReportsRunOnLoad.checked || !state.environmentsLoaded) {
-    scheduleNextAutomatedReportRun();
-    return;
-  }
-  const today = todayAutomatedReportKey();
-  if (localStorage.getItem(AUTOMATED_REPORTS_LAST_AUTO_RUN_DATE_KEY) === today) {
-    scheduleNextAutomatedReportRun();
-    return;
-  }
-  const runnableGroups = [
-    ['ai-events', 'aiEvents'],
-    ['agent-sessions', 'agentSessions'],
-    ['solutions', 'solutions'],
-    ['flow-runs', 'flowRuns'],
-  ].filter(([, groupKey]) => getAutomatedReportEnvironmentsForAutoRun(groupKey).length);
-  if (!runnableGroups.length) {
-    scheduleNextAutomatedReportRun();
-    return;
-  }
-  localStorage.setItem(AUTOMATED_REPORTS_LAST_AUTO_RUN_DATE_KEY, today);
-  for (const [apiGroup, groupKey] of runnableGroups) {
-    const environments = getAutomatedReportEnvironmentsForAutoRun(groupKey);
-    const reportOptions = getAutomatedReportOptions(groupKey);
-    removeAutomatedReportDownloads(apiGroup);
-    state.automatedReports.queue.push({
-      apiGroup,
-      groupKey,
-      type: 'both',
-      label: automatedReportJobLabel(groupKey, 'both'),
-      environments,
-      reportRunId: createAutomatedReportRunId(),
-      autoDownload: reportOptions.autoDownload,
-      body: { ...buildAutomatedReportBody(groupKey, environments), saveToDatabase: reportOptions.saveToDatabase },
-    });
-  }
-  renderAutomatedReportStatus();
-  if (!state.automatedReports.running) {
-    runAutomatedReportQueue().catch((error) => {
-      state.automatedReports.running = false;
-      state.automatedReports.currentLabel = '';
-      renderAutomatedReportStatus();
-      toast(error.message, 'error');
-      console.error(error);
-    });
-  }
-  scheduleNextAutomatedReportRun();
-}
-
-function getAutomatedReportEnvironmentsForAutoRun(groupKey) {
-  try {
-    return getAutomatedReportEnvironments(groupKey);
-  } catch {
-    return [];
-  }
-}
-
 function getAutomatedReportOptions(groupKey) {
   const options = {
     autoDownload: Boolean(automatedReportOptionInput(groupKey, 'autoDownload')?.checked),
@@ -2232,21 +2225,34 @@ async function loadCachedAutomatedReportDownloads() {
     return;
   }
   const data = await api('/api/report-cache', { quiet: true });
+  const today = formatDateInputValue(new Date());
+  const downloadedGroups = new Set();
   for (const file of data.files || []) {
+    const groupKey = automatedGroupStateKey(file.reportGroup || automatedReportFamily(file.filename || ''));
+    const autoDownload = Boolean(getAutomatedReportOptions(groupKey).autoDownload)
+      && localStorage.getItem(automatedReportAutoDownloadDateKey(groupKey)) !== today;
     addAutomatedReportDownload({
       label: `Cached ${file.filename || 'report'}`,
       filename: file.filename || 'report.xlsx',
       blob: base64ToBlob(file.base64 || '', file.contentType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
       completedAt: file.completedAt ? new Date(file.completedAt) : new Date(),
-      groupKey: automatedGroupStateKey(automatedReportFamily(file.filename || '')),
-      autoDownload: false,
+      groupKey,
+      autoDownload,
     });
+    if (autoDownload) downloadedGroups.add(groupKey);
+  }
+  for (const groupKey of downloadedGroups) {
+    localStorage.setItem(automatedReportAutoDownloadDateKey(groupKey), today);
   }
   renderAutomatedReportStatus();
   await Promise.all([
     loadCachedChartsDashboard(),
     loadCachedReportsDashboard(),
   ]);
+}
+
+function automatedReportAutoDownloadDateKey(groupKey) {
+  return `${AUTOMATED_REPORT_AUTO_DOWNLOAD_DATE_PREFIX}:${resolveRequestAccountId()}:${groupKey}`;
 }
 
 async function loadCachedReportsDashboard() {
@@ -2280,8 +2286,10 @@ async function loadCachedReportsDashboard() {
 
 async function loadCachedChartsDashboard() {
   try {
-    el.chartsStatus.textContent = 'Preparing charts from cached report data...';
-    const data = await api('/api/reports/summary-cache', { quiet: true });
+    el.chartsStatus.textContent = 'Preparing charts from the SQL database...';
+    const params = new URLSearchParams({ accountHomeId: resolveRequestAccountId(), range: '730d' });
+    const stored = await api(`/api/report-trends?${params.toString()}`, { quiet: true });
+    const data = buildLatestSqlChartsDashboard(stored);
     if (!Array.isArray(data.rows) || !data.rows.length) {
       updateChartsTabAvailability();
       return;
@@ -2289,14 +2297,49 @@ async function loadCachedChartsDashboard() {
     state.automatedReports.chartDashboardData = data;
     updateChartsTabAvailability();
     renderChartsDashboard(data);
-    const generated = data.generatedAt ? new Date(data.generatedAt).toLocaleString() : 'today';
-    el.chartsStatus.textContent = `Loaded dashboard from today's cached background reports (${generated}).`;
+    const generated = data.generatedAt ? new Date(data.generatedAt).toLocaleString() : 'the latest snapshot';
+    el.chartsStatus.textContent = `Loaded the latest stored database snapshot (${generated}).`;
   } catch (error) {
-    if (!/No cached background report data/i.test(error.message || '')) {
-      console.warn('Unable to load cached chart dashboard.', error);
-    }
+    console.warn('Unable to load SQL chart dashboard.', error);
     updateChartsTabAvailability();
   }
+}
+
+function buildLatestSqlChartsDashboard(data = {}) {
+  const tables = new Map((data.tables || []).map((table) => [table.tableName, table]));
+  const latest = new Map();
+  for (const table of tables.values()) {
+    for (const row of table.rows || []) {
+      const values = row.values || {};
+      const environmentId = values.environment_id || '';
+      const key = `${table.tableName}:${environmentId}`;
+      if (!latest.has(key) || String(row.collectedAt) > String(latest.get(key).collectedAt)) latest.set(key, row);
+    }
+  }
+  const rows = new Map();
+  const ensureRow = (values) => {
+    const id = values.environment_id || values.environment_display_name || '';
+    if (!rows.has(id)) rows.set(id, { environmentId: id, environmentDisplayName: values.environment_display_name || id });
+    return rows.get(id);
+  };
+  for (const [key, row] of latest) {
+    const values = row.values || {};
+    const target = ensureRow(values);
+    if (key.startsWith('report_flow_run_totals:')) target.flowRuns = { successful: values.successful_flow_runs, failed: values.failed_flow_runs };
+    if (key.startsWith('report_ai_flow_event_totals:')) target.aiFlow = { aiBuilderCredits: values.sum_ai_builder_credits_used, copilotStudioCredits: values.sum_copilot_studio_credits_used };
+    if (key.startsWith('report_agent_session_totals:')) target.copilotSessions = values.total_sessions;
+    if (key.startsWith('report_solution_totals:')) Object.assign(target, {
+      solutionCount: values.included_solutions,
+      flowCount: values.number_of_flows,
+      codeAppCount: values.number_of_code_apps,
+      canvasAppCount: values.number_of_canvas_apps,
+      modelDrivenAppCount: values.number_of_model_driven_apps,
+      aiModelCount: values.number_of_ai_models,
+      copilotStudioAgentCount: values.number_of_copilot_studio_agents,
+    });
+  }
+  const collected = [...latest.values()].map((row) => row.collectedAt).filter(Boolean).sort();
+  return { rows: [...rows.values()], modelMix: [], generatedAt: collected.at(-1) || '' };
 }
 
 function removeAutomatedReportDownloads(apiGroup) {
@@ -2587,14 +2630,14 @@ function renderChartsDashboard(data = {}) {
       ],
       dualAxis: true,
     },
-    {
+    ...(modelMix.length ? [{
       id: 'model-mix',
       title: 'AI Flow model mix',
       subtitle: 'All selected environments - event count',
       type: 'pie',
       labels: modelMix.map((row) => row.model),
       datasets: [reportDataset('Events', modelMix.map((row) => number(row.eventCount)), reportPalette(modelMix.length))],
-    },
+    }] : []),
     reportMetricChart('copilot-sessions', 'Copilot sessions by environment', 'Current calendar month', rows, 'copilotSessions', '#7c3aed'),
     reportMetricChart('solution-count', 'Solution count by environment', 'Includes managed and Microsoft-owned solutions', rows, 'solutionCount', '#0f766e'),
     reportMetricChart('flow-count', 'Flow count by environment', 'Solution components', rows, 'flowCount', '#0284c7'),

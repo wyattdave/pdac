@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -40,7 +41,12 @@ const APP_DIR = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = join(APP_DIR, 'public');
 const REPORT_CACHE_DIR = join(APP_DIR, 'data', 'report-cache');
 const REPORT_TRENDS_DB_PATH = join(APP_DIR, 'data', 'report-trends.sqlite');
+const AUTOMATED_REPORT_SCHEDULE_PATH = join(APP_DIR, 'data', 'automated-report-schedule.json');
+const STARTUP_TASK_NAME = 'PDAC Background Server';
+const INSTALL_STARTUP_SCRIPT = join(APP_DIR, 'scripts', 'install-startup-task.ps1');
+const UNINSTALL_STARTUP_SCRIPT = join(APP_DIR, 'scripts', 'uninstall-startup-task.ps1');
 const REPORT_TREND_RETENTION_DAYS = 730;
+const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
 const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
 const USERS_TEAMS_PAGE_SIZE = 50;
@@ -147,6 +153,7 @@ const aiEventMetadataCache = new Map();
 const automatedReportProgress = new Map();
 let reportTrendDbPromise = null;
 let reportTrendWriteQueue = Promise.resolve();
+let automatedReportScheduleRunning = false;
 let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -342,6 +349,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Power DevBox Admin Center running at http://localhost:${PORT}`);
+  checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError);
+  setInterval(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError), AUTOMATED_REPORT_CHECK_INTERVAL_MS).unref();
 });
 
 async function handleApi(req, res) {
@@ -629,6 +638,17 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/startup') {
+    sendJson(res, 200, await getStartupTaskStatus());
+    return;
+  }
+
+  if (route === 'PUT /api/startup') {
+    const body = await readJson(req);
+    sendJson(res, 200, await setStartupTaskEnabled(Boolean(body.enabled)));
+    return;
+  }
+
   if (route === 'GET /api/agent-sessions') {
     requireOrgUrl();
     sendJson(res, 200, await listAgentSessions({
@@ -701,6 +721,19 @@ async function handleApi(req, res) {
       throw new HttpError(404, 'Background report progress is not available.');
     }
     sendJson(res, 200, progress);
+    return;
+  }
+
+  if (route === 'GET /api/automated-reports/schedule') {
+    sendJson(res, 200, await readAutomatedReportSchedule());
+    return;
+  }
+
+  if (route === 'PUT /api/automated-reports/schedule') {
+    const body = await readJson(req);
+    const schedule = normalizeAutomatedReportSchedule(body);
+    await writeAutomatedReportSchedule(schedule);
+    sendJson(res, 200, schedule);
     return;
   }
 
@@ -4914,6 +4947,134 @@ async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
   return report;
 }
 
+async function readAutomatedReportSchedule() {
+  try {
+    const value = JSON.parse(await readFile(AUTOMATED_REPORT_SCHEDULE_PATH, 'utf8'));
+    return normalizeAutomatedReportSchedule(value, { preserveState: true });
+  } catch {
+    return normalizeAutomatedReportSchedule({});
+  }
+}
+
+function normalizeAutomatedReportSchedule(value = {}, options = {}) {
+  const groups = {};
+  for (const group of ['ai-events', 'agent-sessions', 'solutions', 'flow-runs']) {
+    const source = value.groups?.[group] || {};
+    groups[group] = {
+      environments: normalizeAutomatedReportEnvironments(source.environments || []),
+      dateRange: source.dateRange && typeof source.dateRange === 'object' ? source.dateRange : {},
+      solutionOptions: source.solutionOptions && typeof source.solutionOptions === 'object' ? source.solutionOptions : {},
+      saveToDatabase: Boolean(source.saveToDatabase),
+    };
+  }
+  return {
+    enabled: Boolean(value.enabled),
+    accountHomeId: String(value.accountHomeId || '').trim(),
+    groups,
+    lastRunDate: options.preserveState ? String(value.lastRunDate || '') : '',
+    lastStartedAt: options.preserveState ? String(value.lastStartedAt || '') : '',
+    lastCompletedAt: options.preserveState ? String(value.lastCompletedAt || '') : '',
+    lastError: options.preserveState ? String(value.lastError || '') : '',
+  };
+}
+
+async function writeAutomatedReportSchedule(schedule) {
+  await mkdir(join(APP_DIR, 'data'), { recursive: true });
+  const existing = await readAutomatedReportSchedule();
+  const next = {
+    ...schedule,
+    lastRunDate: existing.lastRunDate,
+    lastStartedAt: existing.lastStartedAt,
+    lastCompletedAt: existing.lastCompletedAt,
+    lastError: existing.lastError,
+  };
+  await writeFile(AUTOMATED_REPORT_SCHEDULE_PATH, `${JSON.stringify(next, null, 2)}\n`);
+  return next;
+}
+
+async function persistAutomatedReportScheduleState(schedule) {
+  await mkdir(join(APP_DIR, 'data'), { recursive: true });
+  await writeFile(AUTOMATED_REPORT_SCHEDULE_PATH, `${JSON.stringify(schedule, null, 2)}\n`);
+}
+
+async function checkAutomatedReportSchedule() {
+  if (automatedReportScheduleRunning) return;
+  const schedule = await readAutomatedReportSchedule();
+  const today = reportCacheDateKey();
+  if (!schedule.enabled || schedule.lastRunDate === today) return;
+  const runnable = Object.entries(schedule.groups)
+    .filter(([, group]) => group.environments.length);
+  if (!runnable.length) return;
+
+  automatedReportScheduleRunning = true;
+  schedule.lastStartedAt = new Date().toISOString();
+  schedule.lastError = '';
+  await persistAutomatedReportScheduleState(schedule);
+  try {
+    await applyAccountHomeId(schedule.accountHomeId);
+    for (const [group, settings] of runnable) {
+      await getOrBuildCachedAutomatedReport(group, 'both', {
+        accountHomeId: schedule.accountHomeId,
+        environments: settings.environments,
+        dateRange: settings.dateRange,
+        solutionOptions: settings.solutionOptions,
+        saveToDatabase: settings.saveToDatabase,
+        forceRefresh: true,
+      });
+    }
+    schedule.lastRunDate = today;
+    schedule.lastCompletedAt = new Date().toISOString();
+    console.log(`Scheduled reports completed for ${today}.`);
+  } catch (error) {
+    schedule.lastError = errorMessage(error);
+    throw error;
+  } finally {
+    await persistAutomatedReportScheduleState(schedule);
+    automatedReportScheduleRunning = false;
+  }
+}
+
+function logAutomatedReportScheduleError(error) {
+  console.error(`Scheduled report check failed: ${errorMessage(error)}`);
+}
+
+async function getStartupTaskStatus() {
+  if (process.platform !== 'win32') {
+    return { supported: false, enabled: false, taskName: STARTUP_TASK_NAME };
+  }
+  try {
+    await runPowerShell([
+      '-Command',
+      `if (Get-ScheduledTask -TaskName '${STARTUP_TASK_NAME}' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }`,
+    ]);
+    return { supported: true, enabled: true, taskName: STARTUP_TASK_NAME };
+  } catch {
+    return { supported: true, enabled: false, taskName: STARTUP_TASK_NAME };
+  }
+}
+
+async function setStartupTaskEnabled(enabled) {
+  if (process.platform !== 'win32') {
+    throw new HttpError(400, 'Automatic startup is currently supported on Windows only.');
+  }
+  const script = enabled ? INSTALL_STARTUP_SCRIPT : UNINSTALL_STARTUP_SCRIPT;
+  const args = ['-File', script, '-TaskName', STARTUP_TASK_NAME];
+  await runPowerShell(args);
+  return { supported: true, enabled, taskName: STARTUP_TASK_NAME };
+}
+
+function runPowerShell(args) {
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', ...args], { windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(String(stderr || stdout || error.message).trim()));
+        return;
+      }
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
 async function getOrBuildCachedReportsSummary(body = {}) {
   const cacheKey = reportCacheKey('summary', {
     version: 3,
@@ -5007,12 +5168,19 @@ function cachedAutomatedReport(value = {}) {
 
 async function listCachedAutomatedReportFiles(accountHomeId = '') {
   const entries = await listDailyAutomatedReportCacheEntries(accountHomeId);
-  return entries.flatMap((entry) => (entry.value?.files || []).map((file) => ({
-    filename: file.filename,
-    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    base64: file.base64,
-    completedAt: entry.createdAt,
-  })));
+  const seen = new Set();
+  return entries.flatMap((entry) => (entry.value?.files || []).map((file) => {
+    const key = `${entry.value?.reportGroup || ''}:${file.filename || ''}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    return {
+      filename: file.filename,
+      reportGroup: entry.value?.reportGroup || '',
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      base64: file.base64,
+      completedAt: entry.createdAt,
+    };
+  }).filter(Boolean));
 }
 
 async function listDailyAutomatedReportCacheEntries(accountHomeId = '') {

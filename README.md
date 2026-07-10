@@ -25,6 +25,24 @@ For development from this checkout:
 npm start
 ```
 
+To install PDAC as a background Windows task that starts automatically at sign-in:
+
+```powershell
+npm run install-startup
+```
+
+This is optional. Without it, `npx powerdevbox-admin` or `npm start` runs only for the lifetime of that terminal session. To return to that manual-only behavior, remove the startup task:
+
+```powershell
+npm run remove-startup
+```
+
+The Reports tab provides three server modes: **Off**, **On when server is running**, and **Always on**. Always-on mode installs the per-user Windows task. If PDAC is already running in a terminal, the background launcher waits; when that terminal process closes, it takes over on port 4280. It also starts automatically after the next Windows sign-in. PM2 is not required.
+
+**Run daily reports in the background** is separate from server mode. When enabled, the selected Excel reports are generated once per day and appear as download links in the Reports tab. **Save to database** independently controls whether totals are also written to SQLite. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
+
+The task runs `server.mjs` directly (no recurring `npx` command) and writes output to `data/server.log`. In the Reports tab, enable **Run daily reports in the background**, select environments, and enable **Save to database** for each report that should run. The server checks once per hour and runs any due database reports once per local calendar day; the web page does not need to be open.
+
 Open:
 
 ```text
