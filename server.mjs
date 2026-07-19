@@ -3,9 +3,9 @@
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { extname, join, normalize } from 'node:path';
+import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import ExcelJS from 'exceljs';
@@ -39,17 +39,27 @@ const SERVICE_RESOURCE = process.env.PP_SERVICE_RESOURCE || 'https://service.pow
 const POWER_PLATFORM_RESOURCE = process.env.PP_API_RESOURCE || 'https://api.powerplatform.com';
 const APP_DIR = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_DIR = join(APP_DIR, 'public');
-const REPORT_CACHE_DIR = join(APP_DIR, 'data', 'report-cache');
-const REPORT_TRENDS_DB_PATH = join(APP_DIR, 'data', 'report-trends.sqlite');
-const AUTOMATED_REPORT_SCHEDULE_PATH = join(APP_DIR, 'data', 'automated-report-schedule.json');
+const LEGACY_DATA_DIR = join(APP_DIR, 'data');
+const APP_DATA_DIR = process.env.PDAC_DATA_DIR
+  ? normalize(process.env.PDAC_DATA_DIR)
+  : process.platform === 'win32' && process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, 'PowerDevBoxAdmin', 'data')
+    : LEGACY_DATA_DIR;
+const REPORT_CACHE_DIR = join(APP_DATA_DIR, 'report-cache');
+const REPORT_TRENDS_DB_PATH = join(APP_DATA_DIR, 'report-trends.sqlite');
+const AUTOMATED_REPORT_SCHEDULE_PATH = join(APP_DATA_DIR, 'automated-report-schedule.json');
 const STARTUP_TASK_NAME = 'PDAC Background Server';
 const INSTALL_STARTUP_SCRIPT = join(APP_DIR, 'scripts', 'install-startup-task.ps1');
-const UNINSTALL_STARTUP_SCRIPT = join(APP_DIR, 'scripts', 'uninstall-startup-task.ps1');
+const GET_STARTUP_STATUS_SCRIPT = join(APP_DIR, 'scripts', 'get-startup-task-status.ps1');
+const BACKGROUND_RUNTIME_DIR = join(process.env.LOCALAPPDATA || APP_DIR, 'PowerDevBoxAdmin', 'background');
+const BACKGROUND_STOP_MARKER_PATH = join(BACKGROUND_RUNTIME_DIR, 'stop-requested');
 const REPORT_TREND_RETENTION_DAYS = 730;
-const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
 const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
 const USERS_TEAMS_PAGE_SIZE = 50;
+
+await initialiseDurableDataDirectory();
 
 const DEPTHS = new Set(['None', 'Basic', 'Local', 'Deep', 'Global', 'RecordFilter']);
 const CSV_SCOPE_TO_DEPTH = {
@@ -153,6 +163,7 @@ const aiEventMetadataCache = new Map();
 const automatedReportProgress = new Map();
 let reportTrendDbPromise = null;
 let reportTrendWriteQueue = Promise.resolve();
+let automatedReportScheduleWriteQueue = Promise.resolve();
 let automatedReportScheduleRunning = false;
 let lastDataverseAccountHomeId = '';
 const xmlParser = new XMLParser({
@@ -645,7 +656,12 @@ async function handleApi(req, res) {
 
   if (route === 'PUT /api/startup') {
     const body = await readJson(req);
-    sendJson(res, 200, await setStartupTaskEnabled(Boolean(body.enabled)));
+    const result = await setStartupTaskSettings(body);
+    const { stopCurrentProcess, ...payload } = result;
+    sendJson(res, 200, payload);
+    if (stopCurrentProcess) {
+      scheduleBackgroundServerStop();
+    }
     return;
   }
 
@@ -732,8 +748,9 @@ async function handleApi(req, res) {
   if (route === 'PUT /api/automated-reports/schedule') {
     const body = await readJson(req);
     const schedule = normalizeAutomatedReportSchedule(body);
-    await writeAutomatedReportSchedule(schedule);
-    sendJson(res, 200, schedule);
+    const savedSchedule = await writeAutomatedReportSchedule(schedule);
+    sendJson(res, 200, savedSchedule);
+    setImmediate(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError));
     return;
   }
 
@@ -4947,6 +4964,49 @@ async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
   return report;
 }
 
+async function initialiseDurableDataDirectory() {
+  await mkdir(APP_DATA_DIR, { recursive: true });
+  if (normalize(APP_DATA_DIR).toLowerCase() === normalize(LEGACY_DATA_DIR).toLowerCase()) {
+    return;
+  }
+
+  for (const fileName of ['report-trends.sqlite', 'automated-report-schedule.json']) {
+    const source = join(LEGACY_DATA_DIR, fileName);
+    const destination = join(APP_DATA_DIR, fileName);
+    if (!await pathExists(destination) && await pathExists(source)) {
+      await copyFile(source, destination);
+      console.log(`Migrated ${fileName} to durable app data at ${destination}.`);
+    }
+  }
+
+  const legacyCache = join(LEGACY_DATA_DIR, 'report-cache');
+  if (!await pathExists(REPORT_CACHE_DIR) && await pathExists(legacyCache)) {
+    await cp(legacyCache, REPORT_CACHE_DIR, { recursive: true, force: false });
+    console.log(`Migrated the report cache to durable app data at ${REPORT_CACHE_DIR}.`);
+  }
+}
+
+async function pathExists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writeFileAtomic(path, value) {
+  await mkdir(dirname(path), { recursive: true });
+  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporaryPath, value);
+  try {
+    await rename(temporaryPath, path);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => {});
+    throw error;
+  }
+}
+
 async function readAutomatedReportSchedule() {
   try {
     const value = JSON.parse(await readFile(AUTOMATED_REPORT_SCHEDULE_PATH, 'utf8'));
@@ -4962,9 +5022,14 @@ function normalizeAutomatedReportSchedule(value = {}, options = {}) {
     const source = value.groups?.[group] || {};
     groups[group] = {
       environments: normalizeAutomatedReportEnvironments(source.environments || []),
-      dateRange: source.dateRange && typeof source.dateRange === 'object' ? source.dateRange : {},
+      dateRange: normalizeAutomatedReportScheduleDateRange(source.dateRange),
       solutionOptions: source.solutionOptions && typeof source.solutionOptions === 'object' ? source.solutionOptions : {},
       saveToDatabase: Boolean(source.saveToDatabase),
+      lastRunDate: options.preserveState ? String(source.lastRunDate || '') : '',
+      lastStartedAt: options.preserveState ? String(source.lastStartedAt || '') : '',
+      lastCompletedAt: options.preserveState ? String(source.lastCompletedAt || '') : '',
+      lastDatabaseUpdatedAt: options.preserveState ? String(source.lastDatabaseUpdatedAt || '') : '',
+      lastError: options.preserveState ? String(source.lastError || '') : '',
     };
   }
   return {
@@ -4978,33 +5043,95 @@ function normalizeAutomatedReportSchedule(value = {}, options = {}) {
   };
 }
 
-async function writeAutomatedReportSchedule(schedule) {
-  await mkdir(join(APP_DIR, 'data'), { recursive: true });
-  const existing = await readAutomatedReportSchedule();
-  const next = {
-    ...schedule,
-    lastRunDate: existing.lastRunDate,
-    lastStartedAt: existing.lastStartedAt,
-    lastCompletedAt: existing.lastCompletedAt,
-    lastError: existing.lastError,
+function normalizeAutomatedReportScheduleDateRange(value = {}) {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+  const range = String(value.range || '').trim().toLowerCase();
+  if (!range) {
+    return {};
+  }
+  if (range !== 'custom') {
+    return { range };
+  }
+  return {
+    range,
+    start: String(value.start || '').trim(),
+    end: String(value.end || '').trim(),
   };
-  await writeFile(AUTOMATED_REPORT_SCHEDULE_PATH, `${JSON.stringify(next, null, 2)}\n`);
-  return next;
+}
+
+async function writeAutomatedReportSchedule(schedule) {
+  return enqueueAutomatedReportScheduleWrite(async () => {
+    const existing = await readAutomatedReportSchedule();
+    const next = {
+      ...schedule,
+      groups: Object.fromEntries(Object.entries(schedule.groups).map(([group, settings]) => [group, {
+        ...settings,
+        ...automatedReportGroupRunState(existing.groups[group]),
+      }])),
+      lastRunDate: existing.lastRunDate,
+      lastStartedAt: existing.lastStartedAt,
+      lastCompletedAt: existing.lastCompletedAt,
+      lastError: existing.lastError,
+    };
+    await persistAutomatedReportScheduleFile(next);
+    return next;
+  });
 }
 
 async function persistAutomatedReportScheduleState(schedule) {
-  await mkdir(join(APP_DIR, 'data'), { recursive: true });
-  await writeFile(AUTOMATED_REPORT_SCHEDULE_PATH, `${JSON.stringify(schedule, null, 2)}\n`);
+  return enqueueAutomatedReportScheduleWrite(async () => {
+    const current = await readAutomatedReportSchedule();
+    const next = {
+      ...current,
+      groups: Object.fromEntries(Object.entries(current.groups).map(([group, settings]) => [group, {
+        ...settings,
+        ...automatedReportGroupRunState(schedule.groups[group]),
+      }])),
+      lastRunDate: schedule.lastRunDate,
+      lastStartedAt: schedule.lastStartedAt,
+      lastCompletedAt: schedule.lastCompletedAt,
+      lastError: schedule.lastError,
+    };
+    await persistAutomatedReportScheduleFile(next);
+    return next;
+  });
+}
+
+function automatedReportGroupRunState(group = {}) {
+  return {
+    lastRunDate: String(group.lastRunDate || ''),
+    lastStartedAt: String(group.lastStartedAt || ''),
+    lastCompletedAt: String(group.lastCompletedAt || ''),
+    lastDatabaseUpdatedAt: String(group.lastDatabaseUpdatedAt || ''),
+    lastError: String(group.lastError || ''),
+  };
+}
+
+async function enqueueAutomatedReportScheduleWrite(action) {
+  const run = automatedReportScheduleWriteQueue.then(action, action);
+  automatedReportScheduleWriteQueue = run.catch(() => {});
+  return run;
+}
+
+async function persistAutomatedReportScheduleFile(schedule) {
+  await mkdir(APP_DATA_DIR, { recursive: true });
+  if (await pathExists(AUTOMATED_REPORT_SCHEDULE_PATH)) {
+    await copyFile(AUTOMATED_REPORT_SCHEDULE_PATH, `${AUTOMATED_REPORT_SCHEDULE_PATH}.backup`);
+  }
+  await writeFileAtomic(AUTOMATED_REPORT_SCHEDULE_PATH, `${JSON.stringify(schedule, null, 2)}\n`);
 }
 
 async function checkAutomatedReportSchedule() {
   if (automatedReportScheduleRunning) return;
   const schedule = await readAutomatedReportSchedule();
   const today = reportCacheDateKey();
-  if (!schedule.enabled || schedule.lastRunDate === today) return;
+  if (!schedule.enabled) return;
   const runnable = Object.entries(schedule.groups)
     .filter(([, group]) => group.environments.length);
-  if (!runnable.length) return;
+  const due = runnable.filter(([, group]) => group.lastRunDate !== today);
+  if (!due.length) return;
 
   automatedReportScheduleRunning = true;
   schedule.lastStartedAt = new Date().toISOString();
@@ -5012,22 +5139,44 @@ async function checkAutomatedReportSchedule() {
   await persistAutomatedReportScheduleState(schedule);
   try {
     await applyAccountHomeId(schedule.accountHomeId);
-    for (const [group, settings] of runnable) {
-      await getOrBuildCachedAutomatedReport(group, 'both', {
-        accountHomeId: schedule.accountHomeId,
-        environments: settings.environments,
-        dateRange: settings.dateRange,
-        solutionOptions: settings.solutionOptions,
-        saveToDatabase: settings.saveToDatabase,
-        forceRefresh: true,
-      });
+    for (const [group, settings] of due) {
+      settings.lastStartedAt = new Date().toISOString();
+      settings.lastError = '';
+      await persistAutomatedReportScheduleState(schedule);
+      try {
+        await getOrBuildCachedAutomatedReport(group, 'both', {
+          accountHomeId: schedule.accountHomeId,
+          environments: settings.environments,
+          dateRange: settings.dateRange,
+          solutionOptions: settings.solutionOptions,
+          saveToDatabase: settings.saveToDatabase,
+          forceRefresh: true,
+        });
+        settings.lastRunDate = today;
+        settings.lastCompletedAt = new Date().toISOString();
+        settings.lastDatabaseUpdatedAt = settings.saveToDatabase ? settings.lastCompletedAt : '';
+        console.log(`Scheduled ${group} report completed for ${today}${settings.saveToDatabase ? ' and SQLite was updated' : ''}.`);
+      } catch (error) {
+        settings.lastError = errorMessage(error);
+        schedule.lastError = `${group}: ${settings.lastError}`;
+        console.error(`Scheduled ${group} report failed for ${today}: ${settings.lastError}`);
+      }
+      await persistAutomatedReportScheduleState(schedule);
     }
-    schedule.lastRunDate = today;
-    schedule.lastCompletedAt = new Date().toISOString();
-    console.log(`Scheduled reports completed for ${today}.`);
+    if (runnable.every(([, settings]) => settings.lastRunDate === today)) {
+      schedule.lastRunDate = today;
+      schedule.lastCompletedAt = new Date().toISOString();
+      schedule.lastError = '';
+      console.log(`All scheduled reports completed for ${today}.`);
+    }
   } catch (error) {
     schedule.lastError = errorMessage(error);
-    throw error;
+    for (const [, settings] of due) {
+      if (settings.lastRunDate !== today) {
+        settings.lastError = schedule.lastError;
+      }
+    }
+    console.error(`Scheduled report account setup failed for ${today}: ${schedule.lastError}`);
   } finally {
     await persistAutomatedReportScheduleState(schedule);
     automatedReportScheduleRunning = false;
@@ -5040,27 +5189,95 @@ function logAutomatedReportScheduleError(error) {
 
 async function getStartupTaskStatus() {
   if (process.platform !== 'win32') {
-    return { supported: false, enabled: false, taskName: STARTUP_TASK_NAME };
+    return {
+      supported: false,
+      installed: false,
+      backgroundEnabled: false,
+      autoStartEnabled: false,
+      definitionHealthy: true,
+      taskName: STARTUP_TASK_NAME,
+      taskState: 'Unsupported',
+      processMode: 'foreground',
+      health: 'unsupported',
+    };
   }
   try {
-    await runPowerShell([
-      '-Command',
-      `if (Get-ScheduledTask -TaskName '${STARTUP_TASK_NAME}' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }`,
+    const output = await runPowerShell([
+      '-File', GET_STARTUP_STATUS_SCRIPT,
+      '-TaskName', STARTUP_TASK_NAME,
+      '-ExpectedServerPath', fileURLToPath(import.meta.url),
     ]);
-    return { supported: true, enabled: true, taskName: STARTUP_TASK_NAME };
-  } catch {
-    return { supported: true, enabled: false, taskName: STARTUP_TASK_NAME };
+    const task = JSON.parse(output);
+    const processMode = process.env.PDAC_BACKGROUND_TASK === '1' ? 'background' : 'foreground';
+    const health = !task.definitionHealthy
+      ? 'stale'
+      : task.backgroundEnabled && processMode === 'background'
+        ? 'running'
+        : task.backgroundEnabled
+          ? 'waiting'
+          : 'stopped';
+    return {
+      supported: true,
+      ...task,
+      taskName: STARTUP_TASK_NAME,
+      processMode,
+      health,
+    };
+  } catch (error) {
+    return {
+      supported: true,
+      installed: false,
+      backgroundEnabled: false,
+      autoStartEnabled: false,
+      definitionHealthy: false,
+      taskName: STARTUP_TASK_NAME,
+      taskState: 'Unknown',
+      processMode: process.env.PDAC_BACKGROUND_TASK === '1' ? 'background' : 'foreground',
+      health: 'unhealthy',
+      error: errorMessage(error),
+    };
   }
 }
 
-async function setStartupTaskEnabled(enabled) {
+async function setStartupTaskSettings(body = {}) {
   if (process.platform !== 'win32') {
-    throw new HttpError(400, 'Automatic startup is currently supported on Windows only.');
+    throw new HttpError(400, 'Background server management is currently supported on Windows only.');
   }
-  const script = enabled ? INSTALL_STARTUP_SCRIPT : UNINSTALL_STARTUP_SCRIPT;
-  const args = ['-File', script, '-TaskName', STARTUP_TASK_NAME];
+  if (typeof body.backgroundEnabled !== 'boolean' || typeof body.autoStartEnabled !== 'boolean') {
+    throw new HttpError(400, 'backgroundEnabled and autoStartEnabled must be true or false.');
+  }
+
+  await mkdir(BACKGROUND_RUNTIME_DIR, { recursive: true });
+  if (body.backgroundEnabled) {
+    await unlink(BACKGROUND_STOP_MARKER_PATH).catch(() => {});
+  } else {
+    await writeFile(BACKGROUND_STOP_MARKER_PATH, `${new Date().toISOString()}\n`, 'utf8');
+  }
+
+  const args = [
+    '-File', INSTALL_STARTUP_SCRIPT,
+    '-TaskName', STARTUP_TASK_NAME,
+    '-AutoStart', body.autoStartEnabled ? 'true' : 'false',
+    '-StartTask', body.backgroundEnabled ? 'true' : 'false',
+  ];
   await runPowerShell(args);
-  return { supported: true, enabled, taskName: STARTUP_TASK_NAME };
+  const status = await getStartupTaskStatus();
+  const stopCurrentProcess = !body.backgroundEnabled && process.env.PDAC_BACKGROUND_TASK === '1';
+  return {
+    ...status,
+    backgroundEnabled: body.backgroundEnabled,
+    autoStartEnabled: body.autoStartEnabled,
+    health: body.backgroundEnabled ? status.health : 'stopping',
+    stopCurrentProcess,
+  };
+}
+
+function scheduleBackgroundServerStop() {
+  const forceExit = setTimeout(() => process.exit(0), 2000);
+  forceExit.unref();
+  setTimeout(() => {
+    server.close(() => process.exit(0));
+  }, 250).unref();
 }
 
 function runPowerShell(args) {
@@ -5355,7 +5572,7 @@ function cachedNumber(value) {
 async function getReportTrendDb() {
   if (!reportTrendDbPromise) {
     reportTrendDbPromise = (async () => {
-      await mkdir(join(APP_DIR, 'data'), { recursive: true });
+      await mkdir(APP_DATA_DIR, { recursive: true });
       const SQL = await initSqlJs({
         locateFile: (file) => require.resolve(`sql.js/dist/${file}`),
       });
@@ -5366,7 +5583,6 @@ async function getReportTrendDb() {
         bytes = null;
       }
       const db = bytes?.length ? new SQL.Database(bytes) : new SQL.Database();
-      db.run('DROP TABLE IF EXISTS report_metric_snapshots');
       for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
         ensureReportTotalTable(db, definition);
       }
@@ -5396,8 +5612,11 @@ function ensureReportTotalTable(db, definition) {
 }
 
 async function persistReportTrendDb(db) {
-  await mkdir(join(APP_DIR, 'data'), { recursive: true });
-  await writeFile(REPORT_TRENDS_DB_PATH, Buffer.from(db.export()));
+  await mkdir(APP_DATA_DIR, { recursive: true });
+  if (await pathExists(REPORT_TRENDS_DB_PATH)) {
+    await copyFile(REPORT_TRENDS_DB_PATH, `${REPORT_TRENDS_DB_PATH}.backup`);
+  }
+  await writeFileAtomic(REPORT_TRENDS_DB_PATH, Buffer.from(db.export()));
 }
 
 async function enqueueReportTrendWrite(action) {
@@ -5416,7 +5635,7 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     return;
   }
   const collectedAt = new Date().toISOString();
-  const dateRan = collectedAt.slice(0, 10);
+  const dateRan = reportCacheDateKey();
   const rangeKey = dateRange ? `${dateRange.range || 'custom'}:${dateRange.startDate || ''}:${dateRange.endDate || ''}` : 'snapshot';
   const rangeLabel = dateRange ? dateRangeLabel(dateRange) : 'snapshot';
   const columns = definition.columns.map(([, key]) => key);
@@ -5429,6 +5648,10 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
     try {
       db.run('BEGIN TRANSACTION');
+      db.run(
+        `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE account_home_id = ? AND date_ran = ?`,
+        [String(accountHomeId || '').trim(), dateRan],
+      );
       for (const row of totalRows) {
         insert.run([
           String(accountHomeId || '').trim(),
@@ -5473,23 +5696,28 @@ async function listReportTrendSnapshots(filters = {}) {
   const db = await getReportTrendDb();
   const accountHomeId = String(filters.accountHomeId || '').trim();
   const tables = [];
-  let changed = false;
   for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
-    db.run(`DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`, [reportTrendRetentionCutoffDate()]);
-    changed = true;
     const result = db.exec(`
       SELECT *
       FROM ${quoteSqlIdentifier(definition.tableName)}
       WHERE account_home_id = ?
         AND date_ran >= ?
         AND date_ran <= ?
-      ORDER BY collected_at, environment_display_name
+      ORDER BY collected_at, id
     `, [
       accountHomeId,
       dateRange.startDate,
       dateRange.endDate,
     ]);
-    const rows = sqlRows(result[0]).map((row) => ({
+    const latestRows = new Map();
+    for (const row of sqlRows(result[0])) {
+      const environmentKey = String(row.environment_id || '').trim()
+        || String(row.environment_url || '').trim()
+        || String(row.environment_display_name || '').trim()
+        || String(row.id);
+      latestRows.set(`${row.date_ran}:${environmentKey}`, row);
+    }
+    const rows = [...latestRows.values()].map((row) => ({
       id: row.id,
       dateRan: row.date_ran,
       collectedAt: row.collected_at,
@@ -5499,7 +5727,8 @@ async function listReportTrendSnapshots(filters = {}) {
         key,
         type === 'REAL' ? Number(row[key] || 0) : String(row[key] ?? ''),
       ])),
-    }));
+    })).sort((left, right) => `${left.dateRan}:${left.values.environment_display_name || ''}`
+      .localeCompare(`${right.dateRan}:${right.values.environment_display_name || ''}`));
     tables.push({
       tableName: definition.tableName,
       reportKey: definition.reportKey,
@@ -5512,9 +5741,6 @@ async function listReportTrendSnapshots(filters = {}) {
       })),
       rows,
     });
-  }
-  if (changed) {
-    await persistReportTrendDb(db);
   }
   return {
     range: {
@@ -5547,6 +5773,7 @@ async function listSqlTables() {
   const tables = tableNames.map((name) => getSqlTableInfo(db, name));
   return {
     database: 'report-trends.sqlite',
+    dataPath: REPORT_TRENDS_DB_PATH,
     tables,
     totalRows: tables.reduce((sum, table) => sum + table.rowCount, 0),
     totalStorageBytes: tables.reduce((sum, table) => sum + table.storageBytes, 0),
@@ -5747,7 +5974,8 @@ function getReportTrendDateRange(filters = {}) {
   }
   if (range === 'month') {
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    return { range, startDate: toDateOnlyString(monthStart), endDate: toDateOnlyString(today) };
+    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    return { range, startDate: toDateOnlyString(monthStart), endDate: toDateOnlyString(monthEnd) };
   }
   if (range === '730d' || range === '2y') {
     return { range: '730d', startDate: toDateOnlyString(addDays(today, -729)), endDate: toDateOnlyString(today) };

@@ -71,7 +71,10 @@ const el = {
   automatedReportStatusTitle: document.querySelector('#automatedReportStatusTitle'),
   automatedReportStatusList: document.querySelector('#automatedReportStatusList'),
   automatedReportDownloads: document.querySelector('#automatedReportDownloads'),
-  reportServerMode: document.querySelector('#reportServerMode'),
+  backgroundServerEnabled: document.querySelector('#backgroundServerEnabled'),
+  backgroundServerAutoStart: document.querySelector('#backgroundServerAutoStart'),
+  backgroundServerStatus: document.querySelector('#backgroundServerStatus'),
+  repairBackgroundServerButton: document.querySelector('#repairBackgroundServerButton'),
   automatedReportsRunOnLoad: document.querySelector('#automatedReportsRunOnLoad'),
   automatedAiEventsRange: document.querySelector('#automatedAiEventsRange'),
   automatedAiEventsStart: document.querySelector('#automatedAiEventsStart'),
@@ -284,6 +287,13 @@ const state = {
     chartDashboardData: null,
     dashboardData: null,
   },
+  backgroundServer: {
+    backgroundEnabled: false,
+    autoStartEnabled: false,
+    definitionHealthy: true,
+    health: 'unknown',
+  },
+  automatedReportSchedule: null,
   sqlTables: [],
   businessUnits: [],
   businessUnitsLoaded: false,
@@ -376,7 +386,6 @@ const state = {
 
 const LAST_ACCOUNT_KEY = 'pdacLastAccountHomeId';
 const LAST_ENVIRONMENT_PREFIX = 'pdacLastEnvironment';
-const REPORT_SERVER_MODE_KEY = 'pdacReportServerMode';
 const AUTOMATED_REPORTS_RUN_ON_LOAD_KEY = 'pdacAutomatedReportsRunOnLoad';
 const AUTOMATED_REPORT_AUTO_DOWNLOAD_DATE_PREFIX = 'pdacAutomatedReportAutoDownloadDate';
 const AUTOMATED_SOLUTIONS_PUBLISHER_EXCLUSIONS_KEY = 'pdacAutomatedSolutionsPublisherExclusions';
@@ -417,11 +426,20 @@ el.sqlTablesList?.addEventListener('click', (event) => {
   withBusy(button, () => exportSqlTable(button.dataset.sqlTableExport || ''), 'Downloading');
 });
 el.deleteSqlRecordsButton?.addEventListener('click', openSqlDeleteModal);
-el.reportServerMode?.addEventListener('change', () => updateReportServerMode().catch((error) => {
-  toast(error.message, 'error');
-  console.error(error);
-  loadReportServerMode().catch(() => {});
+[el.backgroundServerEnabled, el.backgroundServerAutoStart].forEach((input) => input?.addEventListener('change', () => {
+  updateBackgroundServerSettings().catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+    loadBackgroundServerSettings().catch(() => {});
+  });
 }));
+el.repairBackgroundServerButton?.addEventListener('click', () => {
+  updateBackgroundServerSettings({ repair: true }).catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+    loadBackgroundServerSettings().catch(() => {});
+  });
+});
 el.automatedReportsRunOnLoad?.addEventListener('change', () => {
   localStorage.setItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY, el.automatedReportsRunOnLoad.checked ? 'true' : 'false');
   saveAutomatedReportSettings();
@@ -900,48 +918,137 @@ renderAutomatedReportControls();
 renderAutomatedReportStatus();
 updateChartsTabAvailability();
 updateReportsTabAvailability();
+await loadBackgroundServerSettings();
 await loadStatus();
-await loadReportServerMode();
 loadSqlTables().catch((error) => {
   console.warn('Unable to load SQL tables.', error);
 });
 
-async function loadReportServerMode() {
-  if (!el.reportServerMode) return;
+async function loadBackgroundServerSettings() {
+  if (!el.backgroundServerEnabled) return;
   const [startup, schedule] = await Promise.all([
     api('/api/startup', { quiet: true }),
     api('/api/automated-reports/schedule', { quiet: true }),
   ]);
-  const storedMode = localStorage.getItem(REPORT_SERVER_MODE_KEY);
-  const mode = startup.enabled
-    ? 'always'
-    : storedMode === 'running'
-      ? 'running'
-      : schedule.enabled ? 'running' : 'off';
-  el.reportServerMode.value = mode;
-  localStorage.setItem(REPORT_SERVER_MODE_KEY, mode);
-  if (!startup.supported) {
-    el.reportServerMode.querySelector('option[value="always"]')?.setAttribute('disabled', '');
-  }
-  el.automatedReportsRunOnLoad.disabled = mode === 'off';
+  state.backgroundServer = startup;
+  state.automatedReportSchedule = schedule;
+  applyAutomatedReportSchedule(schedule);
+  el.automatedReportsRunOnLoad.checked = Boolean(schedule.enabled);
+  localStorage.setItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY, schedule.enabled ? 'true' : 'false');
+  renderBackgroundServerSettings();
 }
 
-async function updateReportServerMode() {
-  const mode = el.reportServerMode.value;
-  el.reportServerMode.disabled = true;
+async function updateBackgroundServerSettings({ repair = false } = {}) {
+  const backgroundEnabled = el.backgroundServerEnabled.checked;
+  const autoStartEnabled = el.backgroundServerAutoStart.checked;
+  setBackgroundServerControlsDisabled(true);
   try {
-    await api('/api/startup', { method: 'PUT', body: { enabled: mode === 'always' } });
-    localStorage.setItem(REPORT_SERVER_MODE_KEY, mode);
+    const startup = await api('/api/startup', {
+      method: 'PUT',
+      body: { backgroundEnabled, autoStartEnabled },
+    });
+    state.backgroundServer = startup;
+    renderBackgroundServerSettings();
     saveAutomatedReportSettings();
-    el.automatedReportsRunOnLoad.disabled = mode === 'off';
-    toast(mode === 'always'
-      ? 'Always-on mode enabled. The background server will take over if this terminal server stops.'
-      : mode === 'running'
-        ? 'Reports will run while the server is running.'
-        : 'Scheduled database reports are off.');
+    toast(repair
+      ? 'Background task repaired.'
+      : backgroundEnabled
+        ? 'Background server enabled. It will take over if this terminal server closes.'
+        : autoStartEnabled
+          ? 'Background server stopped for now. It will start when you next sign in or unlock Windows.'
+          : 'Background server and sign-in startup disabled.');
   } finally {
-    el.reportServerMode.disabled = false;
+    setBackgroundServerControlsDisabled(false);
   }
+}
+
+function applyAutomatedReportSchedule(schedule = {}) {
+  const groups = schedule.groups || {};
+  const groupMap = {
+    'ai-events': 'aiEvents',
+    'agent-sessions': 'agentSessions',
+    solutions: 'solutions',
+    'flow-runs': 'flowRuns',
+  };
+  for (const [apiGroup, groupKey] of Object.entries(groupMap)) {
+    const group = groups[apiGroup] || {};
+    if (Array.isArray(group.environments)) {
+      state.automatedReports.selectedEnvironmentIds[groupKey] = new Set(group.environments
+        .map((environment) => String(environment.environmentName || environment.environmentId || environment.name || '').trim())
+        .filter(Boolean));
+    }
+    const saveToDatabase = Boolean(group.saveToDatabase);
+    state.automatedReports.reportOptions[groupKey].saveToDatabase = saveToDatabase;
+    const input = automatedReportOptionInput(groupKey, 'saveToDatabase');
+    if (input) {
+      input.checked = saveToDatabase;
+    }
+  }
+
+  const aiRange = groups['ai-events']?.dateRange || {};
+  if (aiRange.range) {
+    el.automatedAiEventsRange.value = selectValueOrDefault(el.automatedAiEventsRange, aiRange.range, el.automatedAiEventsRange.value);
+    el.automatedAiEventsStart.value = aiRange.start || el.automatedAiEventsStart.value;
+    el.automatedAiEventsEnd.value = aiRange.end || el.automatedAiEventsEnd.value;
+  }
+  const sessionsRange = groups['agent-sessions']?.dateRange || {};
+  if (sessionsRange.range) {
+    el.automatedAgentSessionsRange.value = selectValueOrDefault(el.automatedAgentSessionsRange, sessionsRange.range, el.automatedAgentSessionsRange.value);
+    el.automatedAgentSessionsStart.value = sessionsRange.start || el.automatedAgentSessionsStart.value;
+    el.automatedAgentSessionsEnd.value = sessionsRange.end || el.automatedAgentSessionsEnd.value;
+  }
+  const solutionOptions = groups.solutions?.solutionOptions || {};
+  if (Object.keys(solutionOptions).length) {
+    el.automatedSolutionsPublisherExclusions.value = Array.isArray(solutionOptions.excludedPublishers)
+      ? solutionOptions.excludedPublishers.join(', ')
+      : String(solutionOptions.excludedPublishers || '');
+    el.automatedSolutionsIncludeManaged.checked = Boolean(solutionOptions.includeManaged);
+    el.automatedSolutionsIncludeMicrosoft.checked = Boolean(solutionOptions.includeMicrosoftOwned);
+  }
+  syncAutomatedReportDateRanges();
+}
+
+function setBackgroundServerControlsDisabled(disabled) {
+  el.backgroundServerEnabled.disabled = disabled;
+  el.backgroundServerAutoStart.disabled = disabled;
+  el.repairBackgroundServerButton.disabled = disabled;
+}
+
+function renderBackgroundServerSettings() {
+  const startup = state.backgroundServer;
+  el.backgroundServerEnabled.checked = Boolean(startup.backgroundEnabled);
+  el.backgroundServerAutoStart.checked = Boolean(startup.autoStartEnabled);
+  el.backgroundServerEnabled.disabled = !startup.supported;
+  el.backgroundServerAutoStart.disabled = !startup.supported;
+  el.repairBackgroundServerButton.hidden = startup.definitionHealthy !== false;
+  el.backgroundServerStatus.dataset.health = startup.health || 'unknown';
+  el.backgroundServerStatus.textContent = backgroundServerStatusText(startup);
+}
+
+function backgroundServerStatusText(startup) {
+  if (!startup.supported) {
+    return 'Background server management is available on Windows only.';
+  }
+  if (startup.health === 'stale') {
+    return 'The installed task points to missing or different PDAC files. Repair it before relying on background startup.';
+  }
+  if (startup.health === 'unhealthy') {
+    return startup.error ? `Unable to read the background task: ${startup.error}` : 'The background task status could not be read.';
+  }
+  if (startup.health === 'running') {
+    return `Running in the background with your Windows credentials. Logs: ${startup.logPath || 'PDAC local app data'}`;
+  }
+  if (startup.health === 'waiting') {
+    return 'The background task is ready and is waiting for this terminal-owned server to close. Cold startup can take about 30 seconds.';
+  }
+  if (startup.health === 'stopping') {
+    return startup.autoStartEnabled
+      ? 'Stopping the background server. It will start again the next time you sign in or unlock Windows.'
+      : 'Stopping the background server.';
+  }
+  return startup.autoStartEnabled
+    ? 'Stopped for now. It will run with your Windows credentials the next time you sign in or unlock Windows.'
+    : 'The background server is stopped and sign-in startup is disabled.';
 }
 
 async function loadStatus() {
@@ -1834,29 +1941,42 @@ async function syncAutomatedReportSchedule(settings) {
   const groups = {};
   for (const [apiGroup, groupKey] of Object.entries(groupMap)) {
     const selectedIds = new Set(settings.environments?.[groupKey] || []);
+    const existingEnvironments = state.automatedReportSchedule?.groups?.[apiGroup]?.environments || [];
+    const environmentSource = state.environmentsLoaded ? state.environments : existingEnvironments;
     groups[apiGroup] = {
-      environments: state.environments
-        .filter((environment) => selectedIds.has(environment.name) && environment.orgUrl)
+      environments: environmentSource
+        .filter((environment) => selectedIds.has(environment.name || environment.environmentName || environment.environmentId) && environment.orgUrl)
         .map((environment) => ({
-          name: environment.name,
-          environmentName: environment.name,
-          displayName: environment.displayName || environment.name,
+          name: environment.name || environment.environmentName || environment.environmentId,
+          environmentName: environment.name || environment.environmentName || environment.environmentId,
+          displayName: environment.displayName || environment.name || environment.environmentName || environment.environmentId,
           orgUrl: environment.orgUrl,
         })),
-      dateRange: groupKey === 'aiEvents' ? settings.aiEvents : groupKey === 'agentSessions' ? settings.agentSessions : {},
+      dateRange: scheduledReportDateRange(groupKey === 'aiEvents' ? settings.aiEvents : groupKey === 'agentSessions' ? settings.agentSessions : {}),
       solutionOptions: groupKey === 'solutions' ? settings.solutions : {},
       saveToDatabase: Boolean(settings.reportOptions?.[groupKey]?.saveToDatabase),
     };
   }
-  await api('/api/automated-reports/schedule', {
+  const savedSchedule = await api('/api/automated-reports/schedule', {
     method: 'PUT',
     body: {
-      enabled: el.reportServerMode?.value !== 'off' && el.automatedReportsRunOnLoad.checked,
-      accountHomeId: resolveRequestAccountId(),
+      enabled: el.automatedReportsRunOnLoad.checked,
+      accountHomeId: resolveRequestAccountId() || state.automatedReportSchedule?.accountHomeId || '',
       groups,
     },
     quiet: true,
   });
+  state.automatedReportSchedule = savedSchedule;
+}
+
+function scheduledReportDateRange(value = {}) {
+  const range = String(value.range || '').trim();
+  if (!range) {
+    return {};
+  }
+  return range === 'custom'
+    ? { range, start: value.start || '', end: value.end || '' }
+    : { range };
 }
 
 function automatedReportOptionInput(groupKey, option) {
@@ -2781,15 +2901,18 @@ function buildAiRollingCreditChart(table, range, options) {
     return null;
   }
   const daily = sumRowsByDate(filteredRows, options.valueKey);
-  const actualData = [];
-  let runningTotal = 0;
-  let lastActualIndex = -1;
-  for (const [index, date] of dateLabels.entries()) {
-    runningTotal += daily.get(date) || 0;
-    if (daily.has(date)) {
-      lastActualIndex = index;
+  const actualIndexes = dateLabels
+    .map((date, index) => daily.has(date) ? index : -1)
+    .filter((index) => index >= 0);
+  const firstActualIndex = actualIndexes[0] ?? -1;
+  const lastActualIndex = actualIndexes.at(-1) ?? -1;
+  const actualData = dateLabels.map(() => null);
+  let latestTotal = null;
+  for (let index = firstActualIndex; index >= 0 && index <= lastActualIndex; index += 1) {
+    if (daily.has(dateLabels[index])) {
+      latestTotal = daily.get(dateLabels[index]);
     }
-    actualData.push(lastActualIndex >= 0 && index <= lastActualIndex ? runningTotal : null);
+    actualData[index] = latestTotal;
   }
   const predictionData = predictedUsageData(dateLabels, actualData, lastActualIndex);
   return withReportChartSettings({
@@ -2807,8 +2930,9 @@ function buildAiRollingCreditChart(table, range, options) {
       reportDataset('Actual rolling total', actualData, options.color, {
         tension: 0.25,
         spanGaps: true,
-        pointRadius: 3,
+        pointRadius: 4,
         pointHoverRadius: 5,
+        borderWidth: 3,
       }),
       reportDataset('Predicted usage', predictionData, options.color, {
         borderDash: [6, 5],

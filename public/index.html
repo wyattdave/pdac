@@ -133,17 +133,21 @@
             <div class="section-title compact-title">
               <div>
                 <h3>Scheduled reports</h3>
-                <p class="muted">The server checks hourly and runs selected database reports once per day, even when this page is closed.</p>
+                <p class="muted">The server checks at startup and every five minutes. Each selected report is complete only after its files are generated and its database snapshot is saved.</p>
               </div>
               <div class="scheduled-report-controls">
-                <label>
-                  Server mode
-                  <select id="reportServerMode">
-                    <option value="off">Off</option>
-                    <option value="running">On when server is running</option>
-                    <option value="always">Always on</option>
-                  </select>
+                <label class="checkbox-label">
+                  <input id="backgroundServerEnabled" type="checkbox" />
+                  Run the web server in the background
                 </label>
+                <label class="checkbox-label">
+                  <input id="backgroundServerAutoStart" type="checkbox" />
+                  Start automatically when I sign in to or unlock Windows
+                </label>
+                <div class="background-server-status-row">
+                  <span id="backgroundServerStatus" class="background-server-status" aria-live="polite">Checking background server...</span>
+                  <button id="repairBackgroundServerButton" class="secondary" type="button" hidden>Repair background task</button>
+                </div>
                 <label class="checkbox-label scheduled-report-daily-toggle">
                   <input id="automatedReportsRunOnLoad" type="checkbox" />
                   Run daily reports in the background

@@ -44,23 +44,30 @@ For development from this checkout:
 npm start
 ```
 
-To install PDAC as a background Windows task that starts automatically at sign-in:
+To install PDAC as a per-user background Windows task and start it automatically at sign-in:
 
 ```powershell
 npm run install-startup
 ```
 
-This is optional. Without it, `npx powerdevbox-admin` or `npm start` runs only for the lifetime of that terminal session. To return to that manual-only behavior, remove the startup task:
+This is optional. The task runs with the signed-in user's Windows credentials. Without it, `npx powerdevbox-admin` or `npm start` runs only for the lifetime of that terminal session. To stop and remove the background task:
 
 ```powershell
 npm run remove-startup
 ```
 
-The Reports tab provides three server modes: **Off**, **On when server is running**, and **Always on**. Always-on mode installs the per-user Windows task. If PDAC is already running in a terminal, the background launcher waits; when that terminal process closes, it takes over on port 4280. It also starts automatically after the next Windows sign-in. PM2 is not required.
+The Reports tab provides two independent controls:
 
-**Run daily reports in the background** is separate from server mode. When enabled, the selected Excel reports are generated once per day and appear as download links in the Reports tab. **Save to database** independently controls whether totals are also written to SQLite. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
+- **Run the web server in the background** starts or stops the hidden per-user task now.
+- **Start automatically when I sign in to Windows** adds or removes the current user's sign-in and session-unlock triggers. It can remain enabled while the background server is stopped, in which case PDAC starts at the next sign-in or unlock.
 
-The task runs `server.mjs` directly (no recurring `npx` command) and writes output to `data/server.log`. In the Reports tab, enable **Run daily reports in the background**, select environments, and enable **Save to database** for each report that should run. The server checks once per hour and runs any due database reports once per local calendar day; the web page does not need to be open.
+If PDAC is already running in a terminal, the background launcher waits; when that terminal process closes, it takes over on port 4280. The task uses the Windows Script Host as a windowless GUI launcher, so the persistent PowerShell watchdog and Node server do not create or require a terminal window. A cold start can take about 30 seconds. The page reports whether the task is running, waiting, stopped, unhealthy, or pointing to stale files, and offers a repair action when necessary. PM2 and administrator credentials are not required.
+
+**Run daily reports in the background** is separate from the background server settings. When enabled, the selected Excel reports are generated once per day and appear as download links in the Reports tab. **Save to database** independently controls whether totals are also written to SQLite. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
+
+The task runs `server.mjs` directly (no recurring `npx` command). Its stable launcher/configuration, rotating UTF-8 logs, report cache, schedule, and SQLite database are stored under `%LOCALAPPDATA%\PowerDevBoxAdmin`. Keeping application data outside the npm package means an update does not replace it. Each SQLite write also keeps a `.backup` copy of the preceding database file.
+
+In the Reports tab, enable **Run daily reports in the background**, select environments, and enable **Save to database** for each report that should run. The server checks immediately at startup and after a settings change, then every five minutes. Each due report is tracked independently, so successful reports are not repeated while a failed report is retried. A report is marked complete only after its Excel files are generated and, when enabled, its daily SQLite snapshot is committed. The web page does not need to be open.
 
 Open:
 

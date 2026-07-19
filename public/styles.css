@@ -953,23 +953,42 @@ select:disabled {
 
 .scheduled-report-controls {
   display: grid;
-  flex: 0 0 min(100%, 340px);
-  gap: 12px;
-  min-width: min(100%, 340px);
+  flex: 0 0 min(100%, 430px);
+  gap: 10px;
+  min-width: min(100%, 430px);
 }
 
-.scheduled-report-controls > label:first-child {
-  display: grid;
-  gap: 6px;
+.background-server-status-row {
+  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-#reportServerMode {
-  min-width: 300px;
-  width: 100%;
+.background-server-status {
+  color: var(--muted);
+  flex: 1 1 250px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.background-server-status[data-health="running"] {
+  color: #166534;
+}
+
+.background-server-status[data-health="stale"],
+.background-server-status[data-health="unhealthy"] {
+  color: #b91c1c;
+}
+
+.background-server-status-row button {
+  padding: 6px 10px;
 }
 
 .scheduled-report-daily-toggle {
+  border-top: 1px solid var(--line);
   justify-self: start;
+  padding-top: 10px;
 }
 
 .automated-report-grid {
