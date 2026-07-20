@@ -351,7 +351,7 @@ const state = {
   agentSessionsLoading: false,
   agentSessionsNextPageToken: '',
   agentSessionDateRange: {
-    range: '7d',
+    range: 'month',
     startDate: '',
     endDate: '',
   },
@@ -1706,7 +1706,7 @@ function clearEnvironmentData() {
   state.agentSessionsLoading = false;
   state.agentSessionsNextPageToken = '';
   state.agentSessionDateRange = {
-    range: '7d',
+    range: 'month',
     startDate: '',
     endDate: '',
   };
@@ -2380,7 +2380,7 @@ async function loadCachedReportsDashboard() {
     el.reportsStatus.textContent = 'Loading stored trends...';
     const params = new URLSearchParams({
       accountHomeId: resolveRequestAccountId(),
-      range: el.trendRange?.value || '28d',
+      range: el.trendRange?.value || 'month',
     });
     if (params.get('range') === 'custom') {
       params.set('start', el.trendStart?.value || '');
@@ -2553,7 +2553,7 @@ function buildAutomatedReportBody(groupKey, environments) {
   }
   if (groupKey === 'agentSessions') {
     body.dateRange = {
-      range: el.automatedAgentSessionsRange.value || '7d',
+      range: el.automatedAgentSessionsRange.value || 'month',
       start: el.automatedAgentSessionsStart.value || '',
       end: el.automatedAgentSessionsEnd.value || '',
     };
@@ -2896,7 +2896,7 @@ function buildAiRollingCreditChart(table, range, options) {
   const environments = chartEnvironmentOptions(rows);
   const selectedEnvironmentIds = selectedReportChartEnvironmentIds(options.id, environments);
   const filteredRows = filterTrendRowsByEnvironment(rows, selectedEnvironmentIds);
-  const dateLabels = trendDateLabels(range, rows);
+  const dateLabels = trendDateLabelsWithMonthForecast(range, rows);
   if (!dateLabels.length) {
     return null;
   }
@@ -2915,10 +2915,11 @@ function buildAiRollingCreditChart(table, range, options) {
     actualData[index] = latestTotal;
   }
   const predictionData = predictedUsageData(dateLabels, actualData, lastActualIndex);
+  const forecastEndDate = monthEndDateKey(dateLabels[lastActualIndex]) || dateLabels[dateLabels.length - 1];
   return withReportChartSettings({
     id: options.id,
     title: options.title,
-    subtitle: `Rolling total with projected usage to ${formatDateLabel(dateLabels[dateLabels.length - 1])}`,
+    subtitle: `Rolling total with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`,
     type: 'line',
     labels: dateLabels.map(formatDateLabel),
     unit: 'Credits',
@@ -2934,7 +2935,7 @@ function buildAiRollingCreditChart(table, range, options) {
         pointHoverRadius: 5,
         borderWidth: 3,
       }),
-      reportDataset('Predicted usage', predictionData, options.color, {
+      reportDataset('Forecast usage', predictionData, options.color, {
         borderDash: [6, 5],
         borderWidth: 2,
         pointRadius: 0,
@@ -2951,13 +2952,67 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
     return prediction;
   }
   const currentTotal = number(actualData[lastActualIndex]);
-  const elapsedDays = lastActualIndex + 1;
-  const dailyRate = elapsedDays ? currentTotal / elapsedDays : 0;
   prediction[lastActualIndex] = currentTotal;
+
+  const lastActualDate = parseDateOnlyValue(dateLabels[lastActualIndex]);
+  if (!lastActualDate) {
+    return prediction;
+  }
+  const forecastMonth = `${lastActualDate.getFullYear()}-${String(lastActualDate.getMonth() + 1).padStart(2, '0')}`;
+  const todayDate = new Date();
+  if (lastActualDate.getFullYear() !== todayDate.getFullYear() || lastActualDate.getMonth() !== todayDate.getMonth()) {
+    return prediction;
+  }
+  const today = formatDateInputValue(todayDate);
+  const historyEndIndex = dateLabels[lastActualIndex] === today ? lastActualIndex - 1 : lastActualIndex;
+  const weekdaySamples = Array.from({ length: 7 }, () => []);
+  const allSamples = [];
+  let previousTotal = null;
+
+  for (let index = 0; index <= historyEndIndex; index += 1) {
+    if (actualData[index] === null || actualData[index] === undefined) {
+      continue;
+    }
+    const date = parseDateOnlyValue(dateLabels[index]);
+    if (!date) {
+      continue;
+    }
+    const total = number(actualData[index]);
+    let usage = null;
+    if (previousTotal === null) {
+      if (date.getDate() === 1) {
+        usage = total;
+      }
+    } else if (total >= previousTotal) {
+      usage = total - previousTotal;
+    } else if (date.getDate() === 1) {
+      usage = total;
+    }
+    if (usage !== null) {
+      weekdaySamples[date.getDay()].push(usage);
+      allSamples.push(usage);
+    }
+    previousTotal = total;
+  }
+
+  const fallbackRate = allSamples.length
+    ? average(allSamples)
+    : currentTotal / Math.max(1, lastActualDate.getDate());
+  let forecastTotal = currentTotal;
   for (let index = lastActualIndex + 1; index < dateLabels.length; index += 1) {
-    prediction[index] = dailyRate * (index + 1);
+    const date = parseDateOnlyValue(dateLabels[index]);
+    if (!date || !dateLabels[index].startsWith(forecastMonth)) {
+      continue;
+    }
+    const samples = weekdaySamples[date.getDay()];
+    forecastTotal += samples.length ? average(samples) : fallbackRate;
+    prediction[index] = forecastTotal;
   }
   return prediction;
+}
+
+function average(values) {
+  return values.reduce((total, value) => total + number(value), 0) / Math.max(1, values.length);
 }
 
 function buildStackedEnvironmentBarChart(table, range, options) {
@@ -3226,6 +3281,33 @@ function trendDateLabels(range, rows) {
     return dates;
   }
   return [...new Set(rows.map(trendRowDate).filter(Boolean))].sort();
+}
+
+function trendDateLabelsWithMonthForecast(range, rows) {
+  const dates = trendDateLabels(range, rows);
+  const lastActualDateKey = [...new Set(rows.map(trendRowDate).filter(Boolean))].sort().at(-1) || '';
+  const lastActualDate = parseDateOnlyValue(lastActualDateKey);
+  const today = new Date();
+  if (!lastActualDate || lastActualDate.getFullYear() !== today.getFullYear() || lastActualDate.getMonth() !== today.getMonth()) {
+    return dates;
+  }
+  const monthEnd = new Date(lastActualDate.getFullYear(), lastActualDate.getMonth() + 1, 0);
+  let cursor = parseDateOnlyValue(dates.at(-1));
+  if (!cursor || cursor >= monthEnd) {
+    return dates;
+  }
+  while (cursor < monthEnd) {
+    cursor = addTrendDays(cursor, 1);
+    dates.push(formatDateInputValue(cursor));
+  }
+  return dates;
+}
+
+function monthEndDateKey(value) {
+  const date = parseDateOnlyValue(value);
+  return date
+    ? formatDateInputValue(new Date(date.getFullYear(), date.getMonth() + 1, 0))
+    : '';
 }
 
 function parseDateOnlyValue(value) {
@@ -4266,7 +4348,7 @@ function applyAgentSessionDateRange(dateRange) {
     return;
   }
   state.agentSessionDateRange = {
-    range: dateRange.range || '7d',
+    range: dateRange.range || 'month',
     startDate: dateRange.startDate,
     endDate: dateRange.endDate,
   };
@@ -4278,7 +4360,7 @@ function applyAgentSessionDateRange(dateRange) {
 
 function getAgentSessionLoadParams(dateRange = null) {
   const params = new URLSearchParams();
-  const range = dateRange?.range || el.agentSessionsRange.value || '7d';
+  const range = dateRange?.range || el.agentSessionsRange.value || 'month';
   params.set('range', range);
   if (params.get('range') === 'custom') {
     params.set('start', dateRange?.startDate || el.agentSessionsStart.value || '');

@@ -5625,7 +5625,7 @@ async function enqueueReportTrendWrite(action) {
   return run;
 }
 
-async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null }) {
+async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null, sourceGroups = [] }) {
   const definition = reportTotalTableDefinition(group);
   if (!definition) {
     return;
@@ -5638,29 +5638,58 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
   const dateRan = reportCacheDateKey();
   const rangeKey = dateRange ? `${dateRange.range || 'custom'}:${dateRange.startDate || ''}:${dateRange.endDate || ''}` : 'snapshot';
   const rangeLabel = dateRange ? dateRangeLabel(dateRange) : 'snapshot';
+  const backfillSnapshots = buildAutomatedReportTrendBackfillSnapshots({
+    group,
+    sourceGroups,
+    dateRange,
+    dateRan,
+  });
   const columns = definition.columns.map(([, key]) => key);
   const placeholders = ['?', '?', '?', '?', '?', ...columns.map(() => '?')].join(', ');
   const insertColumns = ['account_home_id', 'date_ran', 'collected_at', 'range_key', 'range_label', ...columns]
     .map(quoteSqlIdentifier)
     .join(', ');
+  const normalizedAccountHomeId = String(accountHomeId || '').trim();
   await enqueueReportTrendWrite(async () => {
     const db = await getReportTrendDb();
     const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
     try {
       db.run('BEGIN TRANSACTION');
+      const existingBackfillRows = backfillSnapshots.length
+        ? sqlRows(db.exec(`
+          SELECT date_ran, environment_display_name, environment_id, environment_url
+          FROM ${quoteSqlIdentifier(definition.tableName)}
+          WHERE account_home_id = ?
+            AND date_ran >= ?
+            AND date_ran < ?
+        `, [normalizedAccountHomeId, backfillSnapshots[0].dateRan, dateRan])[0])
+        : [];
+      const existingBackfillKeys = new Set(existingBackfillRows.map((row) =>
+        `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
+      const insertRows = (snapshotDate, snapshotRows, { onlyMissing = false } = {}) => {
+        for (const row of snapshotRows) {
+          const snapshotKey = `${snapshotDate}:${reportTrendEnvironmentKey(row)}`;
+          if (onlyMissing && existingBackfillKeys.has(snapshotKey)) {
+            continue;
+          }
+          insert.run([
+            normalizedAccountHomeId,
+            snapshotDate,
+            collectedAt,
+            rangeKey,
+            rangeLabel,
+            ...definition.columns.map(([header, , type]) => sqlReportTotalValue(row[header], type)),
+          ]);
+          existingBackfillKeys.add(snapshotKey);
+        }
+      };
       db.run(
         `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE account_home_id = ? AND date_ran = ?`,
-        [String(accountHomeId || '').trim(), dateRan],
+        [normalizedAccountHomeId, dateRan],
       );
-      for (const row of totalRows) {
-        insert.run([
-          String(accountHomeId || '').trim(),
-          dateRan,
-          collectedAt,
-          rangeKey,
-          rangeLabel,
-          ...definition.columns.map(([header, , type]) => sqlReportTotalValue(row[header], type)),
-        ]);
+      insertRows(dateRan, totalRows);
+      for (const snapshot of backfillSnapshots) {
+        insertRows(snapshot.dateRan, snapshot.rows, { onlyMissing: true });
       }
       db.run(
         `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`,
@@ -5677,6 +5706,72 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     }
     await persistReportTrendDb(db);
   });
+}
+
+function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan }) {
+  const totalsBuilder = {
+    'ai-events': buildAutomatedAiEventTotalsRows,
+    'agent-sessions': buildAutomatedAgentSessionTotalsRows,
+    'flow-runs': buildAutomatedFlowRunTotalsRows,
+  }[group];
+  const groups = Array.isArray(sourceGroups) ? sourceGroups : [];
+  const startDate = String(dateRange?.startDate || '');
+  if (!totalsBuilder || !groups.length || dateRange?.range !== 'month'
+    || startDate !== `${String(dateRan || '').slice(0, 7)}-01`
+    || !isDateOnlyString(dateRan)) {
+    return [];
+  }
+
+  const timestampedGroups = groups.map(({ environment, rows }) => ({
+    environment,
+    rows: (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ row, date: reportSourceRowDate(group, row) }))
+      .filter((item) => item.date && item.date >= startDate && item.date <= dateRan),
+  }));
+  const snapshots = [];
+  for (let cursor = parseDateOnly(startDate, 'start'); toDateOnlyString(cursor) < dateRan; cursor = addDays(cursor, 1)) {
+    const snapshotDate = toDateOnlyString(cursor);
+    snapshots.push({
+      dateRan: snapshotDate,
+      rows: totalsBuilder(timestampedGroups.map(({ environment, rows }) => ({
+        environment,
+        rows: rows.filter((item) => item.date <= snapshotDate).map((item) => item.row),
+      }))),
+    });
+  }
+  return snapshots;
+}
+
+function reportSourceRowDate(group, row = {}) {
+  const value = group === 'ai-events'
+    ? row.createdOnRaw || row.createdOn
+    : group === 'agent-sessions'
+      ? row.conversationStartTime
+      : row.startTimeRaw || row.startTimeDisplay;
+  const text = String(value || '').trim();
+  const dateOnly = text.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || '';
+  if (dateOnly) {
+    return isDateOnlyString(dateOnly) ? dateOnly : '';
+  }
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+}
+
+function isDateOnlyString(value) {
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return false;
+  }
+  const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() === Number(match[2]) - 1
+    && parsed.getUTCDate() === Number(match[3]);
+}
+
+function reportTrendEnvironmentKey(row = {}) {
+  return String(row['Environment id'] ?? row.environment_id ?? '').trim()
+    || String(row['Environment url'] ?? row.environment_url ?? '').trim()
+    || String(row['Environment display name'] ?? row.environment_display_name ?? '').trim();
 }
 
 function sqlReportTotalValue(value, type) {
@@ -5949,7 +6044,7 @@ function quoteSqlLiteral(value) {
 }
 
 function getReportTrendDateRange(filters = {}) {
-  const range = String(filters.range || '28d').trim().toLowerCase();
+  const range = String(filters.range || 'month').trim().toLowerCase();
   if (range === 'custom') {
     const start = parseDateOnly(filters.start, 'start');
     const end = parseDateOnly(filters.end, 'end');
@@ -5980,7 +6075,9 @@ function getReportTrendDateRange(filters = {}) {
   if (range === '730d' || range === '2y') {
     return { range: '730d', startDate: toDateOnlyString(addDays(today, -729)), endDate: toDateOnlyString(today) };
   }
-  return { range: '28d', startDate: toDateOnlyString(addDays(today, -27)), endDate: toDateOnlyString(today) };
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  return { range: 'month', startDate: toDateOnlyString(monthStart), endDate: toDateOnlyString(monthEnd) };
 }
 
 function reportTrendRetentionCutoffDate() {
@@ -6005,6 +6102,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
         group,
         rows: buildAutomatedAiEventTotalsRows(rowsByEnvironment),
         dateRange,
+        sourceGroups: rowsByEnvironment,
       });
     }
     if (reportType === 'both') {
@@ -6028,6 +6126,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
         group,
         rows: buildAutomatedAgentSessionTotalsRows(rowsByEnvironment),
         dateRange,
+        sourceGroups: rowsByEnvironment,
       });
     }
     if (reportType === 'both') {
@@ -6052,6 +6151,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
         group,
         rows: buildAutomatedFlowRunTotalsRows(rowsByEnvironment),
         dateRange: flowRunDateRange,
+        sourceGroups: rowsByEnvironment,
       });
     }
     if (reportType === 'both') {
@@ -6510,7 +6610,7 @@ function reportEnvironmentFields(environment) {
 
 function getAgentSessionDateRange(filters = {}) {
   return getAiEventDateRange({
-    range: filters.range || '7d',
+    range: filters.range || 'month',
     start: filters.start || '',
     end: filters.end || '',
   });
