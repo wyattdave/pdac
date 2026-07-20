@@ -6,11 +6,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, extname, join, normalize } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
-import initSqlJs from 'sql.js';
 import { XMLParser } from 'fast-xml-parser';
 import {
   createConnectionAsync,
@@ -25,7 +25,6 @@ import { createMaafConnectionUrl } from '@microsoft/power-apps-common/services';
 import { NodeMsalAuthenticationProvider } from '@microsoft/power-apps-cli/dist/Authentication/NodeMsalAuthenticationProvider.js';
 import { initializeCliSettings, setCliLogger } from '@microsoft/power-apps-cli/dist/CliSettings.js';
 import { CliHttpClient } from '@microsoft/power-apps-cli/dist/HttpClient/CliHttpClient.js';
-import open from 'open';
 
 const require = createRequire(import.meta.url);
 const powerAppsActionsUrl = pathToFileURL(require.resolve('@microsoft/power-apps-actions'));
@@ -3110,7 +3109,7 @@ function startConnectionServer(config) {
       const playerUrlWithTenant = addTenantIdToUrl(playerUrl, config.tenantId);
 
       try {
-        await open(playerUrlWithTenant, { wait: false });
+        await openInBrowser(playerUrlWithTenant);
       } catch {
         console.log(`Open this URL to create the connection:\n${playerUrlWithTenant}`);
       }
@@ -3130,6 +3129,17 @@ function startConnectionServer(config) {
       clearTimeout(timeoutId);
       callbackServer.close();
     }
+  });
+}
+
+function openInBrowser(url) {
+  const [command, args] = process.platform === 'win32'
+    ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+    : process.platform === 'darwin'
+      ? ['open', [url]]
+      : ['xdg-open', [url]];
+  return new Promise((resolve, reject) => {
+    execFile(command, args, (error) => (error ? reject(error) : resolve()));
   });
 }
 
@@ -5573,16 +5583,7 @@ async function getReportTrendDb() {
   if (!reportTrendDbPromise) {
     reportTrendDbPromise = (async () => {
       await mkdir(APP_DATA_DIR, { recursive: true });
-      const SQL = await initSqlJs({
-        locateFile: (file) => require.resolve(`sql.js/dist/${file}`),
-      });
-      let bytes = null;
-      try {
-        bytes = await readFile(REPORT_TRENDS_DB_PATH);
-      } catch {
-        bytes = null;
-      }
-      const db = bytes?.length ? new SQL.Database(bytes) : new SQL.Database();
+      const db = new DatabaseSync(REPORT_TRENDS_DB_PATH);
       for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
         ensureReportTotalTable(db, definition);
       }
@@ -5596,7 +5597,7 @@ function ensureReportTotalTable(db, definition) {
   const totalColumns = definition.columns
     .map(([, key, type]) => `${quoteSqlIdentifier(key)} ${type} NOT NULL DEFAULT ${type === 'REAL' ? '0' : "''"}`)
     .join(',\n          ');
-  db.run(`
+  db.exec(`
     CREATE TABLE IF NOT EXISTS ${quoteSqlIdentifier(definition.tableName)} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       account_home_id TEXT NOT NULL DEFAULT '',
@@ -5609,14 +5610,6 @@ function ensureReportTotalTable(db, definition) {
     CREATE INDEX IF NOT EXISTS ${quoteSqlIdentifier(`idx_${definition.tableName}_lookup`)}
       ON ${quoteSqlIdentifier(definition.tableName)}(account_home_id, date_ran, collected_at);
   `);
-}
-
-async function persistReportTrendDb(db) {
-  await mkdir(APP_DATA_DIR, { recursive: true });
-  if (await pathExists(REPORT_TRENDS_DB_PATH)) {
-    await copyFile(REPORT_TRENDS_DB_PATH, `${REPORT_TRENDS_DB_PATH}.backup`);
-  }
-  await writeFileAtomic(REPORT_TRENDS_DB_PATH, Buffer.from(db.export()));
 }
 
 async function enqueueReportTrendWrite(action) {
@@ -5654,15 +5647,15 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     const db = await getReportTrendDb();
     const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
     try {
-      db.run('BEGIN TRANSACTION');
+      db.exec('BEGIN TRANSACTION');
       const existingBackfillRows = backfillSnapshots.length
-        ? sqlRows(db.exec(`
+        ? db.prepare(`
           SELECT date_ran, environment_display_name, environment_id, environment_url
           FROM ${quoteSqlIdentifier(definition.tableName)}
           WHERE account_home_id = ?
             AND date_ran >= ?
             AND date_ran < ?
-        `, [normalizedAccountHomeId, backfillSnapshots[0].dateRan, dateRan])[0])
+        `).all(normalizedAccountHomeId, backfillSnapshots[0].dateRan, dateRan)
         : [];
       const existingBackfillKeys = new Set(existingBackfillRows.map((row) =>
         `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
@@ -5672,39 +5665,34 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
           if (onlyMissing && existingBackfillKeys.has(snapshotKey)) {
             continue;
           }
-          insert.run([
+          insert.run(
             normalizedAccountHomeId,
             snapshotDate,
             collectedAt,
             rangeKey,
             rangeLabel,
             ...definition.columns.map(([header, , type]) => sqlReportTotalValue(row[header], type)),
-          ]);
+          );
           existingBackfillKeys.add(snapshotKey);
         }
       };
-      db.run(
+      db.prepare(
         `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE account_home_id = ? AND date_ran = ?`,
-        [normalizedAccountHomeId, dateRan],
-      );
+      ).run(normalizedAccountHomeId, dateRan);
       insertRows(dateRan, totalRows);
       for (const snapshot of backfillSnapshots) {
         insertRows(snapshot.dateRan, snapshot.rows, { onlyMissing: true });
       }
-      db.run(
+      db.prepare(
         `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`,
-        [reportTrendRetentionCutoffDate()],
-      );
-      db.run('COMMIT');
+      ).run(reportTrendRetentionCutoffDate());
+      db.exec('COMMIT');
     } catch (error) {
       try {
-        db.run('ROLLBACK');
+        db.exec('ROLLBACK');
       } catch {}
       throw error;
-    } finally {
-      insert.free();
     }
-    await persistReportTrendDb(db);
   });
 }
 
@@ -5792,20 +5780,20 @@ async function listReportTrendSnapshots(filters = {}) {
   const accountHomeId = String(filters.accountHomeId || '').trim();
   const tables = [];
   for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
-    const result = db.exec(`
+    const result = db.prepare(`
       SELECT *
       FROM ${quoteSqlIdentifier(definition.tableName)}
       WHERE account_home_id = ?
         AND date_ran >= ?
         AND date_ran <= ?
       ORDER BY collected_at, id
-    `, [
+    `).all(
       accountHomeId,
       dateRange.startDate,
       dateRange.endDate,
-    ]);
+    );
     const latestRows = new Map();
-    for (const row of sqlRows(result[0])) {
+    for (const row of result) {
       const environmentKey = String(row.environment_id || '').trim()
         || String(row.environment_url || '').trim()
         || String(row.environment_display_name || '').trim()
@@ -5855,13 +5843,6 @@ async function listReportTrendSnapshots(filters = {}) {
   };
 }
 
-function sqlRows(result) {
-  if (!result?.columns || !Array.isArray(result.values)) {
-    return [];
-  }
-  return result.values.map((values) => Object.fromEntries(result.columns.map((column, index) => [column, values[index]])));
-}
-
 async function listSqlTables() {
   const db = await getReportTrendDb();
   const tableNames = getUserSqlTableNames(db);
@@ -5876,21 +5857,19 @@ async function listSqlTables() {
 }
 
 function getUserSqlTableNames(db) {
-  const result = db.exec(`
+  return db.prepare(`
     SELECT name
     FROM sqlite_master
     WHERE type = 'table'
       AND name NOT LIKE 'sqlite_%'
     ORDER BY name
-  `);
-  return sqlRows(result[0]).map((row) => String(row.name || '')).filter(Boolean);
+  `).all().map((row) => String(row.name || '')).filter(Boolean);
 }
 
 function getSqlTableInfo(db, name) {
   const quoted = quoteSqlIdentifier(name);
-  const countResult = db.exec(`SELECT COUNT(*) AS row_count FROM ${quoted}`);
-  const rowCount = Number(sqlRows(countResult[0])[0]?.row_count || 0);
-  const rows = sqlRows(db.exec(`SELECT * FROM ${quoted}`)[0]);
+  const rowCount = Number(db.prepare(`SELECT COUNT(*) AS row_count FROM ${quoted}`).get()?.row_count || 0);
+  const rows = db.prepare(`SELECT * FROM ${quoted}`).all();
   const storageBytes = Buffer.byteLength(JSON.stringify(rows), 'utf8');
   const definition = reportTotalTableDefinitionByName(name);
   return {
@@ -5926,7 +5905,7 @@ async function exportSqlTablesWorkbook() {
 
   const usedNames = new Set(['SQL Tables']);
   for (const tableName of tableNames) {
-    const rows = sqlRows(db.exec(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`)[0]);
+    const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`).all();
     const columns = rows.length
       ? Object.keys(rows[0])
       : getSqlTableColumns(db, tableName);
@@ -5951,7 +5930,7 @@ async function exportSingleSqlTableWorkbook(tableName) {
   if (!tableNames.includes(tableName)) {
     throw new HttpError(404, 'SQL table not found.');
   }
-  const rows = sqlRows(db.exec(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`)[0]);
+  const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`).all();
   const columns = rows.length
     ? Object.keys(rows[0])
     : getSqlTableColumns(db, tableName);
@@ -5992,7 +5971,7 @@ function styleSqlWorksheet(worksheet, columnCount, rowCount) {
 }
 
 function getSqlTableColumns(db, tableName) {
-  return sqlRows(db.exec(`PRAGMA table_info(${quoteSqlLiteral(tableName)})`)[0])
+  return db.prepare(`PRAGMA table_info(${quoteSqlLiteral(tableName)})`).all()
     .map((row) => String(row.name || ''))
     .filter(Boolean);
 }
@@ -6016,18 +5995,17 @@ async function deleteSqlTableRecords() {
     const tableNames = getUserSqlTableNames(db);
     const before = tableNames.map((name) => getSqlTableInfo(db, name));
     try {
-      db.run('BEGIN TRANSACTION');
+      db.exec('BEGIN TRANSACTION');
       for (const tableName of tableNames) {
-        db.run(`DELETE FROM ${quoteSqlIdentifier(tableName)}`);
+        db.exec(`DELETE FROM ${quoteSqlIdentifier(tableName)}`);
       }
-      db.run('COMMIT');
+      db.exec('COMMIT');
     } catch (error) {
       try {
-        db.run('ROLLBACK');
+        db.exec('ROLLBACK');
       } catch {}
       throw error;
     }
-    await persistReportTrendDb(db);
     return {
       deletedRows: before.reduce((sum, table) => sum + table.rowCount, 0),
       tables: before.map((table) => table.name),

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
@@ -15,7 +16,17 @@ import {
 import { createMaafConnectionUrl } from '@microsoft/power-apps-common/services';
 import { NodeMsalAuthenticationProvider } from '@microsoft/power-apps-cli/dist/Authentication/NodeMsalAuthenticationProvider.js';
 import { CliHttpClient } from '@microsoft/power-apps-cli/dist/HttpClient/CliHttpClient.js';
-import open from 'open';
+
+function openInBrowser(url) {
+  const [command, args] = process.platform === 'win32'
+    ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+    : process.platform === 'darwin'
+      ? ['open', [url]]
+      : ['xdg-open', [url]];
+  return new Promise((resolve, reject) => {
+    execFile(command, args, (error) => (error ? reject(error) : resolve()));
+  });
+}
 
 const PORT = Number(process.env.PORT || 4173);
 const REGION = process.env.PP_REGION || 'prod';
@@ -304,7 +315,7 @@ function startConnectionServer(config) {
       const playerUrlWithTenant = addTenantIdToUrl(playerUrl, config.tenantId);
 
       try {
-        await open(playerUrlWithTenant, { wait: false });
+        await openInBrowser(playerUrlWithTenant);
       } catch {
         console.log(`Open this URL to create the connection:\n${playerUrlWithTenant}`);
       }
