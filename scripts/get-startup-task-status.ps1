@@ -1,6 +1,7 @@
 param(
   [string]$TaskName = 'PDAC Background Server',
-  [Parameter(Mandatory = $true)][string]$ExpectedServerPath
+  [Parameter(Mandatory = $true)][string]$ExpectedServerPath,
+  [ValidateRange(1, 65535)][int]$ExpectedPort = 4280
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,7 +44,8 @@ $pathsHealthy = $config -and
   (Test-Path -LiteralPath $hiddenLauncherPath) -and
   (Test-Path -LiteralPath $config.NodePath) -and
   (Test-Path -LiteralPath $config.ServerPath) -and
-  ([IO.Path]::GetFullPath([string]$config.ServerPath) -eq [IO.Path]::GetFullPath($ExpectedServerPath))
+  ([IO.Path]::GetFullPath([string]$config.ServerPath) -eq [IO.Path]::GetFullPath($ExpectedServerPath)) -and
+  ([int]$config.Port -eq $ExpectedPort)
 $actionHealthy = $action -and
   ([string]$action.Execute -match '(?i)wscript(?:\.exe)?$') -and
   ([string]$action.Arguments).Contains($hiddenLauncherPath) -and

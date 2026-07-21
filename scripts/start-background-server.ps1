@@ -2,6 +2,14 @@ param([Parameter(Mandatory = $true)][string]$ConfigPath)
 
 $ErrorActionPreference = 'Stop'
 
+# Re-registering the scheduled task while an earlier watchdog instance is
+# still alive (or was orphaned by a task stop) would leave two watchdogs
+# fighting over the port. A named mutex keeps this a single-instance loop.
+$script:watchdogMutex = [System.Threading.Mutex]::new($false, 'Local\PDACBackgroundServerWatchdog')
+if (-not $script:watchdogMutex.WaitOne(0)) {
+  exit 0
+}
+
 function Read-BackgroundConfig {
   if (-not (Test-Path -LiteralPath $ConfigPath)) {
     throw "PDAC background configuration was not found at '$ConfigPath'."
@@ -67,6 +75,9 @@ while ($true) {
   New-Item -ItemType Directory -Path $logDir -Force | Out-Null
   Rotate-ServerLog $config.LogPath
   $env:PDAC_BACKGROUND_TASK = '1'
+  # Run the background server on the same port the enabling server used, so
+  # the takeover is transparent to the browser tab that turned it on.
+  $env:PORT = [string]$config.Port
   # Windows PowerShell turns a native program's stderr into PowerShell error
   # records. With Stop as the global preference, one console.error from Node
   # would terminate this watchdog as well as the server it is supervising.

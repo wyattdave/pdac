@@ -357,11 +357,27 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+server.on('listening', () => {
   console.log(`Power DevBox Admin Center running at http://localhost:${PORT}`);
   checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError);
   setInterval(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError), AUTOMATED_REPORT_CHECK_INTERVAL_MS).unref();
 });
+
+// When the background watchdog takes over from a closing terminal server, the
+// old process can still hold the port for a few seconds. Retry instead of
+// crashing so the takeover always completes.
+let listenRetries = 0;
+server.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE' && process.env.PDAC_BACKGROUND_TASK === '1' && listenRetries < 30) {
+    listenRetries += 1;
+    console.warn(`Port ${PORT} is still in use; retrying in 2 seconds (attempt ${listenRetries}/30).`);
+    setTimeout(() => server.listen(PORT), 2000);
+    return;
+  }
+  throw error;
+});
+
+server.listen(PORT);
 
 async function handleApi(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -5216,6 +5232,7 @@ async function getStartupTaskStatus() {
       '-File', GET_STARTUP_STATUS_SCRIPT,
       '-TaskName', STARTUP_TASK_NAME,
       '-ExpectedServerPath', fileURLToPath(import.meta.url),
+      '-ExpectedPort', String(PORT),
     ]);
     const task = JSON.parse(output);
     const processMode = process.env.PDAC_BACKGROUND_TASK === '1' ? 'background' : 'foreground';
@@ -5269,6 +5286,7 @@ async function setStartupTaskSettings(body = {}) {
     '-TaskName', STARTUP_TASK_NAME,
     '-AutoStart', body.autoStartEnabled ? 'true' : 'false',
     '-StartTask', body.backgroundEnabled ? 'true' : 'false',
+    '-Port', String(PORT),
   ];
   await runPowerShell(args);
   const status = await getStartupTaskStatus();
@@ -5618,7 +5636,7 @@ async function enqueueReportTrendWrite(action) {
   return run;
 }
 
-async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null, sourceGroups = [] }) {
+async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null, sourceGroups = [], solutionOptions = null }) {
   const definition = reportTotalTableDefinition(group);
   if (!definition) {
     return;
@@ -5637,6 +5655,7 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     dateRange,
     dateRan,
   });
+  const buildSolutionBackfillRows = buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOptions });
   const columns = definition.columns.map(([, key]) => key);
   const placeholders = ['?', '?', '?', '?', '?', ...columns.map(() => '?')].join(', ');
   const insertColumns = ['account_home_id', 'date_ran', 'collected_at', 'range_key', 'range_label', ...columns]
@@ -5648,14 +5667,38 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
     try {
       db.exec('BEGIN TRANSACTION');
-      const existingBackfillRows = backfillSnapshots.length
+      const missingDaySnapshots = [...backfillSnapshots];
+      if (buildSolutionBackfillRows && isDateOnlyString(dateRan)) {
+        // Solutions are a point-in-time inventory with no date range, so any
+        // day missed since tracking began is identified from the stored
+        // snapshot dates and rebuilt from each solution's createdOn date.
+        const existingDates = db.prepare(`
+          SELECT DISTINCT date_ran
+          FROM ${quoteSqlIdentifier(definition.tableName)}
+          WHERE account_home_id = ?
+            AND date_ran < ?
+          ORDER BY date_ran
+        `).all(normalizedAccountHomeId, dateRan)
+          .map((row) => String(row.date_ran || ''))
+          .filter(isDateOnlyString);
+        if (existingDates.length) {
+          const existingDateSet = new Set(existingDates);
+          for (let cursor = addDays(parseDateOnly(existingDates[0], 'start'), 1); toDateOnlyString(cursor) < dateRan; cursor = addDays(cursor, 1)) {
+            const snapshotDate = toDateOnlyString(cursor);
+            if (!existingDateSet.has(snapshotDate)) {
+              missingDaySnapshots.push({ dateRan: snapshotDate, rows: buildSolutionBackfillRows(snapshotDate) });
+            }
+          }
+        }
+      }
+      const existingBackfillRows = missingDaySnapshots.length
         ? db.prepare(`
           SELECT date_ran, environment_display_name, environment_id, environment_url
           FROM ${quoteSqlIdentifier(definition.tableName)}
           WHERE account_home_id = ?
             AND date_ran >= ?
             AND date_ran < ?
-        `).all(normalizedAccountHomeId, backfillSnapshots[0].dateRan, dateRan)
+        `).all(normalizedAccountHomeId, missingDaySnapshots[0].dateRan, dateRan)
         : [];
       const existingBackfillKeys = new Set(existingBackfillRows.map((row) =>
         `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
@@ -5680,7 +5723,7 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
         `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE account_home_id = ? AND date_ran = ?`,
       ).run(normalizedAccountHomeId, dateRan);
       insertRows(dateRan, totalRows);
-      for (const snapshot of backfillSnapshots) {
+      for (const snapshot of missingDaySnapshots) {
         insertRows(snapshot.dateRan, snapshot.rows, { onlyMissing: true });
       }
       db.prepare(
@@ -5704,11 +5747,11 @@ function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateR
   }[group];
   const groups = Array.isArray(sourceGroups) ? sourceGroups : [];
   const startDate = String(dateRange?.startDate || '');
-  if (!totalsBuilder || !groups.length || dateRange?.range !== 'month'
-    || startDate !== `${String(dateRan || '').slice(0, 7)}-01`
-    || !isDateOnlyString(dateRan)) {
+  if (!totalsBuilder || !groups.length || !isDateOnlyString(startDate)
+    || !isDateOnlyString(dateRan) || startDate >= dateRan) {
     return [];
   }
+  const endDate = isDateOnlyString(String(dateRange?.endDate || '')) ? String(dateRange.endDate) : dateRan;
 
   const timestampedGroups = groups.map(({ environment, rows }) => ({
     environment,
@@ -5717,7 +5760,9 @@ function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateR
       .filter((item) => item.date && item.date >= startDate && item.date <= dateRan),
   }));
   const snapshots = [];
-  for (let cursor = parseDateOnly(startDate, 'start'); toDateOnlyString(cursor) < dateRan; cursor = addDays(cursor, 1)) {
+  for (let cursor = parseDateOnly(startDate, 'start');
+    toDateOnlyString(cursor) < dateRan && toDateOnlyString(cursor) <= endDate;
+    cursor = addDays(cursor, 1)) {
     const snapshotDate = toDateOnlyString(cursor);
     snapshots.push({
       dateRan: snapshotDate,
@@ -5730,12 +5775,34 @@ function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateR
   return snapshots;
 }
 
+function buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOptions }) {
+  if (group !== 'solutions' || !solutionOptions) {
+    return null;
+  }
+  const groups = (Array.isArray(sourceGroups) ? sourceGroups : []).map(({ environment, rows, totalBeforeFilters }) => ({
+    environment,
+    totalBeforeFilters,
+    rows: (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ row, date: reportSourceRowDate(group, row) })),
+  }));
+  if (!groups.length) {
+    return null;
+  }
+  return (snapshotDate) => buildAutomatedSolutionTotalsRows(groups.map(({ environment, totalBeforeFilters, rows }) => ({
+    environment,
+    totalBeforeFilters,
+    rows: rows.filter((item) => item.date && item.date <= snapshotDate).map((item) => item.row),
+  })), solutionOptions);
+}
+
 function reportSourceRowDate(group, row = {}) {
   const value = group === 'ai-events'
     ? row.createdOnRaw || row.createdOn
     : group === 'agent-sessions'
       ? row.conversationStartTime
-      : row.startTimeRaw || row.startTimeDisplay;
+      : group === 'solutions'
+        ? row.createdon
+        : row.startTimeRaw || row.startTimeDisplay;
   const text = String(value || '').trim();
   const dateOnly = text.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || '';
   if (dateOnly) {
@@ -6152,6 +6219,8 @@ async function buildAutomatedReport(group, reportType, body = {}) {
       accountHomeId,
       group,
       rows: buildAutomatedSolutionTotalsRows(rowsByEnvironment, solutionOptions),
+      sourceGroups: rowsByEnvironment,
+      solutionOptions,
     });
   }
   if (reportType === 'both') {

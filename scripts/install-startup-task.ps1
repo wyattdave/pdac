@@ -1,7 +1,8 @@
 param(
   [string]$TaskName = 'PDAC Background Server',
   [ValidateSet('true', 'false')][string]$AutoStart = 'true',
-  [ValidateSet('true', 'false')][string]$StartTask = 'true'
+  [ValidateSet('true', 'false')][string]$StartTask = 'true',
+  [ValidateRange(1, 65535)][int]$Port = 4280
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,12 +19,20 @@ $configPath = Join-Path $runtimeDir 'background-config.json'
 $stopMarkerPath = Join-Path $runtimeDir 'stop-requested'
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-background-server.ps1') -Destination $launcher -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-background-server-hidden.vbs') -Destination $hiddenLauncher -Force
+
+# Stopping or re-registering the task can leave earlier watchdog instances
+# behind. Terminate them so only the freshly started task supervises the
+# server. The Node server itself is left untouched; the new watchdog takes
+# over the port when it exits.
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'wscript.exe'" |
+  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($launcher) } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 [pscustomobject]@{
   NodePath = $node
   ServerPath = $server
   LogPath = (Join-Path $logDir 'server.log')
   StopMarkerPath = $stopMarkerPath
-  Port = 4280
+  Port = $Port
 } | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding utf8
 if ($StartTask -eq 'true') {
   Remove-Item -LiteralPath $stopMarkerPath -Force -ErrorAction SilentlyContinue
