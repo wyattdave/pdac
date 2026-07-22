@@ -2,13 +2,36 @@ param([Parameter(Mandatory = $true)][string]$ConfigPath)
 
 $ErrorActionPreference = 'Stop'
 
+$script:watchdogLogPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'PowerDevBoxAdmin\logs\watchdog.log'
+
+function Write-WatchdogLog([string]$Message) {
+  try {
+    $logDir = Split-Path -Parent $script:watchdogLogPath
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    if ((Test-Path -LiteralPath $script:watchdogLogPath) -and (Get-Item -LiteralPath $script:watchdogLogPath).Length -ge 1MB) {
+      Move-Item -LiteralPath $script:watchdogLogPath -Destination "$script:watchdogLogPath.1" -Force
+    }
+    Add-Content -LiteralPath $script:watchdogLogPath -Value "[$(Get-Date -Format o)] $Message"
+  } catch {}
+}
+
 # Re-registering the scheduled task while an earlier watchdog instance is
 # still alive (or was orphaned by a task stop) would leave two watchdogs
 # fighting over the port. A named mutex keeps this a single-instance loop.
 $script:watchdogMutex = [System.Threading.Mutex]::new($false, 'Local\PDACBackgroundServerWatchdog')
-if (-not $script:watchdogMutex.WaitOne(0)) {
+$script:mutexAcquired = $false
+try {
+  $script:mutexAcquired = $script:watchdogMutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+  # A previous watchdog was killed without releasing the mutex. The wait
+  # still acquired ownership, so this instance continues as the single owner.
+  $script:mutexAcquired = $true
+}
+if (-not $script:mutexAcquired) {
+  Write-WatchdogLog 'Another PDAC watchdog instance is already running; exiting.'
   exit 0
 }
+Write-WatchdogLog "PDAC watchdog started with configuration '$ConfigPath'."
 
 function Read-BackgroundConfig {
   if (-not (Test-Path -LiteralPath $ConfigPath)) {
@@ -41,9 +64,19 @@ function Rotate-ServerLog([string]$LogPath) {
 # the port this process exits, then the task retries and takes over as soon as
 # the port is released. If the background server later crashes, it is restarted
 # here as well instead of leaving the scheduled task in the Ready state.
+# Problems (missing configuration, replaced npm package, moved Node) are logged
+# and retried instead of silently ending the task.
 while ($true) {
-  $config = Read-BackgroundConfig
+  $config = $null
+  try {
+    $config = Read-BackgroundConfig
+  } catch {
+    Write-WatchdogLog "Unable to read the background configuration: $($_.Exception.Message) Retrying in 30 seconds."
+    Start-Sleep -Seconds 30
+    continue
+  }
   if (Test-StopRequested $config.StopMarkerPath) {
+    Write-WatchdogLog 'Stop requested; PDAC watchdog exiting.'
     break
   }
 
@@ -64,11 +97,22 @@ while ($true) {
     continue
   }
 
-  if (-not (Test-Path -LiteralPath $config.NodePath)) {
-    throw "Node was not found at '$($config.NodePath)'. Repair the PDAC background task."
+  $nodePath = [string]$config.NodePath
+  if (-not (Test-Path -LiteralPath $nodePath)) {
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if ($nodeCommand) {
+      $nodePath = $nodeCommand.Source
+      Write-WatchdogLog "Node was not found at '$($config.NodePath)'; using '$nodePath' instead."
+    } else {
+      Write-WatchdogLog "Node was not found at '$($config.NodePath)'. Repair the PDAC background task. Retrying in 30 seconds."
+      Start-Sleep -Seconds 30
+      continue
+    }
   }
   if (-not (Test-Path -LiteralPath $config.ServerPath)) {
-    throw "PDAC was not found at '$($config.ServerPath)'. Repair the PDAC background task."
+    Write-WatchdogLog "PDAC was not found at '$($config.ServerPath)'. This can happen after an npm update replaces the package; repair the background task from the PDAC UI. Retrying in 30 seconds."
+    Start-Sleep -Seconds 30
+    continue
   }
 
   $logDir = Split-Path -Parent $config.LogPath
@@ -84,7 +128,7 @@ while ($true) {
   $previousErrorActionPreference = $ErrorActionPreference
   try {
     $ErrorActionPreference = 'Continue'
-    & $config.NodePath $config.ServerPath 2>&1 | Out-File -LiteralPath $config.LogPath -Append -Encoding utf8
+    & $nodePath $config.ServerPath 2>&1 | Out-File -LiteralPath $config.LogPath -Append -Encoding utf8
     $nodeExitCode = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
