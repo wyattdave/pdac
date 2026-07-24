@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PDAC - Power DevBox Admin Center</title>
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header>
       <div class="brand">
-        <img src="/icon.png" alt="" class="brand-mark" />
+        <img src="icon.png" alt="" class="brand-mark" />
         <div>
           <h1>PDAC - Power DevBox Admin Center</h1>
           <p>Settings by function not by environment</p>
@@ -59,7 +59,7 @@
         <div class="panel hero-panel">
           <h2>Home</h2>
           <div class="home-brand">
-            <img src="/icon.png" alt="" class="home-logo" />
+            <img src="icon.png" alt="" class="home-logo" />
             <p class="lead">Settings by function not by environment. Connect once, then work across roles, solutions, AI Flow, Flow Runs, agent sessions, and environment tools from one place.</p>
           </div>
           <div class="home-grid function-grid">
@@ -407,7 +407,7 @@
               <div class="actions">
                 <button id="refreshSqlTablesButton" class="secondary" type="button">Refresh</button>
                 <button id="exportSqlTablesButton" class="secondary" type="button">Export Excel</button>
-                <button id="downloadTrendTemplateButton" class="secondary" type="button">Download import template</button>
+                <button id="downloadTrendTemplateButton" class="secondary" type="button">Import template</button>
                 <button id="importTrendDataButton" class="secondary" type="button">Import Excel</button>
                 <input id="trendDataImportFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
                 <button id="deleteSqlRecordsButton" class="danger-button" type="button">Delete all records</button>
@@ -1164,11 +1164,13 @@
     </div>
 
     <div id="toast"></div>
-    <script src="/mermaid.min.js"></script>
-    <script>
-      window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
-    </script>
-    <script src="/chart.umd.min.js"></script>
-    <script src="/app.js" type="module"></script>
+    <script src="lib/mermaid.min.js"></script>
+    <script src="mermaid-init.js"></script>
+    <script src="lib/chart.umd.min.js"></script>
+    <script src="lib/jszip.min.js"></script>
+    <script src="lib/fxparser.min.js"></script>
+    <script src="lib/exceljs.min.js"></script>
+    <script type="module" src="bootstrap.js"></script>
+    <script src="app.js" type="module"></script>
   </body>
 </html>

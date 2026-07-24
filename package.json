@@ -1,6 +1,6 @@
 {
   "name": "powerdevbox-admin",
-  "version": "0.5.1",
+  "version": "0.6.1",
   "description": "Local Power DevBox Admin Center for Power Platform and Dataverse administration.",
   "license": "MIT",
   "homepage": "https://github.com/wyattdave/pdac#readme",
@@ -30,8 +30,8 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "install-startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup-task.ps1",
-    "remove-startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-startup-task.ps1"
+    "install-startup": "node scripts/background-manager.mjs install",
+    "remove-startup": "node scripts/background-manager.mjs uninstall"
   },
   "dependencies": {
     "@microsoft/power-apps-actions": "^1.5.5",

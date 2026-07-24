@@ -1,64 +1,44 @@
-#!/usr/bin/env node
+// PDAC server core — browser port of the original server.mjs for the Chrome
+// extension. Route dispatch and business logic are kept verbatim from the
+// Node server; only the Node-specific edges are replaced:
+//   - MSAL / pac CLI auth      -> src/auth.js + src/tokens.js (PKCE + refresh)
+//   - http server / static     -> bootstrap.js fetch() interceptor (fake req/res)
+//   - fs report cache          -> IndexedDB (src/server-db.js)
+//   - schedule JSON file       -> chrome.storage.local
+//   - node:sqlite trend db     -> IndexedDB (same output shapes)
+//   - player services          -> Power Apps REST + make.powerapps.com tabs
+// ExcelJS / JSZip / XMLParser load as classic scripts on the app page (and as
+// side-effect imports in the service worker) and are read from globalThis.
 
-import http from 'node:http';
-import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { copyFile, cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, extname, join, normalize } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-
+import { Buffer, createHash, randomUUID } from './node-shims.js';
+import { AuthRequiredError, signInInteractive } from './auth.js';
+import { clearTokenCache, getAccessTokenForAccountId } from './tokens.js';
 import {
-  STARTUP_TASK_NAME,
-  getBackgroundStatus,
-  installBackground,
-} from './scripts/background-manager.mjs';
-import ExcelJS from 'exceljs';
-import JSZip from 'jszip';
-import { XMLParser } from 'fast-xml-parser';
+  getAccounts as storeGetAccounts,
+  removeAccount as storeRemoveAccount,
+} from './storage.js';
 import {
-  createConnectionAsync,
-  getPlayerServiceConfig,
-  getConnectorAsync,
-  initializePlayerServices,
-  isSsoOnlyConnector,
-  listConnectionsAsync,
-  updateEnvironmentName,
-} from '@microsoft/power-apps-actions';
-import { createMaafConnectionUrl } from '@microsoft/power-apps-common/services';
-import { NodeMsalAuthenticationProvider } from '@microsoft/power-apps-cli/dist/Authentication/NodeMsalAuthenticationProvider.js';
-import { initializeCliSettings, setCliLogger } from '@microsoft/power-apps-cli/dist/CliSettings.js';
-import { CliHttpClient } from '@microsoft/power-apps-cli/dist/HttpClient/CliHttpClient.js';
+  reportCacheGetEntry,
+  reportCachePutEntry,
+  reportCacheListByDate,
+  trendSelectRows,
+  trendInsertRows,
+  trendDeleteRows,
+  trendReplaceRows,
+} from './server-db.js';
 
-const require = createRequire(import.meta.url);
-const powerAppsActionsUrl = pathToFileURL(require.resolve('@microsoft/power-apps-actions'));
-const { deleteConnectionAsync } = await import(
-  new URL('./services/connectivity/ConnectivityService.js', powerAppsActionsUrl)
-);
+const ExcelJS = globalThis.ExcelJS;
+const JSZip = globalThis.JSZip;
 
-const PORT = Number(process.env.SECURITY_ROLES_PORT || process.env.PORT || 4280);
-const REGION = process.env.PP_REGION || 'prod';
-const SERVICE_RESOURCE = process.env.PP_SERVICE_RESOURCE || 'https://service.powerapps.com/';
-const POWER_PLATFORM_RESOURCE = process.env.PP_API_RESOURCE || 'https://api.powerplatform.com';
-const APP_DIR = fileURLToPath(new URL('.', import.meta.url));
-const PUBLIC_DIR = join(APP_DIR, 'public');
-const LEGACY_DATA_DIR = join(APP_DIR, 'data');
-const APP_DATA_DIR = process.env.PDAC_DATA_DIR
-  ? normalize(process.env.PDAC_DATA_DIR)
-  : process.platform === 'win32' && process.env.LOCALAPPDATA
-    ? join(process.env.LOCALAPPDATA, 'PowerDevBoxAdmin', 'data')
-    : LEGACY_DATA_DIR;
-const REPORT_CACHE_DIR = join(APP_DATA_DIR, 'report-cache');
-const REPORT_TRENDS_DB_PATH = join(APP_DATA_DIR, 'report-trends.sqlite');
-const AUTOMATED_REPORT_SCHEDULE_PATH = join(APP_DATA_DIR, 'automated-report-schedule.json');
-const REPORT_TREND_RETENTION_DAYS = 730;
-const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
-const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
+const REGION = 'prod';
+const SERVICE_RESOURCE = 'https://service.powerapps.com/';
+const POWER_PLATFORM_RESOURCE = 'https://api.powerplatform.com';
+const AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY = 'pdac.automatedReportSchedule';
+const STARTUP_TASK_NAME = 'PDAC Background Server';
+export const REPORT_TREND_RETENTION_DAYS = 730;
+export const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const USERS_TEAMS_PAGE_SIZE = 50;
 
-await initialiseDurableDataDirectory();
 
 const DEPTHS = new Set(['None', 'Basic', 'Local', 'Deep', 'Global', 'RecordFilter']);
 const CSV_SCOPE_TO_DEPTH = {
@@ -151,8 +131,8 @@ const SHARE_ROLE_ACCESS = {
   coowner: 'ReadAccess, WriteAccess, ShareAccess',
 };
 const selected = {
-  environmentName: process.env.PP_ENVIRONMENT_ID || '',
-  orgUrl: normalizeOrgUrl(process.env.PP_ORG_URL || ''),
+  environmentName: '',
+  orgUrl: '',
   accountHomeId: '',
 };
 const accountEnvironmentSelections = new Map();
@@ -160,16 +140,17 @@ const importPackages = new Map();
 const componentTypeEntityCache = new Map();
 const aiEventMetadataCache = new Map();
 const automatedReportProgress = new Map();
-let reportTrendDbPromise = null;
 let reportTrendWriteQueue = Promise.resolve();
 let automatedReportScheduleWriteQueue = Promise.resolve();
 let automatedReportScheduleRunning = false;
 let lastDataverseAccountHomeId = '';
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '',
-  textNodeName: 'text',
-});
+const xmlParser = typeof globalThis.XMLParser === 'function'
+  ? new globalThis.XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: '',
+      textNodeName: 'text',
+    })
+  : null;
 const AI_EVENT_ENTITY_LOGICAL_NAME = 'msdyn_aievent';
 const AI_EVENT_ENTITY_SET_NAME = 'msdyn_aievents';
 const AGENT_SESSION_ENTITY_SET_NAME = 'conversationtranscripts';
@@ -302,82 +283,18 @@ const AI_EVENT_FIELD_RULES = {
     preferredTypes: [],
   },
 };
-const logger = {
-  trackActivityEvent() {},
-  trackErrorEvent(eventName, eventData) {
-    console.error(eventName, eventData || '');
-  },
-  trackScenario() {
-    return {
-      scenarioId: randomUUID(),
-      complete() {},
-      failure() {},
-      completeWithError() {},
-    };
-  },
-  stringifyError(error) {
-    return error instanceof Error ? error.message : String(error);
-  },
-};
-
-const authProvider = new NodeMsalAuthenticationProvider();
-await authProvider.initAsync(REGION);
-await initializeCliSettings({
-  source: 'standalone',
-  interactive: isBrowserConnectionEnabled(),
-});
-setCliLogger(logger);
-const httpClient = new CliHttpClient({
-  getAccessTokenForResource: getAccessTokenForSelectedAccount,
-  getUserTenantId: () => authProvider.getUserTenantId(),
-});
-const actionAuthProvider = {
-  getAccessTokenForResource: getAccessTokenForSelectedAccount,
-};
-initializePlayerServices({
-  logger,
-  authProvider: actionAuthProvider,
-  httpClient,
-  region: REGION,
-  environmentName: selected.environmentName,
-});
-
-const server = http.createServer(async (req, res) => {
+// The http server from the Node build is replaced by bootstrap.js, which
+// intercepts window.fetch('/api/...') calls and forwards them to handleApi
+// with fake req/res objects. handleApiRequest is that entry point.
+export async function handleApiRequest(req, res) {
   try {
-    if (req.url?.startsWith('/api/')) {
-      await handleApi(req, res);
-      return;
-    }
-
-    await serveStatic(req, res);
+    await handleApi(req, res);
   } catch (error) {
     sendJson(res, getStatus(error), {
       error: errorMessage(error),
     });
   }
-});
-
-server.on('listening', () => {
-  console.log(`Power DevBox Admin Center running at http://localhost:${PORT}`);
-  checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError);
-  setInterval(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError), AUTOMATED_REPORT_CHECK_INTERVAL_MS).unref();
-});
-
-// When the background watchdog takes over from a closing terminal server, the
-// old process can still hold the port for a few seconds. Retry instead of
-// crashing so the takeover always completes.
-let listenRetries = 0;
-server.on('error', (error) => {
-  if (error?.code === 'EADDRINUSE' && process.env.PDAC_BACKGROUND_TASK === '1' && listenRetries < 30) {
-    listenRetries += 1;
-    console.warn(`Port ${PORT} is still in use; retrying in 2 seconds (attempt ${listenRetries}/30).`);
-    setTimeout(() => server.listen(PORT), 2000);
-    return;
-  }
-  throw error;
-});
-
-server.listen(PORT);
+}
 
 async function handleApi(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -410,7 +327,7 @@ async function handleApi(req, res) {
       saveSelectedEnvironmentForAccount();
     }
     sendJson(res, 200, {
-      tenantId: authProvider.getUserTenantId(),
+      tenantId: await getSelectedAccountTenantId(),
       orgUrl: selected.orgUrl,
       environmentName: selected.environmentName,
       selectedEnvironment: selectedEnvironmentPayload(),
@@ -765,7 +682,7 @@ async function handleApi(req, res) {
     const schedule = normalizeAutomatedReportSchedule(body);
     const savedSchedule = await writeAutomatedReportSchedule(schedule);
     sendJson(res, 200, savedSchedule);
-    setImmediate(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError));
+    queueMicrotask(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError));
     return;
   }
 
@@ -1434,19 +1351,19 @@ async function createRoleFromBody(body) {
 }
 
 async function acquireTokenWithAccountPicker(resource) {
-  if (!authProvider._msalClient) {
-    throw new Error('Authentication not initialized.');
-  }
-
-  const request = authProvider._getInteractiveLoginRequest(`${resource}/.default`);
-  const result = await authProvider._msalClient.acquireTokenInteractive({
-    ...request,
-    prompt: 'select_account',
+  const result = await signInInteractive({
+    resource: String(resource).replace(/\/+$/, ''),
+    selectAccount: true,
   });
-  authProvider._tenantId = result.tenantId;
-  selected.accountHomeId = result.account?.homeAccountId || '';
+  const { saveAccount } = await import('./storage.js');
+  await saveAccount(result.account);
+  selected.accountHomeId = result.account.homeAccountId;
   rememberDataverseAccount(selected.accountHomeId);
-  return result;
+  return {
+    accessToken: result.accessToken,
+    tenantId: result.account.tenantId,
+    account: result.account,
+  };
 }
 
 async function getAccessTokenForSelectedAccount(resource) {
@@ -1460,27 +1377,11 @@ async function getAccessTokenForSelectedAccount(resource) {
     } else if (accounts.length > 1) {
       throw new HttpError(400, 'Multiple accounts found. Select an account in the header first.');
     } else {
-      return authProvider.getAccessTokenForResource(resource);
+      throw new HttpError(401, 'No account is signed in. Sign in first.');
     }
   }
 
-  if (!authProvider._msalClient) {
-    throw new Error('Authentication not initialized.');
-  }
-
-  const account = (await getMsalAccounts()).find((item) => item.homeAccountId === selected.accountHomeId);
-  if (!account) {
-    selected.accountHomeId = '';
-    throw new HttpError(401, 'Selected account is no longer signed in. Sign in again.');
-  }
-
-  const result = await authProvider._msalClient.acquireTokenSilent({
-    account,
-    scopes: [`${resource}/.default`],
-  });
-  authProvider._tenantId = result.tenantId;
-  rememberDataverseAccount(account.homeAccountId);
-  return result.accessToken;
+  return getAccessTokenForAccount(resource, selected.accountHomeId);
 }
 
 async function getAccessTokenForAccount(resource, homeAccountId) {
@@ -1488,27 +1389,24 @@ async function getAccessTokenForAccount(resource, homeAccountId) {
   if (!normalizedHomeAccountId) {
     return getAccessTokenForSelectedAccount(resource);
   }
-  if (!authProvider._msalClient) {
-    throw new Error('Authentication not initialized.');
-  }
   const account = (await getMsalAccounts()).find((item) => item.homeAccountId === normalizedHomeAccountId);
   if (!account) {
     throw new HttpError(401, 'Selected account is no longer signed in. Sign in again.');
   }
-  const result = await authProvider._msalClient.acquireTokenSilent({
-    account,
-    scopes: [`${resource}/.default`],
-  });
-  authProvider._tenantId = result.tenantId;
-  rememberDataverseAccount(account.homeAccountId);
-  return result.accessToken;
+  try {
+    const accessToken = await getAccessTokenForAccountId(String(resource).replace(/\/+$/, ''), normalizedHomeAccountId);
+    rememberDataverseAccount(account.homeAccountId);
+    return accessToken;
+  } catch (error) {
+    if (error instanceof AuthRequiredError) {
+      throw new HttpError(401, `Sign-in required for ${account.username || 'the selected account'}. Sign in again.`);
+    }
+    throw error;
+  }
 }
 
 async function getMsalAccounts() {
-  if (!authProvider._msalClient) {
-    return [];
-  }
-  return authProvider._msalClient.getTokenCache().getAllAccounts();
+  return Object.values(await storeGetAccounts());
 }
 
 async function getSelectedAccountTenantId() {
@@ -1516,7 +1414,7 @@ async function getSelectedAccountTenantId() {
   const account = selected.accountHomeId
     ? accounts.find((item) => item.homeAccountId === selected.accountHomeId)
     : null;
-  return String(account?.tenantId || authProvider.getUserTenantId() || accounts[0]?.tenantId || '').trim();
+  return String(account?.tenantId || accounts[0]?.tenantId || '').trim();
 }
 
 async function listAccounts() {
@@ -1609,7 +1507,6 @@ function environmentFromBody(body, fallback = {}) {
 function setSelectedEnvironment(environment) {
   selected.environmentName = String(environment.environmentName || '').trim();
   selected.orgUrl = normalizeOrgUrl(environment.orgUrl || '');
-  updateEnvironmentName(selected.environmentName);
 }
 
 function saveSelectedEnvironmentForAccount() {
@@ -1637,16 +1534,11 @@ function applySavedEnvironmentForAccount(homeAccountId) {
 }
 
 async function logoutAccounts() {
-  if (!authProvider._msalClient) {
-    return { removed: 0 };
-  }
-
-  const cache = authProvider._msalClient.getTokenCache();
-  const accounts = await cache.getAllAccounts();
+  const accounts = await getMsalAccounts();
   for (const account of accounts) {
-    await cache.removeAccount(account);
+    await storeRemoveAccount(account.homeAccountId);
   }
-  authProvider._tenantId = undefined;
+  await clearTokenCache();
   selected.accountHomeId = '';
   setSelectedEnvironment({ environmentName: '', orgUrl: '' });
   return { removed: accounts.length };
@@ -3033,149 +2925,30 @@ function findImportConnectionReference(item, connectorId, logicalName) {
 async function createPowerPlatformConnection(connectorIdRaw, displayName, options = {}) {
   const connectorId = normalizeActionConnectorId(requireString(connectorIdRaw, 'connectorId'));
   const environmentName = options.environmentName || selected.environmentName;
-  const actionEnvironmentName = environmentUrlName(environmentName);
-  return withPlayerEnvironment(actionEnvironmentName, async () => {
-    const connector = await getConnectorAsync(connectorId, logger);
-    if (!connector) {
-      throw new HttpError(404, `Connector '${connectorId}' was not found.`);
-    }
-
-    if (isSsoOnlyConnector(connector)) {
-      try {
-        const connection = await createConnectionAsync(actionContext({ connectorId, displayName }, actionEnvironmentName));
-        return normalizeCreatedConnection(connection, displayName);
-      } catch (error) {
-        if (!isBrowserConnectionEnabled()) {
-          throw error;
-        }
-        console.warn(`Silent connection creation failed; falling back to browser flow: ${String(error)}`);
-      }
-    } else if (!isBrowserConnectionEnabled()) {
-      throw new HttpError(
-        400,
-        `Connector '${connectorId}' needs an interactive browser flow. Restart with POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION=true or create it in make.powerapps.com.`,
-      );
-    }
-
-    return startConnectionServer({
-      connectorName: connectorId,
-      environmentId: actionEnvironmentName,
-      region: REGION,
-      tenantId: await getSelectedAccountTenantId(),
-    });
-  });
-}
-
-async function withPlayerEnvironment(environmentName, task) {
-  const previousEnvironmentName = getPlayerServiceConfig().environmentName;
-  updateEnvironmentName(environmentName);
-  try {
-    return await task();
-  } finally {
-    updateEnvironmentName(previousEnvironmentName);
+  // The Node server drove the pac CLI player services (silent SSO creation or
+  // a localhost callback browser flow). Neither is possible inside a browser
+  // extension, so open the Power Apps connection-creation page in a new tab
+  // and let the user finish there.
+  const createUrl = await makeConnectionCreateUrl(environmentName, connectorId);
+  if (!createUrl) {
+    throw new HttpError(400, 'Could not build the connection creation URL for this environment.');
   }
-}
-
-function normalizeCreatedConnection(connection, fallbackDisplayName = '') {
-  if (connection?.status) {
-    return connection;
-  }
-  const id = connection?.name || connection?.id || connection?.connectionName || connection?.connectionId || '';
+  await openInBrowser(createUrl);
   return {
-    ...connection,
-    status: 'created',
-    id,
-    name: connection?.name || id,
-    displayName: connection?.properties?.displayName || connection?.displayName || fallbackDisplayName || id,
+    status: 'browser',
+    id: '',
+    name: '',
+    displayName: String(displayName || '').trim(),
+    message: 'The connection creation page was opened in a new tab. Create the connection there, then refresh this panel.',
   };
 }
 
-function startConnectionServer(config) {
-  const nonce = randomUUID();
-  return new Promise((resolve, reject) => {
-    const callbackServer = http.createServer((req, res) => {
-      const url = new URL(req.url || '/', 'http://localhost');
-      if (url.pathname !== '/callback') {
-        res.writeHead(404);
-        res.end('Not found');
-        return;
-      }
-
-      if (url.searchParams.get('nonce') !== nonce) {
-        res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end('<h2>Connection request verification failed. Please try again.</h2>');
-        cleanup();
-        resolve({ status: 'cancelled' });
-        return;
-      }
-
-      const status = url.searchParams.get('status');
-      const message = url.searchParams.get('message') || undefined;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(status === 'created'
-        ? '<h2>Connection created. You can close this tab.</h2>'
-        : `<h2>Connection creation ${escapeHtml(status || 'cancelled')}.</h2><p>${escapeHtml(message || '')}</p>`);
-      cleanup();
-
-      if (status === 'created') {
-        resolve({
-          status: 'created',
-          name: url.searchParams.get('connectionName') || url.searchParams.get('connectionId'),
-          id: url.searchParams.get('connectionId'),
-          displayName: url.searchParams.get('displayName'),
-        });
-      } else if (status === 'error') {
-        reject(new HttpError(400, message || 'Connection creation failed in the browser.'));
-      } else {
-        reject(new HttpError(400, 'Connection creation was cancelled.'));
-      }
-    });
-
-    callbackServer.listen(0, 'localhost', async () => {
-      const address = callbackServer.address();
-      const port = typeof address === 'object' && address ? address.port : 0;
-      const callbackUrl = `http://localhost:${port}/callback`;
-      const playerUrl = createMaafConnectionUrl(config.region, config.environmentId, {
-        connector: config.connectorName,
-        callbackUrl,
-        nonce,
-        protocolVersion: CONNECTION_CALLBACK_PROTOCOL_VERSION,
-      });
-      const playerUrlWithTenant = addTenantIdToUrl(playerUrl, config.tenantId);
-
-      try {
-        await openInBrowser(playerUrlWithTenant);
-      } catch {
-        console.log(`Open this URL to create the connection:\n${playerUrlWithTenant}`);
-      }
-    });
-
-    callbackServer.on('error', (error) => {
-      cleanup();
-      reject(error);
-    });
-
-    const timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new HttpError(408, 'Connection creation timed out after 10 minutes.'));
-    }, CONNECTION_CREATION_TIMEOUT_MS);
-
-    function cleanup() {
-      clearTimeout(timeoutId);
-      callbackServer.close();
-    }
-  });
-}
-
-function openInBrowser(url) {
-  const [command, args] = process.platform === 'win32'
-    ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
-    : process.platform === 'darwin'
-      ? ['open', [url]]
-      : ['xdg-open', [url]];
-  return new Promise((resolve, reject) => {
-    execFile(command, args, (error) => (error ? reject(error) : resolve()));
-  });
+async function openInBrowser(url) {
+  if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+    await chrome.tabs.create({ url, active: true });
+    return;
+  }
+  window.open(url, '_blank');
 }
 
 async function getWorkflowDetails(workflowId) {
@@ -4003,11 +3776,9 @@ async function listAdminConnections(environmentName) {
 
 async function listUserConnections(environmentName = selected.environmentName) {
   const actionEnvironmentName = environmentUrlName(environmentName);
-  const actionConnections = await withPlayerEnvironment(actionEnvironmentName, () =>
-    listConnectionsAsync(actionContext({}, actionEnvironmentName))
-  );
-  const values = Array.isArray(actionConnections) ? actionConnections : actionConnections?.value || [];
-  return values.map(normalizeActionConnection);
+  const url = `https://api.powerapps.com/providers/Microsoft.PowerApps/connections?api-version=2016-11-01&$filter=environment eq '${actionEnvironmentName}'`;
+  const rows = await powerAppsGetAll(url);
+  return rows.map(normalizeActionConnection);
 }
 
 async function listEnvironmentConnections() {
@@ -4083,7 +3854,7 @@ async function deleteEnvironmentConnection(connectionId) {
     await deleteAdminConnection(selected.environmentName, connectorId, connection.connectionId);
   } catch (error) {
     console.warn(`Power Apps admin connection delete failed: ${errorMessage(error)}`);
-    await deleteConnectionAsync(connectorId, connection.connectionId, logger);
+    await deleteUserConnection(selected.environmentName, connectorId, connection.connectionId);
   }
   return {
     deleted: true,
@@ -4094,6 +3865,11 @@ async function deleteEnvironmentConnection(connectionId) {
 
 async function deleteAdminConnection(environmentName, connectorId, connectionId) {
   const url = `https://api.powerapps.com/providers/Microsoft.PowerApps/scopes/admin/environments/${encodeURIComponent(environmentName)}/apis/${encodeURIComponent(connectorName(connectorId))}/connections/${encodeURIComponent(connectionId)}?api-version=2016-11-01`;
+  await apiHttpRequest('DELETE', url, { authResource: SERVICE_RESOURCE });
+}
+
+async function deleteUserConnection(environmentName, connectorId, connectionId) {
+  const url = `https://api.powerapps.com/providers/Microsoft.PowerApps/apis/${encodeURIComponent(connectorName(connectorId))}/connections/${encodeURIComponent(connectionId)}?api-version=2016-11-01&$filter=environment eq '${environmentUrlName(environmentName)}'`;
   await apiHttpRequest('DELETE', url, { authResource: SERVICE_RESOURCE });
 }
 
@@ -4647,39 +4423,8 @@ function addTenantIdToUrl(rawUrl, tenantId) {
   return url.toString();
 }
 
-function isBrowserConnectionEnabled() {
-  return String(process.env.POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION || '').toLowerCase() === 'true';
-}
-
-function actionContext(actionsParams, environmentName = selected.environmentName) {
-  return {
-    vfs: {},
-    authProvider: actionAuthProvider,
-    region: REGION,
-    environmentName: environmentUrlName(environmentName),
-    actionsParams,
-    localFilePaths: {
-      powerConfigPath: 'power.config.json',
-      schemaPath: '.power/schemas',
-      codeGenPath: 'src/generated',
-    },
-    logger,
-    httpClient,
-  };
-}
-
 function lastPathPart(value) {
   return String(value || '').split('/').filter(Boolean).pop() || '';
-}
-
-function escapeHtml(value) {
-  return String(value || '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;',
-  }[char]));
 }
 
 function odataString(value) {
@@ -5009,53 +4754,13 @@ async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
   return report;
 }
 
-async function initialiseDurableDataDirectory() {
-  await mkdir(APP_DATA_DIR, { recursive: true });
-  if (normalize(APP_DATA_DIR).toLowerCase() === normalize(LEGACY_DATA_DIR).toLowerCase()) {
-    return;
-  }
-
-  for (const fileName of ['report-trends.sqlite', 'automated-report-schedule.json']) {
-    const source = join(LEGACY_DATA_DIR, fileName);
-    const destination = join(APP_DATA_DIR, fileName);
-    if (!await pathExists(destination) && await pathExists(source)) {
-      await copyFile(source, destination);
-      console.log(`Migrated ${fileName} to durable app data at ${destination}.`);
-    }
-  }
-
-  const legacyCache = join(LEGACY_DATA_DIR, 'report-cache');
-  if (!await pathExists(REPORT_CACHE_DIR) && await pathExists(legacyCache)) {
-    await cp(legacyCache, REPORT_CACHE_DIR, { recursive: true, force: false });
-    console.log(`Migrated the report cache to durable app data at ${REPORT_CACHE_DIR}.`);
-  }
-}
-
-async function pathExists(path) {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function writeFileAtomic(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporaryPath, value);
-  try {
-    await rename(temporaryPath, path);
-  } catch (error) {
-    await unlink(temporaryPath).catch(() => {});
-    throw error;
-  }
-}
-
 async function readAutomatedReportSchedule() {
   try {
-    const value = JSON.parse(await readFile(AUTOMATED_REPORT_SCHEDULE_PATH, 'utf8'));
-    return normalizeAutomatedReportSchedule(value, { preserveState: true });
+    const stored = await chrome.storage.local.get(AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY);
+    return normalizeAutomatedReportSchedule(
+      stored[AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY],
+      { preserveState: true },
+    );
   } catch {
     return normalizeAutomatedReportSchedule({});
   }
@@ -5168,14 +4873,12 @@ async function enqueueAutomatedReportScheduleWrite(action) {
 }
 
 async function persistAutomatedReportScheduleFile(schedule) {
-  await mkdir(APP_DATA_DIR, { recursive: true });
-  if (await pathExists(AUTOMATED_REPORT_SCHEDULE_PATH)) {
-    await copyFile(AUTOMATED_REPORT_SCHEDULE_PATH, `${AUTOMATED_REPORT_SCHEDULE_PATH}.backup`);
-  }
-  await writeFileAtomic(AUTOMATED_REPORT_SCHEDULE_PATH, `${JSON.stringify(schedule, null, 2)}\n`);
+  await chrome.storage.local.set({
+    [AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY]: schedule,
+  });
 }
 
-async function checkAutomatedReportSchedule() {
+export async function checkAutomatedReportSchedule() {
   if (automatedReportScheduleRunning) return;
   const schedule = await readAutomatedReportSchedule();
   const today = reportCacheDateKey();
@@ -5240,86 +4943,25 @@ function logAutomatedReportScheduleError(error) {
 }
 
 async function getStartupTaskStatus() {
-  if (process.platform !== 'win32') {
-    return {
-      supported: false,
-      installed: false,
-      backgroundEnabled: false,
-      autoStartEnabled: false,
-      definitionHealthy: true,
-      taskName: STARTUP_TASK_NAME,
-      taskState: 'Unsupported',
-      processMode: 'foreground',
-      health: 'unsupported',
-    };
-  }
-  try {
-    const task = await getBackgroundStatus({
-      expectedServerPath: fileURLToPath(import.meta.url),
-      expectedPort: PORT,
-    });
-    const processMode = process.env.PDAC_BACKGROUND_TASK === '1' ? 'background' : 'foreground';
-    const health = !task.definitionHealthy
-      ? 'stale'
-      : task.backgroundEnabled && processMode === 'background'
-        ? 'running'
-        : task.backgroundEnabled
-          ? 'waiting'
-          : 'stopped';
-    return {
-      supported: true,
-      ...task,
-      taskName: STARTUP_TASK_NAME,
-      processMode,
-      health,
-    };
-  } catch (error) {
-    return {
-      supported: true,
-      installed: false,
-      backgroundEnabled: false,
-      autoStartEnabled: false,
-      definitionHealthy: false,
-      taskName: STARTUP_TASK_NAME,
-      taskState: 'Unknown',
-      processMode: process.env.PDAC_BACKGROUND_TASK === '1' ? 'background' : 'foreground',
-      health: 'unhealthy',
-      error: errorMessage(error),
-    };
-  }
-}
-
-async function setStartupTaskSettings(body = {}) {
-  if (process.platform !== 'win32') {
-    throw new HttpError(400, 'Background server management is currently supported on Windows only.');
-  }
-  if (typeof body.backgroundEnabled !== 'boolean' || typeof body.autoStartEnabled !== 'boolean') {
-    throw new HttpError(400, 'backgroundEnabled and autoStartEnabled must be true or false.');
-  }
-
-  await installBackground({
-    autoStart: body.autoStartEnabled,
-    startTask: body.backgroundEnabled,
-    port: PORT,
-    serverPath: fileURLToPath(import.meta.url),
-  });
-  const status = await getStartupTaskStatus();
-  const stopCurrentProcess = !body.backgroundEnabled && process.env.PDAC_BACKGROUND_TASK === '1';
   return {
-    ...status,
-    backgroundEnabled: body.backgroundEnabled,
-    autoStartEnabled: body.autoStartEnabled,
-    health: body.backgroundEnabled ? status.health : 'stopping',
-    stopCurrentProcess,
+    supported: false,
+    installed: false,
+    backgroundEnabled: false,
+    autoStartEnabled: false,
+    definitionHealthy: true,
+    taskName: STARTUP_TASK_NAME,
+    taskState: 'Unsupported',
+    processMode: 'foreground',
+    health: 'unsupported',
   };
 }
 
+async function setStartupTaskSettings(body = {}) {
+  throw new HttpError(400, 'Background server management is not available in the browser extension.');
+}
+
 function scheduleBackgroundServerStop() {
-  const forceExit = setTimeout(() => process.exit(0), 2000);
-  forceExit.unref();
-  setTimeout(() => {
-    server.close(() => process.exit(0));
-  }, 250).unref();
+  return {};
 }
 
 async function getOrBuildCachedReportsSummary(body = {}) {
@@ -5364,13 +5006,9 @@ function reportCacheDateKey(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-function reportCacheFilePath(cacheKey, dateKey = reportCacheDateKey()) {
-  return join(REPORT_CACHE_DIR, dateKey, `${cacheKey}.json`);
-}
-
 async function readDailyReportCache(cacheKey) {
   try {
-    return JSON.parse(await readFile(reportCacheFilePath(cacheKey), 'utf8'));
+    return await reportCacheGetEntry(reportCacheDateKey(), cacheKey);
   } catch {
     return null;
   }
@@ -5379,14 +5017,13 @@ async function readDailyReportCache(cacheKey) {
 async function writeDailyReportCache(cacheKey, kind, accountHomeId, value) {
   const dateKey = reportCacheDateKey();
   try {
-    await mkdir(join(REPORT_CACHE_DIR, dateKey), { recursive: true });
-    await writeFile(reportCacheFilePath(cacheKey, dateKey), JSON.stringify({
+    await reportCachePutEntry(dateKey, cacheKey, {
       version: 1,
       kind,
       accountHomeId,
       createdAt: new Date().toISOString(),
       value,
-    }));
+    });
   } catch (error) {
     console.warn(`Unable to persist ${kind} report cache: ${errorMessage(error)}`);
   }
@@ -5432,18 +5069,7 @@ async function listCachedAutomatedReportFiles(accountHomeId = '') {
 
 async function listDailyAutomatedReportCacheEntries(accountHomeId = '') {
   try {
-    const directory = join(REPORT_CACHE_DIR, reportCacheDateKey());
-    const fileNames = await readdir(directory);
-    const entries = await Promise.all(fileNames
-      .filter((fileName) => fileName.endsWith('.json'))
-      .map(async (fileName) => {
-        try {
-          return JSON.parse(await readFile(join(directory, fileName), 'utf8'));
-        } catch {
-          return null;
-        }
-      }));
-    return entries
+    return (await reportCacheListByDate(reportCacheDateKey()))
       .filter((entry) => entry?.kind === 'automated' && entry.accountHomeId === accountHomeId)
       .sort((left, right) => String(right.createdAt || '').localeCompare(String(left.createdAt || '')));
   } catch {
@@ -5599,39 +5225,6 @@ function cachedNumber(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
-async function getReportTrendDb() {
-  if (!reportTrendDbPromise) {
-    reportTrendDbPromise = (async () => {
-      await mkdir(APP_DATA_DIR, { recursive: true });
-      const db = new DatabaseSync(REPORT_TRENDS_DB_PATH);
-      for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
-        ensureReportTotalTable(db, definition);
-      }
-      return db;
-    })();
-  }
-  return reportTrendDbPromise;
-}
-
-function ensureReportTotalTable(db, definition) {
-  const totalColumns = definition.columns
-    .map(([, key, type]) => `${quoteSqlIdentifier(key)} ${type} NOT NULL DEFAULT ${type === 'REAL' ? '0' : "''"}`)
-    .join(',\n          ');
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS ${quoteSqlIdentifier(definition.tableName)} (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_home_id TEXT NOT NULL DEFAULT '',
-      date_ran TEXT NOT NULL,
-      collected_at TEXT NOT NULL,
-      range_key TEXT NOT NULL DEFAULT '',
-      range_label TEXT NOT NULL DEFAULT '',
-      ${totalColumns}
-    );
-    CREATE INDEX IF NOT EXISTS ${quoteSqlIdentifier(`idx_${definition.tableName}_lookup`)}
-      ON ${quoteSqlIdentifier(definition.tableName)}(account_home_id, date_ran, collected_at);
-  `);
-}
-
 async function enqueueReportTrendWrite(action) {
   const run = reportTrendWriteQueue.then(action, action);
   reportTrendWriteQueue = run.catch(() => {});
@@ -5658,86 +5251,75 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     dateRan,
   });
   const buildSolutionBackfillRows = buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOptions });
-  const columns = definition.columns.map(([, key]) => key);
-  const placeholders = ['?', '?', '?', '?', '?', ...columns.map(() => '?')].join(', ');
-  const insertColumns = ['account_home_id', 'date_ran', 'collected_at', 'range_key', 'range_label', ...columns]
-    .map(quoteSqlIdentifier)
-    .join(', ');
   const normalizedAccountHomeId = String(accountHomeId || '').trim();
   await enqueueReportTrendWrite(async () => {
-    const db = await getReportTrendDb();
-    const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
-    try {
-      db.exec('BEGIN TRANSACTION');
-      const missingDaySnapshots = [...backfillSnapshots];
-      if (buildSolutionBackfillRows && isDateOnlyString(dateRan)) {
-        // Solutions are a point-in-time inventory with no date range, so any
-        // day missed since tracking began is identified from the stored
-        // snapshot dates and rebuilt from each solution's createdOn date.
-        const existingDates = db.prepare(`
-          SELECT DISTINCT date_ran
-          FROM ${quoteSqlIdentifier(definition.tableName)}
-          WHERE account_home_id = ?
-            AND date_ran < ?
-          ORDER BY date_ran
-        `).all(normalizedAccountHomeId, dateRan)
-          .map((row) => String(row.date_ran || ''))
-          .filter(isDateOnlyString);
-        if (existingDates.length) {
-          const existingDateSet = new Set(existingDates);
-          for (let cursor = addDays(parseDateOnly(existingDates[0], 'start'), 1); toDateOnlyString(cursor) < dateRan; cursor = addDays(cursor, 1)) {
-            const snapshotDate = toDateOnlyString(cursor);
-            if (!existingDateSet.has(snapshotDate)) {
-              missingDaySnapshots.push({ dateRan: snapshotDate, rows: buildSolutionBackfillRows(snapshotDate) });
-            }
+    const storedRows = await trendSelectRows(definition.tableName);
+    const missingDaySnapshots = [...backfillSnapshots];
+    if (buildSolutionBackfillRows && isDateOnlyString(dateRan)) {
+      // Solutions are a point-in-time inventory with no date range, so any
+      // day missed since tracking began is identified from the stored
+      // snapshot dates and rebuilt from each solution's createdOn date.
+      const existingDates = [...new Set(storedRows
+        .filter((row) => row.account_home_id === normalizedAccountHomeId && row.date_ran < dateRan)
+        .map((row) => String(row.date_ran || ''))
+        .filter(isDateOnlyString))]
+        .sort();
+      if (existingDates.length) {
+        const existingDateSet = new Set(existingDates);
+        for (let cursor = addDays(parseDateOnly(existingDates[0], 'start'), 1); toDateOnlyString(cursor) < dateRan; cursor = addDays(cursor, 1)) {
+          const snapshotDate = toDateOnlyString(cursor);
+          if (!existingDateSet.has(snapshotDate)) {
+            missingDaySnapshots.push({ dateRan: snapshotDate, rows: buildSolutionBackfillRows(snapshotDate) });
           }
         }
       }
-      const existingBackfillRows = missingDaySnapshots.length
-        ? db.prepare(`
-          SELECT date_ran, environment_display_name, environment_id, environment_url
-          FROM ${quoteSqlIdentifier(definition.tableName)}
-          WHERE account_home_id = ?
-            AND date_ran >= ?
-            AND date_ran < ?
-        `).all(normalizedAccountHomeId, missingDaySnapshots[0].dateRan, dateRan)
-        : [];
-      const existingBackfillKeys = new Set(existingBackfillRows.map((row) =>
-        `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
-      const insertRows = (snapshotDate, snapshotRows, { onlyMissing = false } = {}) => {
-        for (const row of snapshotRows) {
-          const snapshotKey = `${snapshotDate}:${reportTrendEnvironmentKey(row)}`;
-          if (onlyMissing && existingBackfillKeys.has(snapshotKey)) {
-            continue;
-          }
-          insert.run(
-            normalizedAccountHomeId,
-            snapshotDate,
-            collectedAt,
-            rangeKey,
-            rangeLabel,
-            ...definition.columns.map(([header, , type]) => sqlReportTotalValue(row[header], type)),
-          );
-          existingBackfillKeys.add(snapshotKey);
-        }
-      };
-      db.prepare(
-        `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE account_home_id = ? AND date_ran = ?`,
-      ).run(normalizedAccountHomeId, dateRan);
-      insertRows(dateRan, totalRows);
-      for (const snapshot of missingDaySnapshots) {
-        insertRows(snapshot.dateRan, snapshot.rows, { onlyMissing: true });
-      }
-      db.prepare(
-        `DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`,
-      ).run(reportTrendRetentionCutoffDate());
-      db.exec('COMMIT');
-    } catch (error) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {}
-      throw error;
     }
+    const firstBackfillDate = missingDaySnapshots
+      .map((snapshot) => snapshot.dateRan)
+      .filter(isDateOnlyString)
+      .sort()[0] || '';
+    const existingBackfillRows = firstBackfillDate
+      ? storedRows.filter((row) =>
+          row.account_home_id === normalizedAccountHomeId
+          && row.date_ran >= firstBackfillDate
+          && row.date_ran < dateRan)
+      : [];
+    const existingBackfillKeys = new Set(existingBackfillRows.map((row) =>
+      `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
+    const records = [];
+    const appendRows = (snapshotDate, snapshotRows, { onlyMissing = false } = {}) => {
+      for (const row of snapshotRows) {
+        const snapshotKey = `${snapshotDate}:${reportTrendEnvironmentKey(row)}`;
+        if (onlyMissing && existingBackfillKeys.has(snapshotKey)) {
+          continue;
+        }
+        records.push({
+          account_home_id: normalizedAccountHomeId,
+          date_ran: snapshotDate,
+          collected_at: collectedAt,
+          range_key: rangeKey,
+          range_label: rangeLabel,
+          ...Object.fromEntries(definition.columns.map(([header, key, type]) => [
+            key,
+            sqlReportTotalValue(row[header], type),
+          ])),
+        });
+        existingBackfillKeys.add(snapshotKey);
+      }
+    };
+    appendRows(dateRan, totalRows);
+    for (const snapshot of missingDaySnapshots) {
+      appendRows(snapshot.dateRan, snapshot.rows, { onlyMissing: true });
+    }
+    await trendDeleteRows(
+      definition.tableName,
+      (row) => row.account_home_id === normalizedAccountHomeId && row.date_ran === dateRan,
+    );
+    await trendInsertRows(definition.tableName, records);
+    await trendDeleteRows(
+      definition.tableName,
+      (row) => row.date_ran < reportTrendRetentionCutoffDate(),
+    );
   });
 }
 
@@ -5845,22 +5427,17 @@ function reportTotalTableDefinition(group) {
 
 async function listReportTrendSnapshots(filters = {}) {
   const dateRange = getReportTrendDateRange(filters);
-  const db = await getReportTrendDb();
   const accountHomeId = String(filters.accountHomeId || '').trim();
   const tables = [];
   for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
-    const result = db.prepare(`
-      SELECT *
-      FROM ${quoteSqlIdentifier(definition.tableName)}
-      WHERE account_home_id = ?
-        AND date_ran >= ?
-        AND date_ran <= ?
-      ORDER BY collected_at, id
-    `).all(
-      accountHomeId,
-      dateRange.startDate,
-      dateRange.endDate,
-    );
+    const result = (await trendSelectRows(definition.tableName))
+      .filter((row) =>
+        row.account_home_id === accountHomeId
+        && row.date_ran >= dateRange.startDate
+        && row.date_ran <= dateRange.endDate)
+      .sort((left, right) =>
+        String(left.collected_at || '').localeCompare(String(right.collected_at || ''))
+        || Number(left.id || 0) - Number(right.id || 0));
     const latestRows = new Map();
     for (const row of result) {
       const environmentKey = String(row.environment_id || '').trim()
@@ -5913,38 +5490,31 @@ async function listReportTrendSnapshots(filters = {}) {
 }
 
 async function listSqlTables() {
-  const db = await getReportTrendDb();
-  const tableNames = getUserSqlTableNames(db);
-  const tables = tableNames.map((name) => getSqlTableInfo(db, name));
+  const tableNames = getUserSqlTableNames();
+  const tables = await Promise.all(tableNames.map((name) => getSqlTableInfo(name)));
   return {
     database: 'report-trends.sqlite',
-    dataPath: REPORT_TRENDS_DB_PATH,
+    dataPath: 'IndexedDB (pdac-server)',
     tables,
     totalRows: tables.reduce((sum, table) => sum + table.rowCount, 0),
     totalStorageBytes: tables.reduce((sum, table) => sum + table.storageBytes, 0),
   };
 }
 
-function getUserSqlTableNames(db) {
-  return db.prepare(`
-    SELECT name
-    FROM sqlite_master
-    WHERE type = 'table'
-      AND name NOT LIKE 'sqlite_%'
-    ORDER BY name
-  `).all().map((row) => String(row.name || '')).filter(Boolean);
+function getUserSqlTableNames() {
+  return Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)
+    .map((definition) => definition.tableName)
+    .sort();
 }
 
-function getSqlTableInfo(db, name) {
-  const quoted = quoteSqlIdentifier(name);
-  const rowCount = Number(db.prepare(`SELECT COUNT(*) AS row_count FROM ${quoted}`).get()?.row_count || 0);
-  const rows = db.prepare(`SELECT * FROM ${quoted}`).all();
+async function getSqlTableInfo(name) {
+  const rows = await getFlatSqlTableRows(name);
   const storageBytes = Buffer.byteLength(JSON.stringify(rows), 'utf8');
   const definition = reportTotalTableDefinitionByName(name);
   return {
     name,
     label: definition?.reportLabel || name,
-    rowCount,
+    rowCount: rows.length,
     storageBytes,
   };
 }
@@ -6165,41 +5735,23 @@ function trendDataImportRowKey(row) {
 async function importTrendDataWorkbook(xlsxBase64, fallbackAccountHomeId = '') {
   const imports = await parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId);
   return enqueueReportTrendWrite(async () => {
-    const db = await getReportTrendDb();
     const tableResults = [];
-    try {
-      db.exec('BEGIN TRANSACTION');
-      for (const { definition, rows } of imports) {
-        const importKeys = new Set(rows.map(trendDataImportRowKey));
-        const existingRows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(definition.tableName)}`).all();
-        const replaced = existingRows.filter((row) => importKeys.has(trendDataImportRowKey(row)));
-        const deleteRow = db.prepare(`DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE id = ?`);
-        for (const row of replaced) {
-          deleteRow.run(row.id);
-        }
-        const columns = trendDataImportColumns(definition);
-        const insert = db.prepare(`
-          INSERT INTO ${quoteSqlIdentifier(definition.tableName)}
-            (${columns.map(quoteSqlIdentifier).join(', ')})
-          VALUES (${columns.map(() => '?').join(', ')})
-        `);
-        for (const row of rows) {
-          insert.run(...columns.map((column) => row[column]));
-        }
-        db.prepare(`DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`)
-          .run(reportTrendRetentionCutoffDate());
-        tableResults.push({
-          tableName: definition.tableName,
-          importedRows: rows.length,
-          replacedRows: replaced.length,
-        });
-      }
-      db.exec('COMMIT');
-    } catch (error) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {}
-      throw error;
+    for (const { definition, rows } of imports) {
+      const importKeys = new Set(rows.map(trendDataImportRowKey));
+      const replacedRows = await trendReplaceRows(
+        definition.tableName,
+        (row) => importKeys.has(trendDataImportRowKey(row)),
+        rows,
+      );
+      await trendDeleteRows(
+        definition.tableName,
+        (row) => row.date_ran < reportTrendRetentionCutoffDate(),
+      );
+      tableResults.push({
+        tableName: definition.tableName,
+        importedRows: rows.length,
+        replacedRows,
+      });
     }
     return {
       importedRows: tableResults.reduce((sum, table) => sum + table.importedRows, 0),
@@ -6209,10 +5761,32 @@ async function importTrendDataWorkbook(xlsxBase64, fallbackAccountHomeId = '') {
   });
 }
 
+function getSqlTableColumnNames(definition) {
+  return [
+    'id',
+    'account_home_id',
+    'date_ran',
+    'collected_at',
+    'range_key',
+    'range_label',
+    ...definition.columns.map(([, key]) => key),
+  ];
+}
+
+async function getFlatSqlTableRows(tableName) {
+  const definition = reportTotalTableDefinitionByName(tableName);
+  if (!definition) {
+    throw new HttpError(404, 'SQL table not found.');
+  }
+  const columns = getSqlTableColumnNames(definition);
+  return (await trendSelectRows(tableName))
+    .sort((left, right) => Number(left.id || 0) - Number(right.id || 0))
+    .map((row) => Object.fromEntries(columns.map((column) => [column, row[column] ?? ''])));
+}
+
 async function exportSqlTablesWorkbook() {
-  const db = await getReportTrendDb();
-  const tableNames = getUserSqlTableNames(db);
-  const tableInfos = tableNames.map((name) => getSqlTableInfo(db, name));
+  const tableNames = getUserSqlTableNames();
+  const tableInfos = await Promise.all(tableNames.map((name) => getSqlTableInfo(name)));
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'PDAC';
   workbook.created = new Date();
@@ -6229,10 +5803,11 @@ async function exportSqlTablesWorkbook() {
 
   const usedNames = new Set(['SQL Tables']);
   for (const tableName of tableNames) {
-    const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`).all();
+    const definition = reportTotalTableDefinitionByName(tableName);
+    const rows = await getFlatSqlTableRows(tableName);
     const columns = rows.length
       ? Object.keys(rows[0])
-      : getSqlTableColumns(db, tableName);
+      : getSqlTableColumnNames(definition);
     const worksheet = workbook.addWorksheet(uniqueWorksheetName(tableName, usedNames), {
       views: [{ state: 'frozen', ySplit: 1 }],
     });
@@ -6249,15 +5824,15 @@ async function exportSqlTablesWorkbook() {
 }
 
 async function exportSingleSqlTableWorkbook(tableName) {
-  const db = await getReportTrendDb();
-  const tableNames = getUserSqlTableNames(db);
+  const tableNames = getUserSqlTableNames();
   if (!tableNames.includes(tableName)) {
     throw new HttpError(404, 'SQL table not found.');
   }
-  const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`).all();
+  const definition = reportTotalTableDefinitionByName(tableName);
+  const rows = await getFlatSqlTableRows(tableName);
   const columns = rows.length
     ? Object.keys(rows[0])
-    : getSqlTableColumns(db, tableName);
+    : getSqlTableColumnNames(definition);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'PDAC';
   workbook.created = new Date();
@@ -6294,12 +5869,6 @@ function styleSqlWorksheet(worksheet, columnCount, rowCount) {
   }
 }
 
-function getSqlTableColumns(db, tableName) {
-  return db.prepare(`PRAGMA table_info(${quoteSqlLiteral(tableName)})`).all()
-    .map((row) => String(row.name || ''))
-    .filter(Boolean);
-}
-
 function uniqueWorksheetName(name, usedNames) {
   const base = String(name || 'Table').replace(/[\[\]*?:\/\\]/g, ' ').trim().slice(0, 31) || 'Table';
   let candidate = base;
@@ -6315,34 +5884,16 @@ function uniqueWorksheetName(name, usedNames) {
 
 async function deleteSqlTableRecords() {
   return enqueueReportTrendWrite(async () => {
-    const db = await getReportTrendDb();
-    const tableNames = getUserSqlTableNames(db);
-    const before = tableNames.map((name) => getSqlTableInfo(db, name));
-    try {
-      db.exec('BEGIN TRANSACTION');
-      for (const tableName of tableNames) {
-        db.exec(`DELETE FROM ${quoteSqlIdentifier(tableName)}`);
-      }
-      db.exec('COMMIT');
-    } catch (error) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {}
-      throw error;
+    const tableNames = getUserSqlTableNames();
+    const before = await Promise.all(tableNames.map((name) => getSqlTableInfo(name)));
+    for (const tableName of tableNames) {
+      await trendDeleteRows(tableName, () => true);
     }
     return {
       deletedRows: before.reduce((sum, table) => sum + table.rowCount, 0),
       tables: before.map((table) => table.name),
     };
   });
-}
-
-function quoteSqlIdentifier(value) {
-  return `"${String(value).replace(/"/g, '""')}"`;
-}
-
-function quoteSqlLiteral(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 function getReportTrendDateRange(filters = {}) {
@@ -8874,34 +8425,9 @@ function errorMessageFromResponse(data) {
   return '';
 }
 
-async function serveStatic(req, res) {
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
-  const requested = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname);
-  const fullPath = normalize(join(PUBLIC_DIR, requested));
-
-  if (!fullPath.startsWith(PUBLIC_DIR)) {
-    sendText(res, 403, 'Forbidden');
-    return;
-  }
-
-  try {
-    const content = await readFile(fullPath);
-    res.writeHead(200, {
-      'Content-Type': contentType(fullPath),
-      'X-Content-Type-Options': 'nosniff',
-    });
-    res.end(content);
-  } catch {
-    sendText(res, 404, 'Not found');
-  }
-}
-
 async function readJson(req) {
-  const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString('utf8');
+  // bootstrap.js delivers the request body as a string on the fake req.
+  const raw = typeof req.body === 'string' ? req.body : '';
   return raw ? JSON.parse(raw) : {};
 }
 
@@ -9244,14 +8770,6 @@ function isDefaultExcludedPublisher(name) {
   return /microsoft|dynamics/i.test(String(name || ''));
 }
 
-function contentType(path) {
-  return {
-    '.html': 'text/html; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.js': 'text/javascript; charset=utf-8',
-  }[extname(path)] || 'application/octet-stream';
-}
-
 function sendJson(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data, null, 2));
@@ -9295,11 +8813,6 @@ function sendZip(res, status, filename, bytes) {
     'Content-Length': bytes.length,
   });
   res.end(bytes);
-}
-
-function sendText(res, status, text) {
-  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end(text);
 }
 
 function toHttpError(error) {

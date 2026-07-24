@@ -1,10 +1,34 @@
 # PDAC - Power DevBox Admin Center
 
 Settings by function not by environment.
-![home](screenshots/home.png)
-PDAC is a small local admin app for working across Power Platform and Dataverse environments with a functional hierarchy instead of environment. It helps with authentication, users and teams, connections, security roles, solution inspection, solution export/import, solution component settings, and admin telemetry for AI Flow, Flow Runs, and Agent Sessions.
 
-## Run
+![home](screenshots/home.png)
+
+PDAC is an administration and reporting app for working across Microsoft Power Platform and Dataverse environments. It provides one function-oriented workspace for authentication, users and teams, connections, security roles, solutions, imports, table metadata, component management, AI usage, flow runs, agent sessions, scheduled cross-environment reports, charts, and historical trends.
+
+PDAC can run as the published Node package or entirely inside its Chrome/Edge extension.
+
+## Browser extension — publishing soon
+
+A packaged browser extension will be published soon. Until then, users can download this repository and load the extension locally as an unpacked extension. The unpacked version contains the complete PDAC UI and API; it does not require Node, localhost, or Windows Task Scheduler.
+
+1. [Download the repository ZIP](https://github.com/wyattdave/pdac/archive/refs/heads/main.zip) and extract it, or clone the repository.
+2. Open `chrome://extensions` in Chrome or `edge://extensions` in Edge.
+3. Enable **Developer mode**.
+4. Select **Load unpacked** and choose the extracted `chrome-ext` folder—not the repository root.
+5. Pin PDAC if desired, then select its toolbar icon to open the full-page app.
+
+When a newer version is downloaded, replace the local files and select **Reload** for PDAC on the browser extensions page.
+
+Scheduled reports use a five-minute browser alarm and catch up when the browser starts. The browser may close the extension service worker between checks, but Chrome or Edge must remain running for scheduled work to execute. Reports cannot run while the browser itself is fully closed.
+
+Report files and trend rows are stored in IndexedDB. Schedule, account, and authentication data are stored in extension-local storage. All runtime libraries are included in the extension; it does not load executable code from a CDN.
+
+PDAC stores Microsoft Entra refresh tokens in `chrome.storage.local`. Normal web pages cannot read that storage, but it has the same local-user trust boundary as other credentials in the browser profile: anyone controlling the signed-in OS profile can access or remove the extension's local data.
+
+## Run the Node version
+
+The Node version requires Node.js 22.13 or newer.
 
 Run directly from npm:
 
@@ -56,24 +80,7 @@ This is optional. The task runs with the signed-in user's Windows credentials. W
 npm run remove-startup
 ```
 
-The Reports tab provides two independent controls:
-
-- **Run the web server in the background** starts or stops the hidden per-user task now.
-- **Start automatically when I sign in to Windows** adds or removes the current user's sign-in and session-unlock triggers. It can remain enabled while the background server is stopped, in which case PDAC starts at the next sign-in or unlock.
-
-If PDAC is already running in a terminal, the background launcher waits; when that terminal process closes, it takes over on port 4280. The task uses the Windows Script Host as a windowless GUI launcher, so the persistent PowerShell watchdog and Node server do not create or require a terminal window. A cold start can take about 30 seconds. The page reports whether the task is running, waiting, stopped, unhealthy, or pointing to stale files, and offers a repair action when necessary. PM2 and administrator credentials are not required.
-
-**Run daily reports in the background** is separate from the background server settings. When enabled, the selected Excel reports are generated once per day and appear as download links in the Reports tab. **Save to database** independently controls whether totals are also written to SQLite. Monthly event and session reports use their timestamped rows to reconstruct any missing month-to-date database snapshots without replacing snapshots already stored. Trend charts default to the current calendar month, and usage forecasts apply the observed pattern for each day of the week through month end. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
-
-The task runs `server.mjs` directly (no recurring `npx` command). Its stable launcher/configuration, rotating UTF-8 logs, report cache, schedule, and SQLite database are stored under `%LOCALAPPDATA%\PowerDevBoxAdmin`. Keeping application data outside the npm package means an update does not replace it. Each SQLite write also keeps a `.backup` copy of the preceding database file.
-
-In the Reports tab, enable **Run daily reports in the background**, select environments, and enable **Save to database** for each report that should run. The server checks immediately at startup and after a settings change, then every five minutes. Each due report is tracked independently, so successful reports are not repeated while a failed report is retried. A report is marked complete only after its Excel files are generated and, when enabled, its daily SQLite snapshot is committed. The web page does not need to be open.
-
-Open:
-
-```text
-http://localhost:4280
-```
+The task runs `server.mjs` directly without a recurring `npx` command. Its launcher, configuration, and logs are stored below `%LOCALAPPDATA%\PowerDevBoxAdmin`; report cache, schedule, and SQLite trend data are stored in its `data` directory. Application data is kept outside the installed npm package so an update does not replace it. The previous schedule JSON is retained as a `.backup` when schedule state is written.
 
 Optional startup values:
 
@@ -88,20 +95,37 @@ powerdevbox-admin
 
 `POWERAPPS_CLI_ENABLE_BROWSER_CONNECTION=true` enables the interactive local browser callback flow for connectors that cannot be created silently.
 
-## Functions
+## Scheduled reports and trend data
 
-- **Home**: quick guide for each admin function.
-- **Environment and Auth**: sign in, switch accounts, load environments, choose the active environment, and copy the selected environment details.
-- **Users and Teams**: list environment users and teams, force-sync an Entra user into Dataverse, create Dataverse teams, add loaded users to a selected team, and assign security roles to users or teams.
-- **Connections**: list environment connections with connector, owner, and health, filter by text or broken state, show only the selected account's connections, open broken owned connections for repair, and delete connections.
-- **Roles**: create roles, download editable permission workbooks or CSVs, upload edited permissions, and rename editable root roles.
-- **Solutions**: list and filter solutions, filter publishers, open the solution in Power Automate, list components, export as managed or unmanaged, and stage a deployment.
-- **AI Flow**: inspect AI usage events, sort by owner or consumption details, and view totals by flow or model with Copilot Studio and AI Builder cost breakdowns.
-- **Flow Runs**: list cloud flow runs, filter by status or trigger, and view per-flow totals for run count, success count, fail count, and total run time.
-- **Agent Sessions**: browse Dataverse conversation transcripts and load a sanitized transcript view for any session.
-- **Tables**: list Dataverse custom or all tables, inspect custom or all columns, generate Mermaid relationship diagrams, and export table-design workbooks.
-- **Solution component actions**: manage supported components from the solution component list.
-- **Import**: analyze a solution ZIP, map connection references, set environment variable values, download/import settings JSON, and import the solution.
+The Reports tab provides two independent controls:
+
+- **Run daily reports in the background** generates each selected Excel report once per day and restores the completed files as download links.
+- **Enable trend data to be saved** writes report totals to local trend storage: IndexedDB in the Chrome extension and SQLite in the Node server.
+
+Monthly event and session reports use their timestamped rows to reconstruct any missing month-to-date snapshots without replacing snapshots already stored. Trend charts default to the current calendar month, and usage forecasts apply the observed pattern for each day of the week through month end. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
+
+In the Reports tab, enable **Run daily reports in the background**, select environments, and optionally enable **Enable trend data to be saved**. The app checks immediately at startup and after a settings change, then every five minutes. Each due report is tracked independently, so successful reports are not repeated while a failed report is retried. A report is marked complete only after its Excel files are generated and, when enabled, its trend snapshot is committed. The Node web page does not need to be open while its server is running; the extension uses its background service worker.
+
+The Settings tab can export, clear, and import local trend data. Use **Download import template**, keep its worksheet names and headers unchanged, enter rows, then choose **Import Excel**. Imported rows replace matching report/account/date/environment snapshots and retain the same two-year history policy as generated trend data.
+
+## Features
+
+- **Home**: a quick guide to the available administration and reporting functions.
+- **Settings, accounts, and environments**: sign in with Microsoft Entra ID, use multiple accounts, choose the active Dataverse environment, control which environments appear in the header picker, copy environment details, and manage local trend data.
+- **Users and Teams**: page through environment users and teams, force-sync an existing Entra user into Dataverse, create owner/access/security-group/Office-group teams, add users to teams, and assign the correct business-unit copy of a security role.
+- **Connections**: list environment connections with connector, owner, and health details; search and filter by owner or broken state; open an owned broken connection for repair; and delete connections after confirmation.
+- **Roles**: list editable root roles, create or rename roles, choose CSV or XLSX, export table and miscellaneous privileges, edit scope values, and upload the files to apply permissions.
+- **Solutions**: filter by name, publisher, managed state, Active Solution, or Default Solution; download a solution inventory report; open a solution in Power Apps, Power Automate, or Copilot Studio; inspect components; export managed or unmanaged ZIPs; and send an export directly to the Imports workflow.
+- **Tables**: browse custom or all Dataverse tables and columns, view metadata and row-count snapshots, open tables in Power Apps, generate Mermaid relationship diagrams, download diagrams as SVG or PNG, copy Mermaid source, and export table-design workbooks.
+- **AI Flow**: query configurable date ranges, filter AI events by credit type, creator, tool, model, or source, group totals by flow or model, inspect AI Builder and Copilot Studio consumption, and export the results to Excel.
+- **Flow Runs**: query configurable date ranges, filter by status, trigger, search text, errors, or minimum duration, open individual Power Automate runs, review per-flow success/failure/duration totals, and export to Excel.
+- **Agent Sessions**: page through Copilot/Dataverse conversation sessions, filter by date and agent, view per-agent totals, export totals to Excel, and fetch a redacted transcript only when a session is opened.
+- **Reports**: run AI Flow, Agent Sessions, Solutions, and Flow Runs reports across selected environments; generate totals and raw workbooks; queue manual runs; schedule daily runs; auto-download completed files; and restore cached download links.
+- **Charts**: view the latest cross-environment usage, run-health, session, and solution-inventory snapshot produced by reports.
+- **Trends**: retain up to two years of report totals, choose preset or custom date ranges, compare historical values, and use month-end forecasts where available.
+- **Trend data management**: inspect local trend tables, export one table or all tables to Excel, clear stored records, download the supported import template, and import validated XLSX data into IndexedDB or SQLite.
+- **Solution component actions**: update environment-variable values, switch or create compatible connection-reference connections, turn flows on or off, inspect read-only run-only/manual-trigger settings, and share supported flows, canvas/code apps, and Copilot Studio agents with users or teams.
+- **Imports**: analyze a solution ZIP, choose a target environment, map connection references, override environment-variable values, export or import deployment-settings JSON, and import the solution with overwrite/publish options.
 
 ## Users and Teams
 

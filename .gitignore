@@ -3,3 +3,7 @@ data/report-cache/
 data/report-trends.sqlite
 data/automated-report-schedule.json
 data/server.log
+chrome-ext/plan.md
+chrome-ext/handover.md
+.codex
+.agents
