@@ -3646,7 +3646,14 @@ async function updateSolutionVersion(solutionId, version) {
 
 async function cacheImportPackage(bytes, filename, meta = {}) {
   const id = randomUUID();
-  const analysis = await analyzeSolutionZip(bytes);
+  let analysis = await analyzeSolutionZip(bytes);
+  if (meta.sourceSolutionId) {
+    try {
+      analysis = mergeImportAnalysis(analysis, await analyzeSourceSolution(meta.sourceSolutionId));
+    } catch (error) {
+      console.warn(`Source solution analysis failed: ${errorMessage(error)}`);
+    }
+  }
   const item = {
     id,
     filename,
@@ -3657,6 +3664,43 @@ async function cacheImportPackage(bytes, filename, meta = {}) {
   };
   importPackages.set(id, item);
   return importPackagePayload(item);
+}
+
+function mergeImportAnalysis(zipAnalysis, sourceAnalysis) {
+  return {
+    ...zipAnalysis,
+    solution: Object.values(zipAnalysis.solution || {}).some(Boolean) ? zipAnalysis.solution : sourceAnalysis.solution,
+    components: sourceAnalysis.components?.length ? sourceAnalysis.components : zipAnalysis.components,
+    connectionReferences: sourceAnalysis.connectionReferences?.length ? sourceAnalysis.connectionReferences : zipAnalysis.connectionReferences,
+    environmentVariables: sourceAnalysis.environmentVariables?.length ? sourceAnalysis.environmentVariables : zipAnalysis.environmentVariables,
+  };
+}
+
+async function analyzeSourceSolution(solutionId) {
+  const [solution, sourceComponents] = await Promise.all([getSolution(solutionId), listSolutionComponents(solutionId)]);
+  const connectionComponents = sourceComponents.filter((component) => Number(component.componenttype) === 372);
+  const variableComponents = sourceComponents.filter((component) => Number(component.componenttype) === 380);
+  const [connectionReferences, environmentVariables] = await Promise.all([
+    mapWithConcurrency(connectionComponents, 6, async (component) => {
+      try {
+        const row = await dvGet(`connectionreferences(${normalizeGuid(component.objectid)})?$select=connectionreferencelogicalname,connectionreferencedisplayname,connectorid`);
+        return { logicalName: row.connectionreferencelogicalname || component.logicalName || '', displayName: row.connectionreferencedisplayname || component.displayName || row.connectionreferencelogicalname || '', connectorId: row.connectorid || '' };
+      } catch { return null; }
+    }),
+    mapWithConcurrency(variableComponents, 6, async (component) => {
+      try {
+        const row = await dvGet(`environmentvariabledefinitions(${normalizeGuid(component.objectid)})?$select=schemaname,displayname,type,defaultvalue&$expand=environmentvariabledefinition_environmentvariablevalue($select=value)`);
+        const currentValue = row.environmentvariabledefinition_environmentvariablevalue?.[0]?.value || '';
+        return { schemaName: row.schemaname || component.logicalName || '', displayName: row.displayname || component.displayName || row.schemaname || '', type: normalizeEnvironmentVariableType(row.type), defaultValue: row.defaultvalue || '', value: currentValue || row.defaultvalue || '' };
+      } catch { return null; }
+    }),
+  ]);
+  return {
+    solution: { uniqueName: solution.uniquename || '', friendlyName: solution.friendlyname || '', version: solution.version || '' },
+    components: sourceComponents.map((component) => ({ type: String(component.componenttype || ''), typeName: component.typeLabel || SOLUTION_COMPONENT_TYPES[Number(component.componenttype)] || `Component type ${component.componenttype}`, schemaName: component.displayName || component.logicalName || component.objectid || '' })),
+    connectionReferences: connectionReferences.filter((reference) => reference?.logicalName && reference.connectorId),
+    environmentVariables: environmentVariables.filter((variable) => variable?.schemaName),
+  };
 }
 
 function requireImportPackage(id) {
@@ -3744,22 +3788,26 @@ async function analyzeSolutionZip(bytes) {
   const zip = await JSZip.loadAsync(bytes);
   const xmlFiles = Object.values(zip.files).filter((file) => !file.dir && file.name.toLowerCase().endsWith('.xml'));
   const xmlRoots = [];
+  const xmlTexts = [];
   for (const file of xmlFiles) {
     try {
-      xmlRoots.push(xmlParser.parse(await file.async('text')));
+      const text = await file.async('text');
+      xmlTexts.push(text);
+      xmlRoots.push(xmlParser.parse(text));
     } catch {
       // Ignore non-standard XML entries in the package.
     }
   }
 
   return {
-    solution: findSolutionMetadata(xmlRoots),
-    connectionReferences: extractConnectionReferences(xmlRoots),
-    environmentVariables: extractEnvironmentVariables(xmlRoots),
+    solution: findSolutionMetadata(xmlRoots, xmlTexts),
+    components: extractSolutionComponents(xmlTexts),
+    connectionReferences: extractConnectionReferences(xmlRoots, xmlTexts),
+    environmentVariables: extractEnvironmentVariables(xmlRoots, xmlTexts),
   };
 }
 
-function findSolutionMetadata(xmlRoots) {
+function findSolutionMetadata(xmlRoots, xmlTexts = []) {
   for (const root of xmlRoots) {
     const uniqueName = findFirstField(root, ['UniqueName', 'uniquename']);
     if (uniqueName) {
@@ -3770,10 +3818,62 @@ function findSolutionMetadata(xmlRoots) {
       };
     }
   }
-  return {};
+  return { uniqueName: findXmlTagText(xmlTexts, 'UniqueName'), friendlyName: findXmlTagText(xmlTexts, 'FriendlyName') || findXmlTagText(xmlTexts, 'LocalizedName'), version: findXmlTagText(xmlTexts, 'Version') };
 }
 
-function extractConnectionReferences(xmlRoots) {
+function extractSolutionComponents(xmlTexts) {
+  const found = new Map();
+  for (const text of xmlTexts) {
+    for (const attributes of findXmlTagAttributes(text, 'RootComponent')) {
+      const type = xmlAttribute(attributes, 'type');
+      const schemaName = xmlAttribute(attributes, 'schemaName') || xmlAttribute(attributes, 'id');
+      if (type || schemaName) {
+        found.set(`${type}:${schemaName}`, { type: String(type || ''), typeName: SOLUTION_COMPONENT_TYPES[Number(type)] || `Component type ${type || 'unknown'}`, schemaName: String(schemaName || '') });
+      }
+    }
+  }
+  return [...found.values()].sort((left, right) => `${left.typeName}:${left.schemaName}`.localeCompare(`${right.typeName}:${right.schemaName}`));
+}
+
+function findXmlTagText(xmlTexts, tagName) {
+  const escapedName = String(tagName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`<${escapedName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapedName}\\s*>`, 'i');
+  for (const text of xmlTexts) {
+    const match = pattern.exec(text);
+    if (match) {
+      return String(match[1]).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, '').trim();
+    }
+  }
+  return '';
+}
+
+function findXmlTagAttributes(text, tagName) {
+  const escapedName = String(tagName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [...String(text).matchAll(new RegExp(`<${escapedName}\\b([^>]*)>`, 'gi'))].map((match) => match[1]);
+}
+
+function findXmlElements(text, tagName) {
+  const escapedName = String(tagName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`<${escapedName}\\b([^>]*?)(?:\\/\\s*>|>([\\s\\S]*?)<\\/${escapedName}\\s*>)`, 'gi');
+  return [...String(text).matchAll(pattern)].map((match) => ({ attributes: match[1] || '', body: match[2] || '' }));
+}
+
+function xmlElementField(element, name) {
+  const attribute = xmlAttribute(element.attributes, name);
+  return decodeXmlText(attribute || findXmlTagText([element.body], name));
+}
+
+function decodeXmlText(value) {
+  return String(value || '').replace(/&quot;/gi, '"').replace(/&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&');
+}
+
+function xmlAttribute(attributes, name) {
+  const escapedName = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`\\b${escapedName}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i').exec(String(attributes));
+  return match ? match[2].trim() : '';
+}
+
+function extractConnectionReferences(xmlRoots, xmlTexts = []) {
   const found = new Map();
   for (const node of walkObjects(xmlRoots)) {
     const logicalName = findFirstField(node, ['connectionreferencelogicalname', 'ConnectionReferenceLogicalName', 'LogicalName']);
@@ -3788,10 +3888,19 @@ function extractConnectionReferences(xmlRoots) {
       connectorId,
     });
   }
+  for (const text of xmlTexts) {
+    for (const element of findXmlElements(text, 'connectionreference')) {
+      const logicalName = xmlElementField(element, 'connectionreferencelogicalname') || xmlElementField(element, 'logicalname');
+      const connectorId = xmlElementField(element, 'connectorid');
+      if (logicalName && connectorId) {
+        found.set(logicalName, { logicalName, displayName: xmlElementField(element, 'connectionreferencedisplayname') || xmlElementField(element, 'displayname') || logicalName, connectorId });
+      }
+    }
+  }
   return [...found.values()].sort((left, right) => left.displayName.localeCompare(right.displayName));
 }
 
-function extractEnvironmentVariables(xmlRoots) {
+function extractEnvironmentVariables(xmlRoots, xmlTexts = []) {
   const found = new Map();
   for (const node of walkObjects(xmlRoots)) {
     const schemaName = findFirstField(node, ['SchemaName', 'schemaname']);
@@ -3812,6 +3921,18 @@ function extractEnvironmentVariables(xmlRoots) {
       defaultValue: defaultValue || current.defaultValue || '',
       value: value || current.value || defaultValue || '',
     });
+  }
+  for (const text of xmlTexts) {
+    for (const tagName of ['environmentvariabledefinition', 'environmentvariable']) {
+      for (const element of findXmlElements(text, tagName)) {
+        const schemaName = xmlElementField(element, 'schemaname');
+        if (!isValidEnvironmentVariableSchemaName(schemaName)) continue;
+        const current = found.get(schemaName) || { schemaName };
+        const defaultValue = xmlElementField(element, 'defaultvalue');
+        const value = xmlElementField(element, 'value');
+        found.set(schemaName, { ...current, schemaName, displayName: xmlElementField(element, 'displayname') || current.displayName || schemaName, type: normalizeEnvironmentVariableType(xmlElementField(element, 'type') || current.type), defaultValue: defaultValue || current.defaultValue || '', value: value || current.value || defaultValue || '' });
+      }
+    }
   }
   return [...found.values()].sort((left, right) => left.displayName.localeCompare(right.displayName));
 }
@@ -6365,6 +6486,9 @@ function getReportTrendDateRange(filters = {}) {
   }
   if (range === '7d') {
     return { range, startDate: toDateOnlyString(addDays(today, -6)), endDate: toDateOnlyString(today) };
+  }
+  if (range === '28d') {
+    return { range, startDate: toDateOnlyString(addDays(today, -27)), endDate: toDateOnlyString(today) };
   }
   if (range === '365d') {
     return { range, startDate: toDateOnlyString(addDays(today, -364)), endDate: toDateOnlyString(today) };

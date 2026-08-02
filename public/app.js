@@ -2815,6 +2815,7 @@ function buildAiRollingCreditChart(table, range, options) {
   if (!rows.length) {
     return null;
   }
+  const isMonthRange = String(range?.range || '').toLowerCase() === 'month';
   const environments = chartEnvironmentOptions(rows);
   const selectedEnvironmentIds = selectedReportChartEnvironmentIds(options.id, environments);
   const filteredRows = filterTrendRowsByEnvironment(rows, selectedEnvironmentIds);
@@ -2836,12 +2837,15 @@ function buildAiRollingCreditChart(table, range, options) {
     }
     actualData[index] = latestTotal;
   }
-  const predictionData = predictedUsageData(dateLabels, actualData, lastActualIndex);
-  const forecastEndDate = monthEndDateKey(dateLabels[lastActualIndex]) || dateLabels[dateLabels.length - 1];
+  const forecastEndDate = isMonthRange
+    ? monthEndDateKey(dateLabels[lastActualIndex]) || dateLabels[dateLabels.length - 1]
+    : '';
   return withReportChartSettings({
     id: options.id,
     title: options.title,
-    subtitle: `Rolling total with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`,
+    subtitle: isMonthRange
+      ? `Rolling total with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`
+      : 'Rolling total over selected range',
     type: 'line',
     labels: dateLabels.map(formatDateLabel),
     unit: 'Credits',
@@ -2857,13 +2861,13 @@ function buildAiRollingCreditChart(table, range, options) {
         pointHoverRadius: 5,
         borderWidth: 3,
       }),
-      reportDataset('Forecast usage', predictionData, options.color, {
+      ...(isMonthRange ? [reportDataset('Forecast usage', predictedUsageData(dateLabels, actualData, lastActualIndex), options.color, {
         borderDash: [6, 5],
         borderWidth: 2,
         pointRadius: 0,
         pointHoverRadius: 4,
         tension: 0.2,
-      }),
+      })] : []),
     ],
   });
 }
@@ -3242,6 +3246,9 @@ function trendDateLabels(range, rows) {
 
 function trendDateLabelsWithMonthForecast(range, rows) {
   const dates = trendDateLabels(range, rows);
+  if (String(range?.range || '').toLowerCase() !== 'month') {
+    return dates;
+  }
   const lastActualDateKey = [...new Set(rows.map(trendRowDate).filter(Boolean))].sort().at(-1) || '';
   const lastActualDate = parseDateOnlyValue(lastActualDateKey);
   const today = new Date();
@@ -6738,8 +6745,18 @@ async function deploySolution() {
     },
   });
   setImportPackage(result);
-  await loadImportEnvironments();
   activateTab('import');
+
+  // The package is ready to import even when optional target preparation (for
+  // example, listing Power Platform connections) is not authorized.  Switch
+  // immediately so a failed mapping lookup cannot hide the cached ZIP.
+  try {
+    await loadImportEnvironments();
+  } catch (error) {
+    console.warn('Import target preparation was unavailable.', error);
+    renderImportEnvironments();
+    toast('Solution is ready to import. Target connection mappings could not be loaded yet.', 'warning');
+  }
   toast('Solution cached for deployment.');
 }
 
@@ -6779,11 +6796,16 @@ function renderImportPackage() {
 
   const analysis = state.importPackage.analysis || {};
   const sourceSolutionUrl = makePowerAutomateSolutionUrl(state.importPackage.sourceEnvironmentName, state.importPackage.sourceSolutionId);
+  const components = analysis.components || [];
+  const componentSummary = components.length
+    ? `<details class="import-components"><summary>${components.length} solution component${components.length === 1 ? '' : 's'} to update</summary><ul>${components.map((component) => `<li>${escapeHtml(component.typeName)}${component.schemaName ? `: ${escapeHtml(component.schemaName)}` : ''}</li>`).join('')}</ul></details>`
+    : '<p class="muted">No root components were declared in this package manifest.</p>';
   el.importPackageSummary.innerHTML = `
     <h4>${escapeHtml(state.importPackage.filename)}</h4>
     <p>${escapeHtml(analysis.solution?.uniqueName || 'Solution package')}</p>
     ${sourceSolutionUrl ? `<p><a href="${escapeAttr(sourceSolutionUrl)}" target="_blank" rel="noopener noreferrer">Open source solution</a></p>` : ''}
     <p class="muted">${analysis.connectionReferences?.length || 0} connection reference${(analysis.connectionReferences?.length || 0) === 1 ? '' : 's'} | ${analysis.environmentVariables?.length || 0} environment variable${(analysis.environmentVariables?.length || 0) === 1 ? '' : 's'}</p>
+    ${componentSummary}
   `;
   updateImportButtons();
 }

@@ -30,6 +30,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
+    "test": "node --test testing/solution-package-analysis.test.mjs",
     "install-startup": "node scripts/background-manager.mjs install",
     "remove-startup": "node scripts/background-manager.mjs uninstall"
   },
