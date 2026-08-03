@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PDAC - Power DevBox Admin Center",
-  "version": "0.1.0",
+  "version": "0.6.2",
   "description": "Power Platform admin reports and administration, running entirely in your browser. No server, no install.",
   "minimum_chrome_version": "114",
   "action": {
@@ -13,14 +13,12 @@
   },
   "permissions": [
     "storage",
-    "tabs",
     "alarms",
-    "downloads"
+    "tabs"
   ],
   "host_permissions": [
     "https://login.microsoftonline.com/*",
     "https://*.dynamics.com/*",
-    "https://service.powerapps.com/*",
     "https://api.powerapps.com/*",
     "https://api.bap.microsoft.com/*",
     "https://api.powerplatform.com/*"

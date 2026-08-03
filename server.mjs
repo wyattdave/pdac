@@ -814,6 +814,7 @@ async function handleApi(req, res) {
       range: url.searchParams.get('range') || '28d',
       start: url.searchParams.get('start') || '',
       end: url.searchParams.get('end') || '',
+      latestOnly: url.searchParams.get('latestOnly') === 'true',
     }));
     return;
   }
@@ -5970,7 +5971,30 @@ async function listReportTrendSnapshots(filters = {}) {
   const accountHomeId = String(filters.accountHomeId || '').trim();
   const tables = [];
   for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
-    const result = db.prepare(`
+    const result = filters.latestOnly ? db.prepare(`
+      WITH ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(
+            NULLIF(environment_id, ''),
+            NULLIF(environment_url, ''),
+            NULLIF(environment_display_name, ''),
+            CAST(id AS TEXT)
+          )
+          ORDER BY collected_at DESC, date_ran DESC, id DESC
+        ) AS snapshot_rank
+        FROM ${quoteSqlIdentifier(definition.tableName)}
+        WHERE account_home_id = ?
+          AND date_ran >= ?
+          AND date_ran <= ?
+      )
+      SELECT * FROM ranked
+      WHERE snapshot_rank = 1
+      ORDER BY collected_at, id
+    `).all(
+      accountHomeId,
+      dateRange.startDate,
+      dateRange.endDate,
+    ) : db.prepare(`
       SELECT *
       FROM ${quoteSqlIdentifier(definition.tableName)}
       WHERE account_home_id = ?

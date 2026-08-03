@@ -283,6 +283,8 @@ const state = {
     trendCharts: [],
     chartDashboardData: null,
     dashboardData: null,
+    scheduleWatchTimer: 0,
+    scheduleCompletionKey: '',
   },
   automatedReportSchedule: null,
   sqlTables: [],
@@ -918,6 +920,7 @@ loadSqlTables().catch((error) => {
 async function loadAutomatedReportScheduleSettings() {
   const schedule = await api('/api/automated-reports/schedule', { quiet: true });
   state.automatedReportSchedule = schedule;
+  state.automatedReports.scheduleCompletionKey = automatedReportScheduleCompletionKey(schedule);
   applyAutomatedReportSchedule(schedule);
   el.automatedReportsRunOnLoad.checked = Boolean(schedule.enabled);
   localStorage.setItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY, schedule.enabled ? 'true' : 'false');
@@ -975,10 +978,14 @@ async function loadStatus() {
     el.status.textContent = authState.accounts?.length ? 'Select an account.' : `Region: ${authState.region}`;
     return;
   }
-  await loadCachedAutomatedReportDownloads().catch((error) => {
-    console.warn('Unable to restore cached report downloads.', error);
-  });
-  await loadEnvironments({ silentAutoSelect: true });
+  watchForTodaysAutomatedReports();
+  await Promise.all([
+    loadCachedReportDashboards(),
+    loadCachedAutomatedReportDownloads().catch((error) => {
+      console.warn('Unable to restore cached report downloads.', error);
+    }),
+    loadEnvironments({ silentAutoSelect: true }),
+  ]);
   if (state.selectedEnvironment.orgUrl) {
     el.status.textContent = `Using ${state.selectedEnvironment.orgUrl}`;
     await loadBusinessUnits().catch((error) => {
@@ -1051,7 +1058,14 @@ async function switchAccount() {
     : 'Account switched. Select an environment.';
   toast('Account switched.');
   clearEnvironmentOptions();
-  await loadEnvironments();
+  watchForTodaysAutomatedReports();
+  await Promise.all([
+    loadEnvironments(),
+    loadCachedReportDashboards(),
+    loadCachedAutomatedReportDownloads().catch((error) => {
+      console.warn('Unable to restore cached report downloads.', error);
+    }),
+  ]);
 }
 
 function renderAccounts(accounts, selectedAccountHomeId) {
@@ -1412,6 +1426,12 @@ function activateTab(name) {
     loadCachedAutomatedReportDownloads().catch((error) => {
       console.warn('Unable to refresh cached report downloads.', error);
     });
+  }
+  if (name === 'charts' && hasSelectedAccount() && !state.automatedReports.chartDashboardData?.rows?.length) {
+    loadCachedChartsDashboard();
+  }
+  if (name === 'trends' && hasSelectedAccount() && !state.automatedReports.dashboardData?.rows?.length) {
+    loadCachedReportsDashboard();
   }
 }
 
@@ -1888,6 +1908,8 @@ async function syncAutomatedReportSchedule(settings) {
     quiet: true,
   });
   state.automatedReportSchedule = savedSchedule;
+  state.automatedReports.scheduleCompletionKey = automatedReportScheduleCompletionKey(savedSchedule);
+  watchForTodaysAutomatedReports();
 }
 
 function scheduledReportDateRange(value = {}) {
@@ -2280,10 +2302,58 @@ async function loadCachedAutomatedReportDownloads() {
     localStorage.setItem(automatedReportAutoDownloadDateKey(groupKey), today);
   }
   renderAutomatedReportStatus();
+}
+
+async function loadCachedReportDashboards() {
   await Promise.all([
     loadCachedChartsDashboard(),
     loadCachedReportsDashboard(),
   ]);
+}
+
+function watchForTodaysAutomatedReports() {
+  clearTimeout(state.automatedReports.scheduleWatchTimer);
+  const accountHomeId = resolveRequestAccountId();
+  if (!accountHomeId) return;
+
+  const poll = async () => {
+    if (resolveRequestAccountId() !== accountHomeId) return;
+    try {
+      const schedule = await api('/api/automated-reports/schedule', { quiet: true });
+      if (schedule.accountHomeId && schedule.accountHomeId !== accountHomeId) return;
+      state.automatedReportSchedule = schedule;
+      const today = formatDateInputValue(new Date());
+      const groups = Object.values(schedule.groups || {}).filter((group) => Array.isArray(group?.environments) && group.environments.length);
+      const pending = Boolean(schedule.enabled) && groups.some((group) => group.lastRunDate !== today);
+      const completionKey = automatedReportScheduleCompletionKey(schedule);
+      if (completionKey !== state.automatedReports.scheduleCompletionKey) {
+        const hadPreviousState = Boolean(state.automatedReports.scheduleCompletionKey);
+        state.automatedReports.scheduleCompletionKey = completionKey;
+        if (hadPreviousState) {
+          await Promise.all([
+            loadCachedReportDashboards(),
+            loadCachedAutomatedReportDownloads().catch((error) => {
+              console.warn('Unable to refresh cached report downloads.', error);
+            }),
+          ]);
+        }
+      }
+      if (pending) {
+        state.automatedReports.scheduleWatchTimer = setTimeout(poll, 2000);
+      }
+    } catch (error) {
+      console.warn('Unable to watch scheduled report completion.', error);
+      state.automatedReports.scheduleWatchTimer = setTimeout(poll, 5000);
+    }
+  };
+  poll();
+}
+
+function automatedReportScheduleCompletionKey(schedule = {}) {
+  const groups = Object.entries(schedule.groups || {})
+    .filter(([, group]) => Array.isArray(group?.environments) && group.environments.length)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `${schedule.accountHomeId || ''}|${groups.map(([name, group]) => `${name}:${group.lastRunDate || ''}:${group.lastCompletedAt || ''}`).join('|')}`;
 }
 
 function automatedReportAutoDownloadDateKey(groupKey) {
@@ -2291,10 +2361,12 @@ function automatedReportAutoDownloadDateKey(groupKey) {
 }
 
 async function loadCachedReportsDashboard() {
+  const accountHomeId = resolveRequestAccountId();
+  if (!accountHomeId) return;
   try {
     el.reportsStatus.textContent = 'Loading stored trends...';
     const params = new URLSearchParams({
-      accountHomeId: resolveRequestAccountId(),
+      accountHomeId,
       range: el.trendRange?.value || 'month',
     });
     if (params.get('range') === 'custom') {
@@ -2302,6 +2374,7 @@ async function loadCachedReportsDashboard() {
       params.set('end', el.trendEnd?.value || '');
     }
     const data = await api(`/api/report-trends?${params.toString()}`, { quiet: true });
+    if (resolveRequestAccountId() !== accountHomeId) return;
     if (!Array.isArray(data.rows) || !data.rows.length) {
       state.automatedReports.dashboardData = data;
       updateReportsTabAvailability();
@@ -2320,10 +2393,13 @@ async function loadCachedReportsDashboard() {
 }
 
 async function loadCachedChartsDashboard() {
+  const accountHomeId = resolveRequestAccountId();
+  if (!accountHomeId) return;
   try {
     el.chartsStatus.textContent = 'Preparing charts from local trend data...';
-    const params = new URLSearchParams({ accountHomeId: resolveRequestAccountId(), range: '730d' });
+    const params = new URLSearchParams({ accountHomeId, range: '730d', latestOnly: 'true' });
     const stored = await api(`/api/report-trends?${params.toString()}`, { quiet: true });
+    if (resolveRequestAccountId() !== accountHomeId) return;
     const data = buildLatestSqlChartsDashboard(stored);
     if (!Array.isArray(data.rows) || !data.rows.length) {
       updateChartsTabAvailability();

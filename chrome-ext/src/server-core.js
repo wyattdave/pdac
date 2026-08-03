@@ -731,6 +731,7 @@ async function handleApi(req, res) {
       range: url.searchParams.get('range') || '28d',
       start: url.searchParams.get('start') || '',
       end: url.searchParams.get('end') || '',
+      latestOnly: url.searchParams.get('latestOnly') === 'true',
     }));
     return;
   }
@@ -4713,31 +4714,17 @@ async function getRolePrivileges(roleId) {
 }
 
 async function listEnvironments() {
-  const attempts = [
-    {
-      url: 'https://api.powerplatform.com/powerplatform/environments?api-version=2022-03-01-preview',
-      authResource: POWER_PLATFORM_RESOURCE,
-    },
-    {
-      url: 'https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2020-10-01',
-      authResource: SERVICE_RESOURCE,
-    },
-  ];
-
-  const errors = [];
-  for (const attempt of attempts) {
-    try {
-      const response = await apiHttpRequest('GET', attempt.url, { authResource: attempt.authResource });
-      return {
-        value: normalizeEnvironments(response.data),
-        source: attempt.url,
-      };
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : String(error));
-    }
+  const url = 'https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments?api-version=2020-10-01';
+  try {
+    const response = await apiHttpRequest('GET', url, { authResource: SERVICE_RESOURCE });
+    return {
+      value: normalizeEnvironments(response.data),
+      source: url,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new HttpError(502, `Could not list environments. Try signing in again or switching accounts. ${message}`);
   }
-
-  throw new HttpError(502, `Could not list environments. Try signing in again or switching accounts. ${errors.join(' | ')}`);
 }
 
 function normalizeEnvironments(data) {
@@ -5616,7 +5603,22 @@ async function listReportTrendSnapshots(filters = {}) {
         || String(row.id);
       latestRows.set(`${row.date_ran}:${environmentKey}`, row);
     }
-    const rows = [...latestRows.values()].map((row) => ({
+    let selectedRows = [...latestRows.values()];
+    if (filters.latestOnly) {
+      const latestByEnvironment = new Map();
+      for (const row of selectedRows) {
+        const environmentKey = String(row.environment_id || '').trim()
+          || String(row.environment_url || '').trim()
+          || String(row.environment_display_name || '').trim()
+          || String(row.id);
+        const existing = latestByEnvironment.get(environmentKey);
+        if (!existing || `${row.collected_at}:${row.date_ran}:${row.id}` > `${existing.collected_at}:${existing.date_ran}:${existing.id}`) {
+          latestByEnvironment.set(environmentKey, row);
+        }
+      }
+      selectedRows = [...latestByEnvironment.values()];
+    }
+    const rows = selectedRows.map((row) => ({
       id: row.id,
       dateRan: row.date_ran,
       collectedAt: row.collected_at,

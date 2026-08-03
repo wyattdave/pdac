@@ -22,6 +22,10 @@ When a newer version is downloaded, replace the local files and select **Reload*
 
 Scheduled reports use a five-minute browser alarm and catch up when the browser starts. The browser may close the extension service worker between checks, but Chrome or Edge must remain running for scheduled work to execute. Reports cannot run while the browser itself is fully closed.
 
+### Extension permissions
+
+PDAC requires local storage, scheduling, limited tab access for the Entra sign-in redirect, and access to the Microsoft Power Platform endpoints it administers. These are required because signing in and making authenticated Power Platform API requests are core functionality. Report downloads use Chrome's normal browser download mechanism and do not require the `downloads` permission. The extension does not request permission to access every website, inject into pages, read cookies, or use the Downloads API.
+
 Report files and trend rows are stored in IndexedDB. Schedule, account, and authentication data are stored in extension-local storage. All runtime libraries are included in the extension; it does not load executable code from a CDN.
 
 PDAC stores Microsoft Entra refresh tokens in `chrome.storage.local`. Normal web pages cannot read that storage, but it has the same local-user trust boundary as other credentials in the browser profile: anyone controlling the signed-in OS profile can access or remove the extension's local data.
