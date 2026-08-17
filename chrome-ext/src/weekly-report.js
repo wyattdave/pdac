@@ -204,19 +204,19 @@ main{max-width:1500px;margin:auto;padding:28px}
 h1,h2,h3{margin:0 0 8px}h1{font-size:28px}h2{margin-top:30px;font-size:22px}h3{font-size:17px}
 .muted{color:#64748b;margin:4px 0}
 .panel{background:#fff;border:1px solid #dbe3ee;border-radius:14px;padding:20px;margin-top:16px;box-shadow:0 5px 18px rgba(15,23,42,.05)}
-.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,.34fr);gap:18px;align-items:start}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,.34fr);gap:18px;align-items:stretch}
 .table-panel{display:grid;gap:8px;min-width:0}.table-toolbar{display:flex;justify-content:flex-end}.change-filter{align-items:center;display:inline-flex;gap:6px;font-size:12px}.change-filter select{border:1px solid #cbd5e1;border-radius:6px;padding:5px 24px 5px 7px}.chart-stack{display:grid;gap:14px;min-width:0}
-.table-wrap{border:1px solid #dbe3ee;border-radius:10px;max-height:460px;min-width:0;overflow:auto}
+.table-wrap{border:1px solid #dbe3ee;border-radius:10px;height:0;max-height:100%;min-height:100%;min-width:0;overflow:auto}
 table{border-collapse:collapse;font-size:11px;min-width:760px;table-layout:fixed;width:100%}
-col.col-solution{width:23%}col.col-type{width:11%}col.col-count{width:7.5%}col.col-event{width:21%}
+col.col-solution{width:34%}col.col-count{width:7.5%}col.col-event{width:21%}
 th,td{text-align:left;padding:7px 5px;border-bottom:1px solid #e7edf5;vertical-align:top}
 th{font-size:10px;text-transform:uppercase;letter-spacing:.02em;background:#f8fafc;color:#475569;position:sticky;top:0;z-index:2}
 th.num,td.num{text-align:center;vertical-align:middle}
 .sort-button{align-items:center;background:none;border:0;color:inherit;cursor:pointer;display:inline-flex;font:inherit;gap:3px;justify-content:flex-start;padding:0;text-align:left;text-transform:inherit;width:100%}.sort-button:after{content:'↕';font-size:11px;opacity:.65}th.num .sort-button{justify-content:center;text-align:center}th[aria-sort=ascending] .sort-button:after{content:'↑';opacity:1}th[aria-sort=descending] .sort-button:after{content:'↓';opacity:1}
-.solution-toggle{border:0;background:none;color:#0f5ea8;font:inherit;font-weight:700;padding:0;cursor:pointer;text-align:left}
+.solution-toggle{border:0;background:none;color:#0f5ea8;font:inherit;font-weight:700;max-width:100%;min-width:0;overflow-wrap:anywhere;padding:0;cursor:pointer;text-align:left;word-break:break-word}
 .solution-toggle:before{content:'▸';display:inline-block;margin-right:7px;transition:transform .15s}.solution-toggle[aria-expanded=true]:before{transform:rotate(90deg)}
 .change-indicators{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.change-indicator{border:1px solid;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.04em;line-height:1;padding:3px 6px;text-transform:uppercase}.change-indicator.deployed{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8}.change-indicator.updated{background:#fef3c7;border-color:#fcd34d;color:#92400e}
-.solution-meta{color:#64748b;display:grid;font-size:12px;gap:3px;margin-top:7px}
+.solution-meta{color:#64748b;display:grid;font-size:12px;gap:3px;margin-top:7px}.solution-version-type{display:flex;flex-wrap:wrap;gap:4px 12px}
 small{display:block;color:#64748b;margin-top:3px}
 .component-row td{background:#f8fafc;padding:14px 20px}
 .component-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;margin:0;padding:0;list-style:none}
@@ -227,9 +227,9 @@ small{display:block;color:#64748b;margin-top:3px}
 .legend{display:flex;gap:18px;margin:10px 0 0;font-size:13px}.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}
 .empty{padding:24px;text-align:center;color:#64748b}.summary{display:flex;gap:20px;flex-wrap:wrap}.metric{background:#eef5ff;border-radius:10px;padding:12px 16px}.metric strong{display:block;font-size:24px}
 .actions{display:flex;justify-content:flex-end;margin-bottom:10px}button.print{background:#155eef;color:white;border:0;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer}
-body.printing .table-wrap{max-height:none;overflow:visible}
-@media(max-width:900px){.grid{grid-template-columns:1fr}main{padding:14px}}
-@media print{body{background:#fff}main{max-width:none;padding:0}.panel{box-shadow:none;break-inside:auto}.actions,.table-toolbar{display:none}.table-wrap{max-height:none;overflow:visible}th{position:static}}
+body.printing .table-wrap{height:auto;max-height:none;min-height:0;overflow:visible}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.table-wrap{height:460px;max-height:460px;min-height:0}main{padding:14px}}
+@media print{body{background:#fff}main{max-width:none;padding:0}.panel{box-shadow:none;break-inside:auto}.actions,.table-toolbar{display:none}.table-wrap{height:auto;max-height:none;min-height:0;overflow:visible}th{position:static}}
 </style>
 </head>
 <body><main>
@@ -331,12 +331,12 @@ ${standaloneComparisonChart(comparison)}</section>`;
 
 function standaloneReportGroup(records, deployedMix, updatedMix, prefix) {
   const tableId = `${prefix}-table`;
-  return `<h3 style="margin-top:24px">Solutions</h3><div class="grid"><div class="table-panel"><div class="table-toolbar"><label class="change-filter">Show <select data-change-filter data-table="${escapeHtml(tableId)}"><option value="all">All</option><option value="deployed">Deployed</option><option value="updated">Updated</option></select></label></div><div class="table-wrap">${standaloneTable(records, tableId)}</div></div><div class="chart-stack">${standalonePrimaryChart(deployedMix, 'Deployed solutions by primary component')}${standalonePrimaryChart(updatedMix, 'Updated solutions by primary component')}</div></div>`;
+  return `<h3 style="margin-top:24px">Solutions</h3><div class="table-toolbar"><label class="change-filter">Show <select data-change-filter data-table="${escapeHtml(tableId)}"><option value="all">All</option><option value="deployed">Deployed</option><option value="updated">Updated</option></select></label></div><div class="grid"><div class="table-wrap">${standaloneTable(records, tableId)}</div><div class="chart-stack">${standalonePrimaryChart(deployedMix, 'Deployed solutions by primary component')}${standalonePrimaryChart(updatedMix, 'Updated solutions by primary component')}</div></div>`;
 }
 
 function standaloneTable(records, tableId) {
   if (!records.length) return '<div class="empty">No solutions in this period.</div>';
-  return `<table id="${escapeHtml(tableId)}">${standaloneTableColgroup()}<thead><tr>${standaloneSortableHeader('Solution', 'solution')}${standaloneSortableHeader('Type', 'type')}${standaloneSortableHeader('Agent', 'agent', true)}${standaloneSortableHeader('Canvas', 'canvas', true)}${standaloneSortableHeader('Code', 'code', true)}${standaloneSortableHeader('Model driven', 'model', true)}${standaloneSortableHeader('Flow', 'flow', true)}${standaloneSortableHeader('Table', 'table', true)}${standaloneSortableHeader('Event', 'event', true)}</tr></thead><tbody>${records.map((record, index) => {
+  return `<table id="${escapeHtml(tableId)}">${standaloneTableColgroup()}<thead><tr>${standaloneSortableHeader('Solution', 'solution')}${standaloneSortableHeader('Agent', 'agent', true)}${standaloneSortableHeader('Canvas', 'canvas', true)}${standaloneSortableHeader('Code', 'code', true)}${standaloneSortableHeader('Model driven', 'model', true)}${standaloneSortableHeader('Flow', 'flow', true)}${standaloneSortableHeader('Table', 'table', true)}${standaloneSortableHeader('Event', 'event', true)}</tr></thead><tbody>${records.map((record, index) => {
     const counts = { ...emptyWeeklyComponentCounts(), ...(record.componentCounts || {}) };
     const id = `${safeId(tableId)}-detail-${safeId(record.eventType)}-${safeId(record.environmentId)}-${safeId(record.solutionId)}-${index}`;
     const components = record.components || [];
@@ -344,7 +344,7 @@ function standaloneTable(records, tableId) {
     const solutionName = record.solutionName || record.uniqueName || 'Unnamed solution';
     const changes = Array.isArray(record.changeIndicators) ? record.changeIndicators.join(' ') : '';
     const eventSort = Date.parse(record.eventAt || '');
-    return `<tr data-record data-detail-id="${id}" data-changes="${escapeHtml(changes)}" data-sort-solution="${escapeHtml(solutionName.toLocaleLowerCase())}" data-sort-type="${escapeHtml(String(record.primaryComponent || 'Other').toLocaleLowerCase())}" data-sort-agent="${Number(counts.agents || 0)}" data-sort-canvas="${Number(counts.canvasApps || 0)}" data-sort-code="${Number(counts.codeApps || 0)}" data-sort-model="${Number(counts.modelDrivenApps || 0)}" data-sort-flow="${Number(counts.flows || 0)}" data-sort-table="${Number(counts.tables || 0)}" data-sort-event="${Number.isFinite(eventSort) ? eventSort : 0}"><td><button class="solution-toggle" type="button" data-detail="${id}" aria-expanded="false">${escapeHtml(solutionName)}</button>${standaloneChangeIndicators(record)}<div class="solution-meta">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}</div></td><td>${escapeHtml(record.primaryComponent || 'Other')}</td>${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="num">${Number(counts[key] || 0)}</td>`).join('')}<td>${escapeHtml(formatDateTime(record.eventAt))}</td></tr><tr id="${id}" class="component-row" hidden><td colspan="9">${standaloneComponents(components)}</td></tr>`;
+    return `<tr data-record data-detail-id="${id}" data-changes="${escapeHtml(changes)}" data-sort-solution="${escapeHtml(solutionName.toLocaleLowerCase())}" data-sort-agent="${Number(counts.agents || 0)}" data-sort-canvas="${Number(counts.canvasApps || 0)}" data-sort-code="${Number(counts.codeApps || 0)}" data-sort-model="${Number(counts.modelDrivenApps || 0)}" data-sort-flow="${Number(counts.flows || 0)}" data-sort-table="${Number(counts.tables || 0)}" data-sort-event="${Number.isFinite(eventSort) ? eventSort : 0}"><td><button class="solution-toggle" type="button" data-detail="${id}" aria-expanded="false">${escapeHtml(solutionName)}</button>${standaloneChangeIndicators(record)}<div class="solution-meta"><span class="solution-version-type">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}<span>Type: ${escapeHtml(record.primaryComponent || 'Other')}</span></span>${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}</div></td>${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="num">${Number(counts[key] || 0)}</td>`).join('')}<td>${escapeHtml(formatDateTime(record.eventAt))}</td></tr><tr id="${id}" class="component-row" hidden><td colspan="8">${standaloneComponents(components)}</td></tr>`;
   }).join('')}</tbody></table>`;
 }
 
@@ -360,7 +360,7 @@ function standaloneChangeIndicators(record) {
 }
 
 function standaloneTableColgroup() {
-  return `<colgroup><col class="col-solution"><col class="col-type">${Array.from({ length: 6 }, () => '<col class="col-count">').join('')}<col class="col-event"></colgroup>`;
+  return `<colgroup><col class="col-solution">${Array.from({ length: 6 }, () => '<col class="col-count">').join('')}<col class="col-event"></colgroup>`;
 }
 
 function standaloneComponents(components) {

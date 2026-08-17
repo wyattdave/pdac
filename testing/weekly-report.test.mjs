@@ -148,9 +148,11 @@ test('defaults history to three months and exports one self-contained HTML page'
   assert.match(html, /Weekly &lt;solution&gt;/);
   assert.match(html, /<style>[\s\S]+<\/style>/);
   assert.match(html, /<script>[\s\S]+<\/script>/);
-  assert.match(html, /data-sort="type"[^>]*>Type<\/button>/);
+  assert.doesNotMatch(html, /data-sort="type"/);
   assert.doesNotMatch(html, /<th>Version<\/th>/);
   assert.match(html, /Version 1\.0\.0\.0/);
+  assert.match(html, /solution-version-type/);
+  assert.match(html, /Type: Canvas App/);
   assert.match(html, /change-indicator deployed[^>]*>Deployed</);
   assert.match(html, /change-indicator updated[^>]*>Updated</);
   assert.equal((html.match(/<colgroup>/g) || []).length, 2);
@@ -160,10 +162,14 @@ test('defaults history to three months and exports one self-contained HTML page'
   assert.match(html, /Updated solutions by primary component/);
   assert.match(html, /max-height:460px/);
   assert.match(html, /table\{[^}]*font-size:11px;[^}]*min-width:760px/);
-  assert.match(html, /col\.col-solution\{width:23%\}col\.col-type\{width:11%\}col\.col-count\{width:7\.5%\}col\.col-event\{width:21%\}/);
+  assert.match(html, /col\.col-solution\{width:34%\}col\.col-count\{width:7\.5%\}col\.col-event\{width:21%\}/);
+  assert.doesNotMatch(html, /col\.col-type/);
   assert.doesNotMatch(html, /min-width:1020px/);
   assert.match(html, /function printWeeklyReport\(\)/);
-  assert.match(html, /body\.printing \.table-wrap\{max-height:none;overflow:visible\}/);
+  assert.match(html, /\.grid\{[^}]*align-items:stretch/);
+  assert.match(html, /\.table-wrap\{[^}]*height:0;[^}]*max-height:100%;[^}]*min-height:100%/);
+  assert.match(html, /\.solution-toggle\{[^}]*overflow-wrap:anywhere/);
+  assert.match(html, /body\.printing \.table-wrap\{height:auto;max-height:none;min-height:0;overflow:visible\}/);
   assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)=/i);
 });
 
@@ -194,10 +200,11 @@ test('enabling weekly tracking triggers a full three-month load with visible pro
 
 test('extension weekly tables use the compact shared column proportions', () => {
   assert.match(extensionStyles, /\.weekly-report-table\s*\{[^}]*min-width:\s*760px;/s);
-  assert.match(extensionStyles, /\.weekly-col-solution\s*\{\s*width:\s*23%;\s*\}/);
-  assert.match(extensionStyles, /\.weekly-col-type\s*\{\s*width:\s*11%;\s*\}/);
+  assert.match(extensionStyles, /\.weekly-col-solution\s*\{\s*width:\s*34%;\s*\}/);
+  assert.doesNotMatch(extensionStyles, /\.weekly-col-type\s*\{/);
   assert.match(extensionStyles, /\.weekly-col-count\s*\{\s*width:\s*7\.5%;\s*\}/);
   assert.match(extensionStyles, /\.weekly-col-event\s*\{\s*width:\s*21%;\s*\}/);
+  assert.match(extensionStyles, /\.weekly-solution-button\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
 });
 
 test('weekly periods use one filterable sortable solution table with both charts alongside', () => {
@@ -206,11 +213,15 @@ test('weekly periods use one filterable sortable solution table with both charts
     assert.match(source, /data-weekly-change-filter/);
     assert.match(source, /<option value="all">All<\/option>/);
     assert.match(source, /function sortWeeklySolutionTable\(button\)/);
+    assert.doesNotMatch(source, /weeklySortableHeader\('Type'/);
+    assert.match(source, /weekly-solution-version-type/);
     assert.match(source, /weeklySortableHeader\('Event', 'event', true\)/);
     assert.match(source, /Deployed solutions by primary component/);
     assert.match(source, /Updated solutions by primary component/);
   }
   assert.match(extensionStyles, /\.weekly-chart-stack\s*\{[^}]*display:\s*grid;/s);
+  assert.match(extensionStyles, /\.weekly-report-layout\s*\{[^}]*align-items:\s*stretch;/s);
+  assert.match(extensionStyles, /\.weekly-table-wrap\s*\{[^}]*height:\s*0;[^}]*max-height:\s*100%;[^}]*min-height:\s*100%;/s);
   assert.match(nodeStyles, /\.weekly-sort-button::after\s*\{[^}]*content:\s*"\\2195";/s);
 });
 
@@ -219,7 +230,7 @@ test('Node UI and standalone download use the completed compact weekly report', 
   assert.match(nodeAppHtml, /id="weeklyReportPanel"[^>]+hidden/);
   assert.match(nodeAppScript, /async function openWeeklyReport\(\)[\s\S]+standardReportsContent\.hidden = true;[\s\S]+weeklyReportPanel\.hidden = false;/);
   assert.match(nodeStyles, /\.weekly-report-table\s*\{[^}]*min-width:\s*760px;/s);
-  assert.match(nodeStyles, /\.weekly-col-solution\s*\{\s*width:\s*23%;\s*\}/);
+  assert.match(nodeStyles, /\.weekly-col-solution\s*\{\s*width:\s*34%;\s*\}/);
   const model = buildWeeklyReportModel([event()], {
     selectedWeekStart: '2026-08-10',
     historyRange: historyDateRange('3m', '', '', new Date(2026, 7, 15)),

@@ -1093,7 +1093,7 @@ select:disabled {
 }
 
 .weekly-report-layout {
-  align-items: start;
+  align-items: stretch;
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(0, 1fr) minmax(230px, 0.34fr);
@@ -1108,7 +1108,9 @@ select:disabled {
 .weekly-table-wrap {
   border: 1px solid var(--line);
   border-radius: 8px;
-  max-height: 460px;
+  height: 0;
+  max-height: 100%;
+  min-height: 100%;
   min-width: 0;
   overflow: auto;
 }
@@ -1123,11 +1125,7 @@ select:disabled {
 }
 
 .weekly-col-solution {
-  width: 23%;
-}
-
-.weekly-col-type {
-  width: 11%;
+  width: 34%;
 }
 
 .weekly-col-count {
@@ -1216,6 +1214,12 @@ select:disabled {
   margin-top: 7px;
 }
 
+.weekly-solution-version-type {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
 .weekly-solution-button {
   align-items: start;
   background: transparent;
@@ -1226,8 +1230,12 @@ select:disabled {
   font-weight: 650;
   gap: 7px;
   min-height: 0;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   padding: 0;
   text-align: left;
+  word-break: break-word;
 }
 
 .weekly-solution-button::before {
@@ -2769,6 +2777,12 @@ select:disabled {
   .weekly-report-layout,
   .component-row {
     grid-template-columns: 1fr;
+  }
+
+  .weekly-table-wrap {
+    height: 460px;
+    max-height: 460px;
+    min-height: 0;
   }
 
   .weekly-report-actions,

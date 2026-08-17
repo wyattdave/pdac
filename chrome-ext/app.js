@@ -1376,7 +1376,7 @@ function renderWeeklySolutionTable(records, prefix, tableId) {
   }
   return `<table id="${escapeAttr(tableId)}" class="weekly-report-table">
     ${weeklyReportTableColgroup()}
-    <thead><tr>${weeklySortableHeader('Solution', 'solution')}${weeklySortableHeader('Type', 'type')}${weeklySortableHeader('Agent', 'agent', true)}${weeklySortableHeader('Canvas', 'canvas', true)}${weeklySortableHeader('Code', 'code', true)}${weeklySortableHeader('Model driven', 'model', true)}${weeklySortableHeader('Flow', 'flow', true)}${weeklySortableHeader('Table', 'table', true)}${weeklySortableHeader('Event', 'event', true)}</tr></thead>
+    <thead><tr>${weeklySortableHeader('Solution', 'solution')}${weeklySortableHeader('Agent', 'agent', true)}${weeklySortableHeader('Canvas', 'canvas', true)}${weeklySortableHeader('Code', 'code', true)}${weeklySortableHeader('Model driven', 'model', true)}${weeklySortableHeader('Flow', 'flow', true)}${weeklySortableHeader('Table', 'table', true)}${weeklySortableHeader('Event', 'event', true)}</tr></thead>
     <tbody>${records.map((record, index) => renderWeeklySolutionRows(record, `${prefix}-${index}`)).join('')}</tbody>
   </table>`;
 }
@@ -1388,7 +1388,6 @@ function weeklySortableHeader(label, key, numeric = false) {
 function weeklyReportTableColgroup() {
   return `<colgroup>
     <col class="weekly-col-solution" />
-    <col class="weekly-col-type" />
     ${Array.from({ length: 6 }, () => '<col class="weekly-col-count" />').join('')}
     <col class="weekly-col-event" />
   </colgroup>`;
@@ -1401,21 +1400,20 @@ function renderWeeklySolutionRows(record, rowId) {
   const solutionName = record.solutionName || record.uniqueName || 'Unnamed solution';
   const indicators = Array.isArray(record.changeIndicators) ? record.changeIndicators : [];
   const eventSort = Date.parse(record.eventAt || '');
-  return `<tr data-weekly-solution-row data-weekly-detail-id="${escapeAttr(detailsId)}" data-weekly-change-types="${escapeAttr(indicators.join(' '))}" data-sort-solution="${escapeAttr(solutionName.toLocaleLowerCase())}" data-sort-type="${escapeAttr(String(record.primaryComponent || 'Other').toLocaleLowerCase())}" data-sort-agent="${Number(counts.agents || 0)}" data-sort-canvas="${Number(counts.canvasApps || 0)}" data-sort-code="${Number(counts.codeApps || 0)}" data-sort-model="${Number(counts.modelDrivenApps || 0)}" data-sort-flow="${Number(counts.flows || 0)}" data-sort-table="${Number(counts.tables || 0)}" data-sort-event="${Number.isFinite(eventSort) ? eventSort : 0}">
+  return `<tr data-weekly-solution-row data-weekly-detail-id="${escapeAttr(detailsId)}" data-weekly-change-types="${escapeAttr(indicators.join(' '))}" data-sort-solution="${escapeAttr(solutionName.toLocaleLowerCase())}" data-sort-agent="${Number(counts.agents || 0)}" data-sort-canvas="${Number(counts.canvasApps || 0)}" data-sort-code="${Number(counts.codeApps || 0)}" data-sort-model="${Number(counts.modelDrivenApps || 0)}" data-sort-flow="${Number(counts.flows || 0)}" data-sort-table="${Number(counts.tables || 0)}" data-sort-event="${Number.isFinite(eventSort) ? eventSort : 0}">
     <td class="weekly-solution-cell">
       <button class="weekly-solution-button" type="button" data-weekly-detail="${escapeAttr(detailsId)}" aria-expanded="false">${escapeHtml(solutionName)}</button>
       ${renderWeeklyChangeIndicators(record)}
       <div class="weekly-solution-meta">
-        ${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}
+        <span class="weekly-solution-version-type">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}<span>Type: ${escapeHtml(record.primaryComponent || 'Other')}</span></span>
         ${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}
         ${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}
       </div>
     </td>
-    <td>${escapeHtml(record.primaryComponent || 'Other')}</td>
     ${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="numeric">${Number(counts[key] || 0)}</td>`).join('')}
     <td>${escapeHtml(formatWeeklyDateTime(record.eventAt))}</td>
   </tr>
-  <tr id="${escapeAttr(detailsId)}" class="weekly-component-row" hidden><td colspan="9">${renderWeeklyComponents(record.components || [])}</td></tr>`;
+  <tr id="${escapeAttr(detailsId)}" class="weekly-component-row" hidden><td colspan="8">${renderWeeklyComponents(record.components || [])}</td></tr>`;
 }
 
 function renderWeeklyChangeIndicators(record) {
