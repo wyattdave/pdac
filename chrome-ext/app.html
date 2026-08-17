@@ -113,10 +113,14 @@
 
       <section id="reportsTab" class="tab-panel">
         <section class="panel">
+          <div id="standardReportsContent">
           <div class="section-title">
             <div>
               <h2>Reports</h2>
               <p class="muted">Run cross-environment reports in the background.</p>
+            </div>
+            <div class="actions">
+              <button id="weeklyReportButton" type="button" class="secondary" aria-expanded="false">Weekly report</button>
             </div>
           </div>
 
@@ -309,6 +313,69 @@
               </div>
 
             </div>
+          </section>
+          </div>
+
+          <section id="weeklyReportPanel" class="weekly-report-section" hidden>
+            <div class="section-title compact-title">
+              <div>
+                <h3>Weekly report</h3>
+                <p class="muted">Solution changes and their key components, retained locally for three months.</p>
+              </div>
+              <div class="weekly-report-actions">
+                <label class="checkbox-label weekly-report-toggle">
+                  <input id="weeklyReportEnabled" type="checkbox" />
+                  Track weekly solution changes
+                </label>
+                <button id="weeklyReportRefreshButton" type="button" class="secondary">Refresh data</button>
+                <button id="weeklyReportDownloadButton" type="button" disabled>Download HTML</button>
+              </div>
+            </div>
+            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. The extension checks hourly while Chrome is running and reconciles the full three-month window whenever this report opens.</p>
+            <p id="weeklyReportStatus" class="muted" aria-live="polite">Open the report to load locally saved data.</p>
+
+            <div class="weekly-report-controls">
+              <label>
+                Environment
+                <select id="weeklyReportEnvironment">
+                  <option value="">All environments</option>
+                </select>
+              </label>
+              <label>
+                Report week
+                <select id="weeklyReportWeek"></select>
+              </label>
+            </div>
+            <div id="weeklyReportCurrent"></div>
+
+            <div class="section-title compact-title weekly-history-title">
+              <div>
+                <h3>Selected date range</h3>
+                <p class="muted">Review the same solution detail across a longer period.</p>
+              </div>
+              <div class="weekly-report-controls">
+                <label>
+                  Date range
+                  <select id="weeklyReportHistoryRange">
+                    <option value="2w">Last 2 weeks</option>
+                    <option value="3w">Last 3 weeks</option>
+                    <option value="1m">Last month</option>
+                    <option value="2m">Last 2 months</option>
+                    <option value="3m" selected>Last 3 months</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </label>
+                <label>
+                  Start date
+                  <input id="weeklyReportHistoryStart" type="date" disabled />
+                </label>
+                <label>
+                  End date
+                  <input id="weeklyReportHistoryEnd" type="date" disabled />
+                </label>
+              </div>
+            </div>
+            <div id="weeklyReportHistory"></div>
           </section>
         </section>
       </section>

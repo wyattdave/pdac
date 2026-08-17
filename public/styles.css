@@ -963,6 +963,238 @@ select:disabled {
   padding-top: 18px;
 }
 
+.weekly-report-section {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+  margin-top: 22px;
+  padding-top: 20px;
+}
+
+#standardReportsContent[hidden] + .weekly-report-section {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.weekly-report-actions,
+.weekly-report-controls {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.weekly-report-toggle {
+  background: var(--soft);
+  border: 1px solid var(--soft-line);
+  border-radius: 8px;
+  min-height: 40px;
+  padding: 8px 12px;
+}
+
+.weekly-report-note {
+  margin: -5px 0 0;
+}
+
+.weekly-history-title {
+  border-top: 1px solid var(--line);
+  margin: 14px 0 0;
+  padding-top: 22px;
+}
+
+.weekly-period {
+  display: grid;
+  gap: 18px;
+}
+
+.weekly-period-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.weekly-period-heading h4 {
+  margin: 0;
+}
+
+.weekly-summary-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.weekly-summary-badge {
+  background: var(--soft);
+  border: 1px solid var(--soft-line);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.weekly-report-group {
+  display: grid;
+  gap: 10px;
+}
+
+.weekly-report-layout {
+  align-items: start;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 0.34fr);
+}
+
+.weekly-table-wrap {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: 460px;
+  min-width: 0;
+  overflow: auto;
+}
+
+.weekly-report-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  min-width: 760px;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.weekly-col-solution {
+  width: 23%;
+}
+
+.weekly-col-type {
+  width: 11%;
+}
+
+.weekly-col-count {
+  width: 7.5%;
+}
+
+.weekly-col-event {
+  width: 21%;
+}
+
+.weekly-report-table th,
+.weekly-report-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.weekly-report-table th {
+  background: var(--soft);
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.035em;
+  position: sticky;
+  text-transform: uppercase;
+  top: 0;
+  z-index: 2;
+}
+
+.weekly-report-table .numeric {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.weekly-solution-cell {
+  min-width: 0;
+}
+
+.weekly-solution-meta {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 3px;
+  margin-top: 7px;
+}
+
+.weekly-solution-button {
+  align-items: start;
+  background: transparent;
+  border: 0;
+  color: var(--link);
+  display: inline-flex;
+  font: inherit;
+  font-weight: 650;
+  gap: 7px;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.weekly-solution-button::before {
+  content: "\25b8";
+  transition: transform 120ms ease;
+}
+
+.weekly-solution-button[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+
+.weekly-component-row td {
+  background: var(--bg);
+  padding: 12px 16px;
+}
+
+.weekly-component-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.weekly-component-item {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+}
+
+.weekly-component-kind {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.weekly-component-item strong,
+.weekly-component-item span {
+  overflow-wrap: anywhere;
+}
+
+.weekly-chart-card {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.weekly-chart-card h5 {
+  margin: 0;
+}
+
+.weekly-chart-canvas {
+  height: 280px;
+  min-width: 0;
+  position: relative;
+}
+
+.weekly-comparison-card .weekly-chart-canvas {
+  height: 245px;
+}
+
 .scheduled-report-controls {
   display: grid;
   flex: 0 0 min(100%, 430px);
@@ -2404,8 +2636,16 @@ select:disabled {
   .report-chart-header,
   .reports-chart-grid,
   .trend-controls,
+  .weekly-report-layout,
   .component-row {
     grid-template-columns: 1fr;
+  }
+
+  .weekly-report-actions,
+  .weekly-report-controls,
+  .weekly-period-heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .report-chart-actions {

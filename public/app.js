@@ -1,3 +1,13 @@
+import {
+  addCalendarDays,
+  buildStandaloneWeeklyReportHtml,
+  buildWeeklyReportModel,
+  filterWeeklyReportEvents,
+  formatLocalDateKey,
+  historyDateRange,
+  startOfCalendarWeek,
+} from './weekly-report.js';
+
 const el = {
   themeButton: document.querySelector('#themeButton'),
   accountSelect: document.querySelector('#accountSelect'),
@@ -105,6 +115,20 @@ const el = {
   chartsGrid: document.querySelector('#chartsGrid'),
   reportsStatus: document.querySelector('#reportsStatus'),
   reportsCharts: document.querySelector('#reportsCharts'),
+  standardReportsContent: document.querySelector('#standardReportsContent'),
+  weeklyReportButton: document.querySelector('#weeklyReportButton'),
+  weeklyReportPanel: document.querySelector('#weeklyReportPanel'),
+  weeklyReportEnabled: document.querySelector('#weeklyReportEnabled'),
+  weeklyReportRefreshButton: document.querySelector('#weeklyReportRefreshButton'),
+  weeklyReportDownloadButton: document.querySelector('#weeklyReportDownloadButton'),
+  weeklyReportStatus: document.querySelector('#weeklyReportStatus'),
+  weeklyReportEnvironment: document.querySelector('#weeklyReportEnvironment'),
+  weeklyReportWeek: document.querySelector('#weeklyReportWeek'),
+  weeklyReportCurrent: document.querySelector('#weeklyReportCurrent'),
+  weeklyReportHistoryRange: document.querySelector('#weeklyReportHistoryRange'),
+  weeklyReportHistoryStart: document.querySelector('#weeklyReportHistoryStart'),
+  weeklyReportHistoryEnd: document.querySelector('#weeklyReportHistoryEnd'),
+  weeklyReportHistory: document.querySelector('#weeklyReportHistory'),
   status: document.querySelector('#status'),
   environmentSearch: document.querySelector('#environmentSearch'),
   environmentList: document.querySelector('#environmentList'),
@@ -287,6 +311,14 @@ const state = {
     scheduleCompletionKey: '',
   },
   automatedReportSchedule: null,
+  weeklyReport: {
+    open: false,
+    loading: false,
+    settings: null,
+    events: [],
+    model: null,
+    charts: [],
+  },
   sqlTables: [],
   businessUnits: [],
   businessUnitsLoaded: false,
@@ -384,6 +416,7 @@ const AUTOMATED_REPORT_AUTO_DOWNLOAD_DATE_PREFIX = 'pdacAutomatedReportAutoDownl
 const AUTOMATED_SOLUTIONS_PUBLISHER_EXCLUSIONS_KEY = 'pdacAutomatedSolutionsPublisherExclusions';
 const AUTOMATED_REPORT_SETTINGS_KEY = 'pdacAutomatedReportSettings';
 const REPORT_CHART_SETTINGS_KEY = 'pdacReportChartSettings';
+const WEEKLY_REPORT_RANGE_KEY = 'pdacWeeklyReportRange';
 const USERS_TEAMS_SEARCH_DELAY_MS = 220;
 
 let userSearchTimer = 0;
@@ -436,6 +469,32 @@ el.automatedReportsRunOnLoad?.addEventListener('change', () => {
   saveAutomatedReportSettings();
 });
 el.automatedReportsSaveTrends?.addEventListener('change', saveAutomatedReportSettings);
+el.weeklyReportButton?.addEventListener('click', () => {
+  openWeeklyReport().catch((error) => {
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.weeklyReportEnabled?.addEventListener('change', () => {
+  saveWeeklyReportSettings().catch((error) => {
+    el.weeklyReportEnabled.checked = !el.weeklyReportEnabled.checked;
+    toast(error.message, 'error');
+    console.error(error);
+  });
+});
+el.weeklyReportRefreshButton?.addEventListener('click', () => withBusy(
+  el.weeklyReportRefreshButton,
+  () => refreshWeeklyReportData({ sync: true }),
+  'Refreshing',
+));
+el.weeklyReportDownloadButton?.addEventListener('click', downloadWeeklyReportHtml);
+el.weeklyReportEnvironment?.addEventListener('change', renderWeeklyReport);
+el.weeklyReportWeek?.addEventListener('change', renderWeeklyReport);
+el.weeklyReportHistoryRange?.addEventListener('change', handleWeeklyHistoryRangeChange);
+el.weeklyReportHistoryStart?.addEventListener('change', handleWeeklyHistoryRangeChange);
+el.weeklyReportHistoryEnd?.addEventListener('change', handleWeeklyHistoryRangeChange);
+el.weeklyReportCurrent?.addEventListener('click', handleWeeklySolutionToggle);
+el.weeklyReportHistory?.addEventListener('click', handleWeeklySolutionToggle);
 el.sqlDeleteClose?.addEventListener('click', closeSqlDeleteModal);
 el.sqlDeleteCancel?.addEventListener('click', closeSqlDeleteModal);
 el.sqlDeleteConfirm?.addEventListener('click', () => {
@@ -904,6 +963,7 @@ resetAgentSessionFilters();
 resetFlowRunFilters();
 resetAutomatedReportFilters();
 initAutomatedReportSettings();
+initWeeklyReportControls();
 renderAiEvents();
 renderAgentSessions();
 renderFlowRuns();
@@ -913,6 +973,7 @@ updateChartsTabAvailability();
 updateReportsTabAvailability();
 await loadAutomatedReportScheduleSettings();
 await loadStatus();
+await loadWeeklyReportSettings();
 loadSqlTables().catch((error) => {
   console.warn('Unable to load trend data tables.', error);
 });
@@ -969,6 +1030,471 @@ function applyAutomatedReportSchedule(schedule = {}) {
   syncAutomatedReportDateRanges();
 }
 
+function initWeeklyReportControls() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(WEEKLY_REPORT_RANGE_KEY) || '{}');
+  } catch {}
+  el.weeklyReportHistoryRange.value = selectValueOrDefault(
+    el.weeklyReportHistoryRange,
+    saved.range || '3m',
+    '3m',
+  );
+  const defaultRange = historyDateRange('3m');
+  el.weeklyReportHistoryStart.value = saved.start || defaultRange.start;
+  el.weeklyReportHistoryEnd.value = saved.end || defaultRange.end;
+  syncWeeklyHistoryRangeVisibility();
+  populateWeeklyReportWeeks();
+  el.weeklyReportCurrent.innerHTML = empty('Open the weekly report to load locally saved solution changes.');
+  el.weeklyReportHistory.innerHTML = empty('Choose a date range after the report data loads.');
+}
+
+async function loadWeeklyReportSettings() {
+  const settings = await api('/api/weekly-report/settings', { quiet: true });
+  state.weeklyReport.settings = settings;
+  applyWeeklyReportSettings(settings);
+}
+
+function applyWeeklyReportSettings(settings = {}) {
+  const accountHomeId = resolveRequestAccountId();
+  const belongsToSelectedAccount = Boolean(accountHomeId && settings.accountHomeId === accountHomeId);
+  const enabled = Boolean(settings.enabled && belongsToSelectedAccount);
+  el.weeklyReportEnabled.checked = enabled;
+  el.weeklyReportRefreshButton.disabled = !enabled;
+  if (settings.enabled && !belongsToSelectedAccount) {
+    el.weeklyReportStatus.textContent = 'Weekly tracking is configured for another signed-in account.';
+    return;
+  }
+  if (settings.lastError) {
+    el.weeklyReportStatus.textContent = `Last collection warning: ${settings.lastError}`;
+    return;
+  }
+  if (settings.lastCompletedAt) {
+    el.weeklyReportStatus.textContent = `Last collected ${formatWeeklyDateTime(settings.lastCompletedAt)} · ${Number(settings.lastCapturedEvents || 0)} weekly event${Number(settings.lastCapturedEvents || 0) === 1 ? '' : 's'} refreshed.`;
+    return;
+  }
+  el.weeklyReportStatus.textContent = enabled
+    ? 'Tracking is enabled. Refresh now or leave the server running for the hourly check.'
+    : 'Tracking is off. Previously collected data remains available for up to three months.';
+}
+
+async function openWeeklyReport() {
+  state.weeklyReport.open = true;
+  el.standardReportsContent.hidden = true;
+  el.weeklyReportPanel.hidden = false;
+  el.weeklyReportButton.setAttribute('aria-expanded', 'true');
+  await refreshWeeklyReportData();
+  if (weeklyReportRefreshDue()) {
+    await refreshWeeklyReportData({ sync: true });
+  }
+  if (state.weeklyReport.open) {
+    el.weeklyReportPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function weeklyReportRefreshDue(now = Date.now()) {
+  const settings = state.weeklyReport.settings || {};
+  if (!settings.enabled || settings.accountHomeId !== resolveRequestAccountId()) return false;
+  const lastChecked = Date.parse(settings.lastCheckedAt || '');
+  return !Number.isFinite(lastChecked) || now - lastChecked >= 60 * 60 * 1000;
+}
+
+function resetWeeklyReportView() {
+  state.weeklyReport.open = false;
+  el.standardReportsContent.hidden = false;
+  el.weeklyReportPanel.hidden = true;
+  el.weeklyReportButton.setAttribute('aria-expanded', 'false');
+}
+
+async function saveWeeklyReportSettings() {
+  const enabled = Boolean(el.weeklyReportEnabled.checked);
+  const accountHomeId = resolveRequestAccountId();
+  if (enabled && !accountHomeId) {
+    throw new Error('Select a signed-in account before enabling weekly tracking.');
+  }
+  const environments = enabled
+    ? getAutomatedReportEnvironments('solutions')
+    : state.weeklyReport.settings?.environments || [];
+  el.weeklyReportEnabled.disabled = true;
+  try {
+    const settings = await api('/api/weekly-report/settings', {
+      method: 'PUT',
+      body: {
+        enabled,
+        accountHomeId: accountHomeId || state.weeklyReport.settings?.accountHomeId || '',
+        environments,
+      },
+      quiet: true,
+    });
+    state.weeklyReport.settings = settings;
+    applyWeeklyReportSettings(settings);
+    if (enabled) {
+      await refreshWeeklyReportData({ sync: true });
+      toast('Weekly solution tracking enabled.');
+    } else {
+      toast('Weekly solution tracking disabled.');
+    }
+  } finally {
+    el.weeklyReportEnabled.disabled = false;
+  }
+}
+
+async function syncWeeklyReportEnvironmentSettings() {
+  const settings = state.weeklyReport.settings;
+  const accountHomeId = resolveRequestAccountId();
+  if (!settings?.enabled || !accountHomeId || settings.accountHomeId !== accountHomeId || !state.environmentsLoaded) {
+    return;
+  }
+  const environments = getAutomatedReportEnvironments('solutions');
+  const saved = await api('/api/weekly-report/settings', {
+    method: 'PUT',
+    body: { enabled: true, accountHomeId, environments },
+    quiet: true,
+  });
+  state.weeklyReport.settings = saved;
+  applyWeeklyReportSettings(saved);
+}
+
+async function refreshWeeklyReportData(options = {}) {
+  const accountHomeId = resolveRequestAccountId();
+  if (!accountHomeId) {
+    state.weeklyReport.events = [];
+    renderWeeklyReport();
+    el.weeklyReportStatus.textContent = 'Select a signed-in account to load weekly report data.';
+    return;
+  }
+  state.weeklyReport.loading = true;
+  el.weeklyReportStatus.textContent = options.sync
+    ? 'Checking for new and changed solutions...'
+    : 'Loading locally saved weekly report data...';
+  try {
+    if (options.sync) {
+      const environments = getAutomatedReportEnvironments('solutions');
+      if (state.weeklyReport.settings?.enabled) {
+        await syncWeeklyReportEnvironmentSettings();
+      }
+      const result = await api('/api/weekly-report/sync', {
+        method: 'POST',
+        body: { accountHomeId, environments },
+        quiet: true,
+      });
+      state.weeklyReport.settings = result;
+    }
+    const data = await api(`/api/weekly-report?accountHomeId=${encodeURIComponent(accountHomeId)}`, { quiet: true });
+    state.weeklyReport.settings = data.settings || state.weeklyReport.settings;
+    state.weeklyReport.events = data.events || [];
+    applyWeeklyReportSettings(state.weeklyReport.settings);
+    renderWeeklyReport();
+    el.weeklyReportDownloadButton.disabled = !state.weeklyReport.events.length;
+  } finally {
+    state.weeklyReport.loading = false;
+  }
+}
+
+function populateWeeklyReportWeeks(events = state.weeklyReport.events) {
+  const selected = el.weeklyReportWeek.value || startOfCalendarWeek();
+  const weeks = new Set([startOfCalendarWeek()]);
+  for (let index = 0; index < 14; index += 1) {
+    weeks.add(addCalendarDays(startOfCalendarWeek(), index * -7));
+  }
+  for (const event of events) {
+    if (event.weekStart) weeks.add(event.weekStart);
+  }
+  const sorted = [...weeks].sort().reverse();
+  el.weeklyReportWeek.innerHTML = sorted.map((weekStart) => `
+    <option value="${escapeAttr(weekStart)}">Week of ${escapeHtml(formatWeeklyDateLabel(weekStart))}</option>
+  `).join('');
+  el.weeklyReportWeek.value = sorted.includes(selected) ? selected : sorted[0];
+}
+
+function populateWeeklyReportEnvironments(events) {
+  const selected = el.weeklyReportEnvironment.value || '';
+  const environments = new Map();
+  for (const event of events) {
+    const environmentId = String(event.environmentId || '').trim();
+    if (!environmentId) continue;
+    const current = environments.get(environmentId) || {
+      id: environmentId,
+      label: event.environmentDisplayName || environmentId,
+      solutions: new Set(),
+    };
+    current.solutions.add(event.solutionId || event.solutionName || '');
+    environments.set(environmentId, current);
+  }
+  const rows = [...environments.values()].sort((left, right) => left.label.localeCompare(right.label));
+  el.weeklyReportEnvironment.innerHTML = [
+    `<option value="">All environments (${rows.length})</option>`,
+    ...rows.map((environment) => `<option value="${escapeAttr(environment.id)}">${escapeHtml(environment.label)} (${environment.solutions.size})</option>`),
+  ].join('');
+  el.weeklyReportEnvironment.value = rows.some((environment) => environment.id === selected) ? selected : '';
+}
+
+function weeklySolutionReportFilters() {
+  return {
+    excludedPublishers: el.automatedSolutionsPublisherExclusions.value || '',
+    includeManaged: Boolean(el.automatedSolutionsIncludeManaged.checked),
+    includeMicrosoftOwned: Boolean(el.automatedSolutionsIncludeMicrosoft.checked),
+  };
+}
+
+function handleWeeklyHistoryRangeChange() {
+  syncWeeklyHistoryRangeVisibility();
+  localStorage.setItem(WEEKLY_REPORT_RANGE_KEY, JSON.stringify({
+    range: el.weeklyReportHistoryRange.value,
+    start: el.weeklyReportHistoryStart.value,
+    end: el.weeklyReportHistoryEnd.value,
+  }));
+  renderWeeklyReport();
+}
+
+function syncWeeklyHistoryRangeVisibility() {
+  const custom = el.weeklyReportHistoryRange.value === 'custom';
+  el.weeklyReportHistoryStart.disabled = !custom;
+  el.weeklyReportHistoryEnd.disabled = !custom;
+}
+
+function renderWeeklyReport() {
+  destroyWeeklyReportCharts();
+  const solutionFilteredEvents = filterWeeklyReportEvents(
+    state.weeklyReport.events,
+    weeklySolutionReportFilters(),
+  );
+  populateWeeklyReportEnvironments(solutionFilteredEvents);
+  const filteredEvents = filterWeeklyReportEvents(solutionFilteredEvents, {
+    includeManaged: true,
+    includeMicrosoftOwned: true,
+    environmentId: el.weeklyReportEnvironment.value,
+  });
+  populateWeeklyReportWeeks(filteredEvents);
+  const history = historyDateRange(
+    el.weeklyReportHistoryRange.value,
+    el.weeklyReportHistoryStart.value,
+    el.weeklyReportHistoryEnd.value,
+  );
+  state.weeklyReport.model = buildWeeklyReportModel(filteredEvents, {
+    selectedWeekStart: el.weeklyReportWeek.value || startOfCalendarWeek(),
+    historyRange: history,
+  });
+  el.weeklyReportCurrent.innerHTML = renderWeeklyPeriod(
+    state.weeklyReport.model.selectedWeek,
+    'weekly-current',
+    false,
+  );
+  el.weeklyReportHistory.innerHTML = renderWeeklyPeriod(
+    state.weeklyReport.model.history,
+    'weekly-history',
+    true,
+  );
+  createWeeklyReportCharts(state.weeklyReport.model);
+}
+
+function renderWeeklyPeriod(period, prefix, history) {
+  const dateLabel = history
+    ? `${period.label} · ${formatWeeklyDateLabel(period.start)} to ${formatWeeklyDateLabel(period.end)}`
+    : period.label;
+  return `<section class="weekly-period">
+    <div class="weekly-period-heading">
+      <h4>${escapeHtml(dateLabel)}</h4>
+      <div class="weekly-summary-badges">
+        <span class="weekly-summary-badge">${period.deployed.length} deployed</span>
+        <span class="weekly-summary-badge">${period.updated.length} updated</span>
+      </div>
+    </div>
+    ${renderWeeklyReportGroup('Solutions deployed', period.deployed, `${prefix}-deployed`, 'deployed')}
+    ${renderWeeklyReportGroup('Solutions updated', period.updated, `${prefix}-updated`, 'updated')}
+    <article class="weekly-chart-card weekly-comparison-card">
+      <h5>${history ? 'Deployed and updated by week' : 'Selected week compared with previous week'}</h5>
+      <div class="weekly-chart-canvas"><canvas id="${escapeAttr(prefix)}-comparison"></canvas></div>
+    </article>
+  </section>`;
+}
+
+function renderWeeklyReportGroup(title, records, prefix, eventLabel) {
+  return `<section class="weekly-report-group">
+    <h4>${escapeHtml(title)}</h4>
+    <div class="weekly-report-layout">
+      <div class="weekly-table-wrap">${renderWeeklySolutionTable(records, prefix)}</div>
+      <article class="weekly-chart-card">
+        <h5>${escapeHtml(eventLabel[0].toUpperCase() + eventLabel.slice(1))} solutions by primary component</h5>
+        <div class="weekly-chart-canvas"><canvas id="${escapeAttr(prefix)}-primary"></canvas></div>
+      </article>
+    </div>
+  </section>`;
+}
+
+function renderWeeklySolutionTable(records, prefix) {
+  if (!records.length) {
+    return empty('No solutions in this period.');
+  }
+  return `<table class="weekly-report-table">
+    ${weeklyReportTableColgroup()}
+    <thead><tr><th>Solution</th><th>Type</th><th class="numeric">Agent</th><th class="numeric">Canvas</th><th class="numeric">Code</th><th class="numeric">Model driven</th><th class="numeric">Flow</th><th class="numeric">Table</th><th>Event</th></tr></thead>
+    <tbody>${records.map((record, index) => renderWeeklySolutionRows(record, `${prefix}-${index}`)).join('')}</tbody>
+  </table>`;
+}
+
+function weeklyReportTableColgroup() {
+  return `<colgroup>
+    <col class="weekly-col-solution" />
+    <col class="weekly-col-type" />
+    ${Array.from({ length: 6 }, () => '<col class="weekly-col-count" />').join('')}
+    <col class="weekly-col-event" />
+  </colgroup>`;
+}
+
+function renderWeeklySolutionRows(record, rowId) {
+  const counts = record.componentCounts || {};
+  const detailsId = `${rowId}-components`;
+  const environment = record.environmentDisplayName || record.environmentId || '';
+  return `<tr>
+    <td class="weekly-solution-cell">
+      <button class="weekly-solution-button" type="button" data-weekly-detail="${escapeAttr(detailsId)}" aria-expanded="false">${escapeHtml(record.solutionName || record.uniqueName || 'Unnamed solution')}</button>
+      <div class="weekly-solution-meta">
+        ${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}
+        ${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}
+        ${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}
+      </div>
+    </td>
+    <td>${escapeHtml(record.primaryComponent || 'Other')}</td>
+    ${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="numeric">${Number(counts[key] || 0)}</td>`).join('')}
+    <td>${escapeHtml(formatWeeklyDateTime(record.eventAt))}</td>
+  </tr>
+  <tr id="${escapeAttr(detailsId)}" class="weekly-component-row" hidden><td colspan="9">${renderWeeklyComponents(record.components || [])}</td></tr>`;
+}
+
+function renderWeeklyComponents(components) {
+  if (!components.length) {
+    return '<span class="muted">No tracked components in this solution.</span>';
+  }
+  return `<div class="weekly-component-list">${components.map((component) => `
+    <div class="weekly-component-item">
+      <span class="weekly-component-kind">${escapeHtml(component.label || component.kind || 'Component')}</span>
+      <strong>${escapeHtml(component.name || component.objectId || 'Unnamed component')}</strong>
+      ${component.logicalName ? `<span class="role-id">${escapeHtml(component.logicalName)}</span>` : ''}
+    </div>
+  `).join('')}</div>`;
+}
+
+function handleWeeklySolutionToggle(event) {
+  const button = event.target.closest('[data-weekly-detail]');
+  if (!button) return;
+  const details = document.getElementById(button.dataset.weeklyDetail || '');
+  if (!details) return;
+  const expanded = button.getAttribute('aria-expanded') === 'true';
+  button.setAttribute('aria-expanded', String(!expanded));
+  details.hidden = expanded;
+}
+
+function createWeeklyReportCharts(model) {
+  const ChartConstructor = globalThis.Chart;
+  if (!ChartConstructor) return;
+  const charts = [
+    createWeeklyPrimaryChart(ChartConstructor, 'weekly-current-deployed-primary', model.selectedWeek.deployedPrimaryMix),
+    createWeeklyPrimaryChart(ChartConstructor, 'weekly-current-updated-primary', model.selectedWeek.updatedPrimaryMix),
+    createWeeklyPrimaryChart(ChartConstructor, 'weekly-history-deployed-primary', model.history.deployedPrimaryMix),
+    createWeeklyPrimaryChart(ChartConstructor, 'weekly-history-updated-primary', model.history.updatedPrimaryMix),
+    createWeeklyComparisonChart(ChartConstructor, 'weekly-current-comparison', model.selectedWeek.comparison),
+    createWeeklyHistoryChart(ChartConstructor, 'weekly-history-comparison', model.history.weeklyCounts),
+  ].filter(Boolean);
+  state.weeklyReport.charts = charts;
+}
+
+function createWeeklyPrimaryChart(ChartConstructor, canvasId, rows = []) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  return new ChartConstructor(canvas.getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels: rows.map((row) => row.label),
+      datasets: [{
+        data: rows.map((row) => Number(row.count || 0)),
+        backgroundColor: rows.map((row) => row.color),
+        borderWidth: 0,
+      }],
+    },
+    options: weeklyChartOptions({ circular: true }),
+  });
+}
+
+function createWeeklyComparisonChart(ChartConstructor, canvasId, comparison = {}) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  return new ChartConstructor(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: comparison.labels || [],
+      datasets: [
+        { label: 'Deployed', data: comparison.deployed || [], backgroundColor: '#2563eb' },
+        { label: 'Updated', data: comparison.updated || [], backgroundColor: '#f59e0b' },
+      ],
+    },
+    options: weeklyChartOptions(),
+  });
+}
+
+function createWeeklyHistoryChart(ChartConstructor, canvasId, rows = []) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  return new ChartConstructor(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: rows.map((row) => row.label),
+      datasets: [
+        { label: 'Deployed', data: rows.map((row) => row.deployed), backgroundColor: '#2563eb' },
+        { label: 'Updated', data: rows.map((row) => row.updated), backgroundColor: '#f59e0b' },
+      ],
+    },
+    options: weeklyChartOptions(),
+  });
+}
+
+function weeklyChartOptions(options = {}) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: true, position: 'bottom' },
+      tooltip: { enabled: true, intersect: true, mode: 'nearest' },
+    },
+    scales: options.circular ? undefined : {
+      x: { beginAtZero: true },
+      y: { beginAtZero: true, ticks: { precision: 0 } },
+    },
+    interaction: { intersect: true, mode: 'nearest' },
+  };
+}
+
+function destroyWeeklyReportCharts() {
+  for (const chart of state.weeklyReport.charts) {
+    chart?.destroy?.();
+  }
+  state.weeklyReport.charts = [];
+}
+
+function downloadWeeklyReportHtml() {
+  if (!state.weeklyReport.model) {
+    throw new Error('Load the weekly report before downloading it.');
+  }
+  const html = buildStandaloneWeeklyReportHtml(state.weeklyReport.model);
+  downloadBlob(
+    `weekly-report-${safeFilename(state.weeklyReport.model.selectedWeek.start || formatLocalDateKey())}.html`,
+    new Blob([html], { type: 'text/html;charset=utf-8' }),
+  );
+}
+
+function formatWeeklyDateLabel(value) {
+  const [year, month, day] = String(value || '').split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  return Number.isNaN(date.getTime())
+    ? String(value || '')
+    : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function formatWeeklyDateTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value || '') : date.toLocaleString();
+}
+
 async function loadStatus() {
   const status = await api('/api/status');
   const authState = await restoreLastAccount(status);
@@ -1008,6 +1534,8 @@ async function signIn() {
   toast('Signed in.');
   clearEnvironmentOptions();
   await loadEnvironments();
+  await loadWeeklyReportSettings();
+  if (state.weeklyReport.open) await refreshWeeklyReportData();
 }
 
 async function signInDifferent() {
@@ -1022,6 +1550,8 @@ async function signInDifferent() {
   toast('Signed in with account picker.');
   clearEnvironmentOptions();
   await loadEnvironments();
+  await loadWeeklyReportSettings();
+  if (state.weeklyReport.open) await refreshWeeklyReportData();
 }
 
 async function logout() {
@@ -1031,6 +1561,9 @@ async function logout() {
   clearEnvironmentData();
   forgetLastAccount();
   applyAuthState({ accounts: [], selectedAccountHomeId: '', selectedEnvironment: {} });
+  state.weeklyReport.events = [];
+  applyWeeklyReportSettings(state.weeklyReport.settings || {});
+  renderWeeklyReport();
   renderEnvironmentList();
   el.status.textContent = `Logged out. Removed ${result.removed} cached account${result.removed === 1 ? '' : 's'}.`;
   toast('Logged out.');
@@ -1044,6 +1577,9 @@ async function switchAccount() {
     clearEnvironmentData();
     clearEnvironmentOptions();
     renderEnvironmentList();
+    state.weeklyReport.events = [];
+    applyWeeklyReportSettings(state.weeklyReport.settings || {});
+    renderWeeklyReport();
     el.status.textContent = 'Select an account.';
     return;
   }
@@ -1066,6 +1602,8 @@ async function switchAccount() {
       console.warn('Unable to restore cached report downloads.', error);
     }),
   ]);
+  await loadWeeklyReportSettings();
+  if (state.weeklyReport.open) await refreshWeeklyReportData();
 }
 
 function renderAccounts(accounts, selectedAccountHomeId) {
@@ -1406,6 +1944,9 @@ async function readClipboard() {
 }
 
 function activateTab(name) {
+  if (name === 'reports') {
+    resetWeeklyReportView();
+  }
   el.tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
   el.tabPanels.forEach((panel) => panel.classList.toggle('active', panel.id === `${name}Tab`));
   if (name === 'roles' && state.selectedEnvironment.orgUrl && !state.businessUnitsLoaded) {
@@ -1869,6 +2410,10 @@ function saveAutomatedReportSettings() {
   };
   localStorage.setItem(AUTOMATED_REPORT_SETTINGS_KEY, JSON.stringify(settings));
   syncAutomatedReportSchedule(settings).catch((error) => console.warn('Unable to save background report schedule.', error));
+  syncWeeklyReportEnvironmentSettings().catch((error) => console.warn('Unable to update weekly report environments.', error));
+  if (state.weeklyReport.open) {
+    renderWeeklyReport();
+  }
 }
 
 async function syncAutomatedReportSchedule(settings) {
@@ -2082,9 +2627,15 @@ function getAutomatedSelectedEnvironmentIds(groupKey) {
 
 function handleAutomatedEnvironmentSelection(groupKey) {
   const container = automatedEnvironmentContainer(groupKey);
-  state.automatedReports.selectedEnvironmentIds[groupKey] = new Set(
-    [...container.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value),
-  );
+  const selected = new Set(getAutomatedSelectedEnvironmentIds(groupKey));
+  for (const input of container.querySelectorAll('.automated-environment-options input[type="checkbox"]')) {
+    if (input.checked) {
+      selected.add(input.value);
+    } else {
+      selected.delete(input.value);
+    }
+  }
+  state.automatedReports.selectedEnvironmentIds[groupKey] = selected;
   saveAutomatedReportSettings();
 }
 
@@ -2224,6 +2775,7 @@ async function runAutomatedReportJob(job) {
       body: { ...job.body, reportRunId },
     });
     const contentType = response.headers.get('content-type') || '';
+    removeAutomatedReportDownloads(job.apiGroup);
     if (contentType.includes('application/json')) {
       const data = await response.json();
       for (const file of data.files || []) {
@@ -2284,6 +2836,7 @@ async function loadCachedAutomatedReportDownloads() {
   const data = await api('/api/report-cache', { quiet: true });
   const today = formatDateInputValue(new Date());
   const downloadedGroups = new Set();
+  clearAutomatedReportDownloads();
   for (const file of data.files || []) {
     const groupKey = automatedGroupStateKey(file.reportGroup || automatedReportFamily(file.filename || ''));
     const autoDownload = Boolean(getAutomatedReportOptions(groupKey).autoDownload)
@@ -2469,6 +3022,15 @@ function removeAutomatedReportDownloads(apiGroup) {
   state.automatedReports.history = retained;
 }
 
+function clearAutomatedReportDownloads() {
+  for (const item of state.automatedReports.history) {
+    if (item.url) {
+      URL.revokeObjectURL(item.url);
+    }
+  }
+  state.automatedReports.history = [];
+}
+
 function automatedReportFamily(value) {
   const text = String(value || '').toLowerCase();
   if (text === 'ai-events' || text.startsWith('ai-flow-events-')) {
@@ -2487,7 +3049,7 @@ function automatedReportFamily(value) {
 }
 
 function addAutomatedReportDownload({ label, filename, blob, completedAt = new Date(), groupKey = '', autoDownload = false }) {
-  if (!autoDownload && state.automatedReports.history.some((item) =>
+  if (state.automatedReports.history.some((item) =>
     item.filename === filename && item.completedAt?.getTime?.() === completedAt?.getTime?.()
   )) {
     return;
@@ -3115,7 +3677,7 @@ function solutionTrendDefinitions() {
     { id: 'solutions-agent-count-by-environment', title: 'Agent count', valueKey: 'number_of_copilot_studio_agents', yTitle: 'Agents' },
     { id: 'solutions-ai-model-count-by-environment', title: 'AI model count', valueKey: 'number_of_ai_models', yTitle: 'AI models' },
     { id: 'solutions-dataflow-count-by-environment', title: 'Dataflow count', valueKey: 'number_of_dataflows', yTitle: 'Dataflows' },
-    { id: 'solutions-dataverse-table-count-by-environment', title: 'Dataverse table count', valueKey: 'number_of_dataverse_tables', yTitle: 'Dataverse tables' },
+    { id: 'solutions-dataverse-table-count-by-environment', title: 'Custom Dataverse table count', valueKey: 'number_of_dataverse_tables', yTitle: 'Custom Dataverse tables' },
   ];
 }
 
@@ -3414,6 +3976,11 @@ function reportChartConfig(chart) {
       maintainAspectRatio: false,
       plugins: {
         legend: { display: chart.datasets.length > 1 || isCircular, position: 'bottom' },
+        tooltip: {
+          enabled: true,
+          intersect: true,
+          mode: 'nearest',
+        },
       },
       scales: isCircular ? undefined : chart.dualAxis ? {
         x: { stacked: false },
@@ -3446,8 +4013,8 @@ function reportChartConfig(chart) {
         },
       },
       interaction: {
-        intersect: false,
-        mode: chart.type === 'bar' ? 'index' : 'nearest',
+        intersect: true,
+        mode: 'nearest',
       },
     },
   };

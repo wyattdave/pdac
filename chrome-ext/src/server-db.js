@@ -6,7 +6,7 @@
 // edge.
 
 const DB_NAME = 'pdac-server';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const REPORT_CACHE_RETENTION_DAYS = 30;
 
 let dbPromise = null;
@@ -28,8 +28,21 @@ function openDb() {
           });
           trendRows.createIndex('byTable', 'table');
         }
+        if (!db.objectStoreNames.contains('weeklySolutions')) {
+          const weeklySolutions = db.createObjectStore('weeklySolutions', { keyPath: 'key' });
+          weeklySolutions.createIndex('byAccount', 'accountHomeId');
+          weeklySolutions.createIndex('byWeek', 'weekStart');
+        }
+        if (!db.objectStoreNames.contains('weeklyComponents')) {
+          const weeklyComponents = db.createObjectStore('weeklyComponents', { keyPath: 'key' });
+          weeklyComponents.createIndex('byAccount', 'accountHomeId');
+          weeklyComponents.createIndex('byEvent', 'eventKey');
+        }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        request.result.onversionchange = () => request.result.close();
+        resolve(request.result);
+      };
       request.onerror = () => reject(request.error);
       request.onblocked = () => reject(new Error(`IndexedDB upgrade for ${DB_NAME} is blocked.`));
     });
@@ -180,4 +193,98 @@ export function trendReplaceRows(table, predicateFn, records = []) {
       resolve(deleted);
     };
   }));
+}
+
+export function weeklyReplaceEvents(records = []) {
+  return withStores(['weeklySolutions', 'weeklyComponents'], 'readwrite', async (stores) => {
+    const solutionStore = stores.weeklySolutions;
+    const componentStore = stores.weeklyComponents;
+    for (const source of records) {
+      const record = { ...source };
+      const components = Array.isArray(record.components) ? record.components : [];
+      delete record.components;
+      const existing = await requestToPromise(solutionStore.get(record.key));
+      for (const componentKey of existing?.componentKeys || []) {
+        componentStore.delete(componentKey);
+      }
+      record.componentKeys = components.map((component, index) => component.key || `${record.key}:${component.kind || 'other'}:${component.objectId || index}`);
+      solutionStore.put(record);
+      components.forEach((component, index) => {
+        componentStore.put({
+          ...component,
+          key: record.componentKeys[index],
+          eventKey: record.key,
+          accountHomeId: record.accountHomeId,
+        });
+      });
+    }
+  });
+}
+
+export async function weeklyListEvents(accountHomeId = '') {
+  const [events, components] = await Promise.all([
+    withStore('weeklySolutions', 'readonly', (store) => requestToPromise(
+      store.index('byAccount').getAll(IDBKeyRange.only(String(accountHomeId || ''))),
+    )),
+    withStore('weeklyComponents', 'readonly', (store) => requestToPromise(
+      store.index('byAccount').getAll(IDBKeyRange.only(String(accountHomeId || ''))),
+    )),
+  ]);
+  const componentsByEvent = new Map();
+  for (const component of components) {
+    if (!componentsByEvent.has(component.eventKey)) {
+      componentsByEvent.set(component.eventKey, []);
+    }
+    const value = { ...component };
+    delete value.accountHomeId;
+    delete value.eventKey;
+    componentsByEvent.get(component.eventKey).push(value);
+  }
+  return events.map((event) => ({
+    ...event,
+    components: (componentsByEvent.get(event.key) || [])
+      .sort((left, right) => `${left.label || left.kind} ${left.name || ''}`.localeCompare(`${right.label || right.kind} ${right.name || ''}`)),
+  }));
+}
+
+export function weeklyDeleteEventsBefore(cutoffDate) {
+  return withStores(['weeklySolutions', 'weeklyComponents'], 'readwrite', (stores) => new Promise((resolve, reject) => {
+    let deleted = 0;
+    const request = stores.weeklySolutions.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(deleted);
+        return;
+      }
+      const eventDate = String(cursor.value.eventDate || cursor.value.eventAt || '').slice(0, 10);
+      if (eventDate && eventDate < cutoffDate) {
+        for (const componentKey of cursor.value.componentKeys || []) {
+          stores.weeklyComponents.delete(componentKey);
+        }
+        cursor.delete();
+        deleted += 1;
+      }
+      cursor.continue();
+    };
+  }));
+}
+
+async function withStores(storeNames, mode, work) {
+  const db = await openDb();
+  const transaction = db.transaction(storeNames, mode);
+  const completed = transactionToPromise(transaction);
+  const stores = Object.fromEntries(storeNames.map((storeName) => [storeName, transaction.objectStore(storeName)]));
+  try {
+    const result = await work(stores, transaction);
+    await completed;
+    return result;
+  } catch (error) {
+    try {
+      transaction.abort();
+    } catch {}
+    await completed.catch(() => {});
+    throw error;
+  }
 }

@@ -25,7 +25,18 @@ import {
   trendInsertRows,
   trendDeleteRows,
   trendReplaceRows,
+  weeklyReplaceEvents,
+  weeklyListEvents,
+  weeklyDeleteEventsBefore,
 } from './server-db.js';
+import {
+  WEEKLY_COMPONENT_TYPES,
+  emptyWeeklyComponentCounts,
+  formatLocalDateKey,
+  primaryWeeklyComponent,
+  startOfCalendarWeek,
+  weeklyRetentionCutoff,
+} from './weekly-report.js';
 
 const ExcelJS = globalThis.ExcelJS;
 const JSZip = globalThis.JSZip;
@@ -34,10 +45,15 @@ const REGION = 'prod';
 const SERVICE_RESOURCE = 'https://service.powerapps.com/';
 const POWER_PLATFORM_RESOURCE = 'https://api.powerplatform.com';
 const AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY = 'pdac.automatedReportSchedule';
+const WEEKLY_REPORT_SETTINGS_STORAGE_KEY = 'pdac.weeklyReportSettings';
 const STARTUP_TASK_NAME = 'PDAC Background Server';
 export const REPORT_TREND_RETENTION_DAYS = 730;
 export const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+export const WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const WEEKLY_REPORT_QUERY_OVERLAP_MS = 10 * 60 * 1000;
 const USERS_TEAMS_PAGE_SIZE = 50;
+const DATAVERSE_THROTTLE_MAX_RETRIES = 4;
 
 
 const DEPTHS = new Set(['None', 'Basic', 'Local', 'Deep', 'Global', 'RecordFilter']);
@@ -143,6 +159,7 @@ const automatedReportProgress = new Map();
 let reportTrendWriteQueue = Promise.resolve();
 let automatedReportScheduleWriteQueue = Promise.resolve();
 let automatedReportScheduleRunning = false;
+let weeklyReportTrackingRunning = false;
 let lastDataverseAccountHomeId = '';
 const xmlParser = typeof globalThis.XMLParser === 'function'
   ? new globalThis.XMLParser({
@@ -160,6 +177,31 @@ const AGENT_SESSION_BOT_NAME_CACHE = new Map();
 const ODATA_FORMATTED_VALUE_ANNOTATION = 'OData.Community.Display.V1.FormattedValue';
 const AI_EVENT_BATCH_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
 const FLOW_RUN_PREFER = `odata.include-annotations="${ODATA_FORMATTED_VALUE_ANNOTATION}",odata.maxpagesize=5000`;
+const DATAVERSE_TABLE_EXCLUDED_OBJECT_TYPE_CODES = [
+  4712, 4724, 9933, 9934, 9935, 9947, 9945, 9944, 9942, 9951, 2016, 9949, 9866, 9867, 9868,
+];
+const DATAVERSE_TABLE_SELECT = [
+  'MetadataId',
+  'LogicalName',
+  'SchemaName',
+  'DisplayName',
+  'DisplayCollectionName',
+  'Description',
+  'OwnershipType',
+  'IsPrivate',
+  'IsIntersect',
+  'IsLogicalEntity',
+  'IsCustomEntity',
+  'IsManaged',
+  'IsCustomizable',
+  'IsMappable',
+  'IsRenameable',
+  'EntitySetName',
+  'PrimaryIdAttribute',
+  'PrimaryNameAttribute',
+  'ObjectTypeCode',
+  'TableType',
+].join(',');
 const REPORT_TOTAL_TABLE_DEFINITIONS = {
   'ai-events': {
     tableName: 'report_ai_flow_event_totals',
@@ -221,7 +263,7 @@ const REPORT_TOTAL_TABLE_DEFINITIONS = {
       ['# of Canvas Apps', 'number_of_canvas_apps', 'REAL'],
       ['# of Model Driven Apps', 'number_of_model_driven_apps', 'REAL'],
       ['# of Copilot Studio Agents', 'number_of_copilot_studio_agents', 'REAL'],
-      ['# of Dataverse tables', 'number_of_dataverse_tables', 'REAL'],
+      ['Custom Dataverse tables', 'number_of_dataverse_tables', 'REAL'],
       ['# of AI models', 'number_of_ai_models', 'REAL'],
       ['# of connection references', 'number_of_connection_references', 'REAL'],
       ['# of environment variables', 'number_of_environment_variables', 'REAL'],
@@ -683,6 +725,45 @@ async function handleApi(req, res) {
     const savedSchedule = await writeAutomatedReportSchedule(schedule);
     sendJson(res, 200, savedSchedule);
     queueMicrotask(() => checkAutomatedReportSchedule().catch(logAutomatedReportScheduleError));
+    return;
+  }
+
+  if (route === 'GET /api/weekly-report/settings') {
+    sendJson(res, 200, await readWeeklyReportSettings());
+    return;
+  }
+
+  if (route === 'PUT /api/weekly-report/settings') {
+    const body = await readJson(req);
+    const current = await readWeeklyReportSettings();
+    const settings = normalizeWeeklyReportSettings(body, current);
+    if (settings.enabled && !settings.accountHomeId) {
+      throw new HttpError(400, 'Select an account before enabling the weekly report.');
+    }
+    if (settings.enabled && !settings.environments.length) {
+      throw new HttpError(400, 'Select at least one environment in the Solutions report before enabling weekly tracking.');
+    }
+    await writeWeeklyReportSettings(settings);
+    sendJson(res, 200, settings);
+    return;
+  }
+
+  if (route === 'POST /api/weekly-report/sync') {
+    const body = await readJson(req);
+    sendJson(res, 200, await checkWeeklyReportTracking({
+      force: true,
+      accountHomeId: body.accountHomeId || body.selectedAccountHomeId || '',
+      environments: body.environments,
+    }));
+    return;
+  }
+
+  if (route === 'GET /api/weekly-report') {
+    const accountHomeId = String(url.searchParams.get('accountHomeId') || selected.accountHomeId || '').trim();
+    sendJson(res, 200, {
+      settings: await readWeeklyReportSettings(),
+      events: await weeklyListEvents(accountHomeId),
+    });
     return;
   }
 
@@ -1901,10 +1982,10 @@ async function getSolution(solutionId) {
 
 async function listDataverseTables(options = {}) {
   const scope = options.scope === 'all' ? 'all' : 'custom';
-  const data = await dvGetAll('EntityDefinitions?$select=MetadataId,LogicalName,SchemaName,DisplayName,DisplayCollectionName,Description,OwnershipType,IsPrivate,IsIntersect,IsCustomEntity,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute&LabelLanguages=1033');
+  const data = await dvGetAll(dataverseTableMetadataPath(scope));
   const tables = data
-    .filter((item) => item.LogicalName && item.SchemaName && !item.IsIntersect)
-    .filter((item) => scope === 'all' || item.IsCustomEntity)
+    .filter((item) => item.LogicalName && item.SchemaName && !item.IsIntersect && !item.IsLogicalEntity)
+    .filter((item) => scope === 'all' || isCustomizableDataverseTable(item))
     .map(mapEntityDefinition)
     .sort((left, right) => left.displayName.localeCompare(right.displayName));
 
@@ -1912,6 +1993,31 @@ async function listDataverseTables(options = {}) {
     scope,
     tables,
   };
+}
+
+function dataverseTableMetadataPath(scope = 'custom') {
+  const filters = [
+    'IsIntersect eq false',
+    'IsLogicalEntity eq false',
+    'PrimaryNameAttribute ne null',
+    "PrimaryNameAttribute ne ''",
+    'ObjectTypeCode gt 0',
+    ...DATAVERSE_TABLE_EXCLUDED_OBJECT_TYPE_CODES.map((code) => `ObjectTypeCode ne ${code}`),
+  ];
+  if (scope === 'custom') {
+    filters.push('(IsCustomizable/Value eq true or IsCustomEntity eq true or IsManaged eq false or IsMappable/Value eq true or IsRenameable/Value eq true)');
+  }
+  return `EntityDefinitions?$select=${DATAVERSE_TABLE_SELECT}&RetrieveAllSettings=true&$filter=${filters.join(' and ')}&LabelLanguages=1033`;
+}
+
+function isCustomizableDataverseTable(item) {
+  return Boolean(
+    item.IsCustomEntity ||
+    item.IsManaged === false ||
+    item.IsCustomizable?.Value ||
+    item.IsMappable?.Value ||
+    item.IsRenameable?.Value,
+  );
 }
 
 async function getDataverseTableDetails(logicalName, options = {}) {
@@ -2791,7 +2897,7 @@ async function resolveEntityForComponentTypeForEnvironment(orgUrl, componentType
   if (!row) {
     const data = await targetDvGet(
       environmentKey,
-      `entities?$select=logicalname,collectionname,entitysetname,originallocalizedname,localizedname,displayname,name&$filter=objecttypecode eq ${normalizedComponentType}`,
+      `entities?$select=logicalname,collectionname,entitysetname,originallocalizedname,name&$filter=objecttypecode eq ${normalizedComponentType}`,
       accountHomeId,
     );
     row = Array.isArray(data?.value) ? data.value[0] : data;
@@ -4888,7 +4994,7 @@ async function listAgentSessions(filters = {}) {
 }
 
 async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
-  const reportSchemaVersion = group === 'solutions' ? 3 : 1;
+  const reportSchemaVersion = group === 'solutions' ? 4 : 1;
   const cacheKey = reportCacheKey('automated', {
     version: reportSchemaVersion,
     accountHomeId: reportCacheAccountId(body),
@@ -5033,6 +5139,185 @@ async function persistAutomatedReportScheduleFile(schedule) {
   await chrome.storage.local.set({
     [AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY]: schedule,
   });
+}
+
+async function readWeeklyReportSettings() {
+  try {
+    const stored = await chrome.storage.local.get(WEEKLY_REPORT_SETTINGS_STORAGE_KEY);
+    return normalizeWeeklyReportSettings(stored[WEEKLY_REPORT_SETTINGS_STORAGE_KEY]);
+  } catch {
+    return normalizeWeeklyReportSettings({});
+  }
+}
+
+function normalizeWeeklyReportSettings(value = {}, existing = {}) {
+  const sourceEnvironments = value.environments === undefined ? existing.environments : value.environments;
+  const accountHomeId = String(value.accountHomeId || existing.accountHomeId || '').trim();
+  const previousAccountHomeId = String(existing.accountHomeId || '').trim();
+  const accountChanged = Boolean(previousAccountHomeId && accountHomeId !== previousAccountHomeId);
+  const sourceEnvironmentSync = accountChanged
+    ? {}
+    : value.environmentSync === undefined ? existing.environmentSync : value.environmentSync;
+  return {
+    enabled: Boolean(value.enabled),
+    accountHomeId,
+    environments: normalizeAutomatedReportEnvironments(sourceEnvironments || []),
+    lastCheckedAt: String(value.lastCheckedAt ?? existing.lastCheckedAt ?? ''),
+    lastCompletedAt: String(value.lastCompletedAt ?? existing.lastCompletedAt ?? ''),
+    lastError: String(value.lastError ?? existing.lastError ?? ''),
+    lastCapturedEvents: Number(value.lastCapturedEvents ?? existing.lastCapturedEvents ?? 0),
+    environmentSync: normalizeWeeklyEnvironmentSync(sourceEnvironmentSync),
+  };
+}
+
+function normalizeWeeklyEnvironmentSync(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([environmentId, state]) => {
+    const key = String(environmentId || '').trim();
+    if (!key || !state || typeof state !== 'object') return [];
+    return [[key, {
+      lastSuccessfulSyncAt: String(state.lastSuccessfulSyncAt || ''),
+      lastFullReconcileAt: String(state.lastFullReconcileAt || ''),
+      lastError: String(state.lastError || ''),
+    }]];
+  }));
+}
+
+async function writeWeeklyReportSettings(settings) {
+  await chrome.storage.local.set({
+    [WEEKLY_REPORT_SETTINGS_STORAGE_KEY]: settings,
+  });
+  return settings;
+}
+
+async function updateWeeklyReportRunState(patch) {
+  const current = await readWeeklyReportSettings();
+  return writeWeeklyReportSettings(normalizeWeeklyReportSettings({
+    ...current,
+    ...patch,
+  }));
+}
+
+function weeklyEnvironmentId(environment = {}) {
+  return String(environment.environmentId || environment.environmentName || environment.name || environment.orgUrl || '').trim();
+}
+
+function groupWeeklyEventsByEnvironment(events = []) {
+  const grouped = new Map();
+  for (const event of events) {
+    const environmentId = String(event.environmentId || event.environmentUrl || '').trim();
+    if (!grouped.has(environmentId)) grouped.set(environmentId, []);
+    grouped.get(environmentId).push(event);
+  }
+  return grouped;
+}
+
+export async function checkWeeklyReportTracking(options = {}) {
+  if (weeklyReportTrackingRunning) {
+    return { status: 'running', ...(await readWeeklyReportSettings()) };
+  }
+  const stored = await readWeeklyReportSettings();
+  const accountHomeId = String(options.accountHomeId || stored.accountHomeId || '').trim();
+  const environments = options.environments === undefined
+    ? stored.environments
+    : normalizeAutomatedReportEnvironments(options.environments);
+  const force = Boolean(options.force);
+  if (!stored.enabled && !force) {
+    return { status: 'disabled', ...stored };
+  }
+  if (!accountHomeId || !environments.length) {
+    return { status: 'not-configured', ...stored };
+  }
+  const lastChecked = Date.parse(stored.lastCheckedAt || '');
+  const requiresInitialSync = environments.some((environment) => {
+    const syncState = stored.environmentSync?.[weeklyEnvironmentId(environment)];
+    return !Number.isFinite(Date.parse(syncState?.lastSuccessfulSyncAt || ''));
+  });
+  if (!force && !requiresInitialSync && Number.isFinite(lastChecked) && Date.now() - lastChecked < WEEKLY_REPORT_CHECK_INTERVAL_MS) {
+    return { status: 'not-due', ...stored };
+  }
+
+  weeklyReportTrackingRunning = true;
+  const startedAt = new Date().toISOString();
+  await updateWeeklyReportRunState({ lastCheckedAt: startedAt, lastError: '' });
+  try {
+    await applyAccountHomeId(accountHomeId);
+    const cutoff = weeklyRetentionCutoff();
+    const existingEvents = await weeklyListEvents(accountHomeId);
+    const eventsByEnvironment = groupWeeklyEventsByEnvironment(existingEvents);
+    const environmentSync = { ...(stored.environmentSync || {}) };
+    const startedAtMs = Date.parse(startedAt);
+    const outcomes = await mapWithConcurrency(environments, AUTOMATED_SOLUTION_ENVIRONMENT_CONCURRENCY, async (environment) => {
+      const environmentId = weeklyEnvironmentId(environment);
+      const syncState = environmentSync[environmentId] || {};
+      const lastSuccessfulSync = Date.parse(syncState.lastSuccessfulSyncAt || '');
+      const lastFullReconcile = Date.parse(syncState.lastFullReconcileAt || '');
+      const fullReconcile = Boolean(
+        options.full ||
+        !Number.isFinite(lastSuccessfulSync) ||
+        !Number.isFinite(lastFullReconcile) ||
+        startedAtMs - lastFullReconcile >= WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS
+      );
+      const sinceInstant = fullReconcile
+        ? new Date(`${cutoff}T00:00:00`).toISOString()
+        : new Date(Math.max(0, lastSuccessfulSync - WEEKLY_REPORT_QUERY_OVERLAP_MS)).toISOString();
+      try {
+        return {
+          environment,
+          environmentId,
+          fullReconcile,
+          events: await collectWeeklySolutionEvents(environment, accountHomeId, {
+            cutoffDate: cutoff,
+            sinceInstant,
+            existingEvents: eventsByEnvironment.get(environmentId) || [],
+          }),
+          error: '',
+        };
+      } catch (error) {
+        return { environment, environmentId, fullReconcile, events: [], error: errorMessage(error) };
+      }
+    });
+    const events = outcomes.flatMap((outcome) => outcome.events);
+    if (events.length) {
+      await weeklyReplaceEvents(events);
+    }
+    await weeklyDeleteEventsBefore(cutoff);
+    const errors = outcomes.filter((outcome) => outcome.error);
+    const completedAt = new Date().toISOString();
+    for (const outcome of outcomes) {
+      const previous = environmentSync[outcome.environmentId] || {};
+      environmentSync[outcome.environmentId] = outcome.error
+        ? { ...previous, lastError: outcome.error }
+        : {
+            ...previous,
+            lastSuccessfulSyncAt: startedAt,
+            lastFullReconcileAt: outcome.fullReconcile ? startedAt : previous.lastFullReconcileAt || '',
+            lastError: '',
+          };
+    }
+    const runState = await updateWeeklyReportRunState({
+      lastCheckedAt: startedAt,
+      lastCompletedAt: completedAt,
+      lastCapturedEvents: events.length,
+      lastError: errors.map((outcome) => `${outcome.environment.displayName}: ${outcome.error}`).join(' | '),
+      environmentSync,
+    });
+    return {
+      status: errors.length === outcomes.length ? 'error' : errors.length ? 'partial' : 'complete',
+      capturedEvents: events.length,
+      environmentsChecked: outcomes.length,
+      errors: errors.map((outcome) => ({
+        environment: outcome.environment.displayName,
+        error: outcome.error,
+      })),
+      ...runState,
+    };
+  } catch (error) {
+    await updateWeeklyReportRunState({ lastError: errorMessage(error) });
+    throw error;
+  } finally {
+    weeklyReportTrackingRunning = false;
+  }
 }
 
 export async function checkAutomatedReportSchedule() {
@@ -5209,19 +5494,34 @@ function cachedAutomatedReport(value = {}) {
 
 async function listCachedAutomatedReportFiles(accountHomeId = '') {
   const entries = await listDailyAutomatedReportCacheEntries(accountHomeId);
-  const seen = new Set();
-  return entries.flatMap((entry) => (entry.value?.files || []).map((file) => {
-    const key = `${entry.value?.reportGroup || ''}:${file.filename || ''}`;
-    if (seen.has(key)) return null;
-    seen.add(key);
-    return {
+  const seenGroups = new Set();
+  return entries.flatMap((entry) => {
+    const reportGroup = cachedAutomatedReportGroup(entry);
+    if (!reportGroup || seenGroups.has(reportGroup)) {
+      return [];
+    }
+    seenGroups.add(reportGroup);
+    return (entry.value?.files || []).map((file) => ({
       filename: file.filename,
-      reportGroup: entry.value?.reportGroup || '',
+      reportGroup,
       contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       base64: file.base64,
       completedAt: entry.createdAt,
-    };
-  }).filter(Boolean));
+    }));
+  });
+}
+
+function cachedAutomatedReportGroup(entry = {}) {
+  const reportGroup = String(entry.value?.reportGroup || '').trim();
+  if (reportGroup) {
+    return reportGroup;
+  }
+  const filename = String(entry.value?.files?.[0]?.filename || '').toLowerCase();
+  if (filename.startsWith('ai-flow-events-')) return 'ai-events';
+  if (filename.startsWith('agent-sessions-')) return 'agent-sessions';
+  if (filename.startsWith('solutions-')) return 'solutions';
+  if (filename.startsWith('flow-runs-')) return 'flow-runs';
+  return '';
 }
 
 async function listDailyAutomatedReportCacheEntries(accountHomeId = '') {
@@ -5254,7 +5554,7 @@ async function buildReportsSummaryFromCachedReports(accountHomeId = '') {
     readCachedWorkbookRows(latestFile(/^agent-sessions-totals-by-environment-/i)),
     readCachedWorkbookRows(latestFile(
       /^solutions-totals-by-environment-/i,
-      (file) => file.reportGroup === 'solutions' && file.reportSchemaVersion >= 3,
+      (file) => file.reportGroup === 'solutions' && file.reportSchemaVersion >= 4,
     )),
     readCachedWorkbookRows(latestFile(/^flow-runs-totals-by-environment-/i)),
   ]);
@@ -5520,18 +5820,20 @@ function buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOp
   if (group !== 'solutions' || !solutionOptions) {
     return null;
   }
-  const groups = (Array.isArray(sourceGroups) ? sourceGroups : []).map(({ environment, rows, totalBeforeFilters }) => ({
+  const groups = (Array.isArray(sourceGroups) ? sourceGroups : []).map(({ environment, rows, totalBeforeFilters, dataverseTableCount }) => ({
     environment,
     totalBeforeFilters,
+    dataverseTableCount,
     rows: (Array.isArray(rows) ? rows : [])
       .map((row) => ({ row, date: reportSourceRowDate(group, row) })),
   }));
   if (!groups.length) {
     return null;
   }
-  return (snapshotDate) => buildAutomatedSolutionTotalsRows(groups.map(({ environment, totalBeforeFilters, rows }) => ({
+  return (snapshotDate) => buildAutomatedSolutionTotalsRows(groups.map(({ environment, totalBeforeFilters, dataverseTableCount, rows }) => ({
     environment,
     totalBeforeFilters,
+    dataverseTableCount,
     rows: rows.filter((item) => item.date && item.date <= snapshotDate).map((item) => item.row),
   })), solutionOptions);
 }
@@ -5791,14 +6093,19 @@ async function parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId = 
     const expectedHeaders = trendDataImportColumns(definition);
     const headerRow = worksheet.getRow(1);
     const actualHeaders = [];
-    for (let column = 1; column <= Math.max(headerRow.cellCount, expectedHeaders.length); column += 1) {
+    for (let column = 1; column <= Math.max(headerRow.cellCount, expectedHeaders.length + 1); column += 1) {
       actualHeaders.push(String(headerRow.getCell(column).text || '').trim());
     }
-    if (actualHeaders.length !== expectedHeaders.length
-      || actualHeaders.some((header, index) => header !== expectedHeaders[index])) {
+    while (actualHeaders.at(-1) === '') {
+      actualHeaders.pop();
+    }
+    const legacyIdColumn = actualHeaders[0] === 'id';
+    const comparableHeaders = legacyIdColumn ? actualHeaders.slice(1) : actualHeaders;
+    if (comparableHeaders.length !== expectedHeaders.length
+      || comparableHeaders.some((header, index) => header !== expectedHeaders[index])) {
       throw new HttpError(
         400,
-        `Worksheet "${definition.tableName}" headers do not match the PDAC import template. Download a new template and keep its headers unchanged.`,
+        `Worksheet "${definition.tableName}" headers do not match the PDAC export/import format. Download a new template and keep its headers unchanged.`,
       );
     }
 
@@ -5807,7 +6114,7 @@ async function parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId = 
       const worksheetRow = worksheet.getRow(rowNumber);
       const values = Object.fromEntries(expectedHeaders.map((header, index) => [
         header,
-        trendDataImportCellValue(worksheetRow.getCell(index + 1)),
+        trendDataImportCellValue(worksheetRow.getCell(index + 1 + (legacyIdColumn ? 1 : 0))),
       ]));
       if (Object.values(values).every(trendDataImportValueIsBlank)) {
         continue;
@@ -5904,15 +6211,19 @@ function trendDataImportRowKey(row) {
   return `${row.account_home_id}:${row.date_ran}:${reportTrendEnvironmentKey(row)}`;
 }
 
+function trendDataImportSnapshotKey(row) {
+  return `${row.account_home_id}:${row.date_ran}`;
+}
+
 async function importTrendDataWorkbook(xlsxBase64, fallbackAccountHomeId = '') {
   const imports = await parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId);
   return enqueueReportTrendWrite(async () => {
     const tableResults = [];
     for (const { definition, rows } of imports) {
-      const importKeys = new Set(rows.map(trendDataImportRowKey));
+      const importSnapshotKeys = new Set(rows.map(trendDataImportSnapshotKey));
       const replacedRows = await trendReplaceRows(
         definition.tableName,
-        (row) => importKeys.has(trendDataImportRowKey(row)),
+        (row) => importSnapshotKeys.has(trendDataImportSnapshotKey(row)),
         rows,
       );
       await trendDeleteRows(
@@ -5977,9 +6288,7 @@ async function exportSqlTablesWorkbook() {
   for (const tableName of tableNames) {
     const definition = reportTotalTableDefinitionByName(tableName);
     const rows = await getFlatSqlTableRows(tableName);
-    const columns = rows.length
-      ? Object.keys(rows[0])
-      : getSqlTableColumnNames(definition);
+    const columns = trendDataImportColumns(definition);
     const worksheet = workbook.addWorksheet(uniqueWorksheetName(tableName, usedNames), {
       views: [{ state: 'frozen', ySplit: 1 }],
     });
@@ -6002,9 +6311,7 @@ async function exportSingleSqlTableWorkbook(tableName) {
   }
   const definition = reportTotalTableDefinitionByName(tableName);
   const rows = await getFlatSqlTableRows(tableName);
-  const columns = rows.length
-    ? Object.keys(rows[0])
-    : getSqlTableColumnNames(definition);
+  const columns = trendDataImportColumns(definition);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'PDAC';
   workbook.created = new Date();
@@ -6378,10 +6685,225 @@ async function collectAutomatedFlowRunRows(environments, dateRange, accountHomeI
   return groups;
 }
 
+async function collectWeeklySolutionEvents(environment, accountHomeId, options = {}) {
+  const cutoffDate = options.cutoffDate || weeklyRetentionCutoff();
+  const sinceInstant = options.sinceInstant || new Date(`${cutoffDate}T00:00:00`).toISOString();
+  const solutions = await listWeeklyChangedSolutionsForEnvironment(environment.orgUrl, accountHomeId, sinceInstant);
+  if (!solutions.length) {
+    return [];
+  }
+  const existingByKey = new Map((options.existingEvents || []).map((event) => [event.key, event]));
+  const pending = solutions.flatMap((solution) => ['created', 'modified'].flatMap((eventType) => {
+    const eventAt = eventType === 'created' ? solution.createdon : solution.modifiedon;
+    if (!eventAt || formatLocalDateKey(eventAt) < cutoffDate) return [];
+    const key = weeklySolutionEventKey(solution, eventType, eventAt, environment, accountHomeId);
+    const existing = existingByKey.get(key);
+    if (existing && (eventType === 'created' || (
+      String(existing.eventAt || '') === String(eventAt || '') &&
+      String(existing.version || '') === String(solution.version || '')
+    ))) {
+      return [];
+    }
+    return [{ solution, eventType, eventAt }];
+  }));
+  if (!pending.length) {
+    return [];
+  }
+  const pendingSolutions = [...new Map(pending.map((item) => [normalizeGuid(item.solution.solutionid), item.solution])).values()];
+  const rawComponents = await listSolutionComponentsForEnvironment(
+    environment.orgUrl,
+    pendingSolutions.map((solution) => solution.solutionid),
+    accountHomeId,
+  );
+  const reportComponents = await enrichSolutionReportComponentsForEnvironment(
+    environment.orgUrl,
+    rawComponents,
+    accountHomeId,
+  );
+  const canvasAppTypes = await listCanvasAppTypesForEnvironment(
+    environment.orgUrl,
+    reportComponents.filter((component) => Number(component.componenttype) === 300).map((component) => component.objectid),
+    accountHomeId,
+  );
+  const typedComponents = reportComponents.map((component) => {
+    if (Number(component.componenttype) !== 300 || Number(canvasAppTypes.get(normalizeGuid(component.objectid))?.canvasapptype) !== 4) {
+      return component;
+    }
+    return { ...component, typeLabel: 'Code App' };
+  });
+  const weeklyComponents = await buildWeeklyComponentsForEnvironment(environment.orgUrl, typedComponents, accountHomeId);
+  const componentsBySolution = groupSolutionComponentsBySolution(weeklyComponents);
+  return pending.map(({ solution, eventType, eventAt }) => {
+    const components = componentsBySolution.get(normalizeGuid(solution.solutionid)) || [];
+    const componentCounts = weeklyComponentCounts(components);
+    return weeklySolutionEvent(solution, eventType, eventAt, environment, accountHomeId, cutoffDate, components, componentCounts);
+  });
+}
+
+async function listWeeklyChangedSolutionsForEnvironment(orgUrl, accountHomeId, cutoffInstant) {
+  const data = await targetDvGetAll(
+    orgUrl,
+    `solutions?$select=solutionid,friendlyname,uniquename,version,ismanaged,isvisible,createdon,modifiedon,_publisherid_value&$expand=publisherid($select=publisherid,friendlyname,uniquename)&$filter=(createdon ge ${cutoffInstant} or modifiedon ge ${cutoffInstant})&$orderby=modifiedon desc`,
+    {},
+    accountHomeId,
+  );
+  return data.map((solution) => ({
+    solutionid: solution.solutionid,
+    friendlyname: solution.friendlyname,
+    uniquename: solution.uniquename,
+    version: solution.version,
+    ismanaged: Boolean(solution.ismanaged),
+    isvisible: solution.isvisible,
+    createdon: solution.createdon,
+    modifiedon: solution.modifiedon,
+    publisher: {
+      publisherid: solution.publisherid?.publisherid || solution._publisherid_value || '',
+      friendlyname: solution.publisherid?.friendlyname || solution['_publisherid_value@OData.Community.Display.V1.FormattedValue'] || '',
+      uniquename: solution.publisherid?.uniquename || '',
+    },
+  }));
+}
+
+async function buildWeeklyComponentsForEnvironment(orgUrl, components, accountHomeId) {
+  const tracked = components
+    .map((component) => ({ component, kind: weeklyComponentKind(component) }))
+    .filter((item) => item.kind);
+  if (!tracked.length) {
+    return [];
+  }
+  const names = await loadWeeklyComponentNames(orgUrl, tracked.map((item) => item.component), accountHomeId);
+  const seen = new Set();
+  return tracked.flatMap(({ component, kind }) => {
+    const objectId = normalizeGuid(component.objectid);
+    const key = `${normalizeGuid(component.solutionid)}:${kind}:${objectId}`;
+    if (!objectId || seen.has(key)) {
+      return [];
+    }
+    seen.add(key);
+    const definition = WEEKLY_COMPONENT_TYPES.find((item) => item.key === kind);
+    const name = names.get(`${kind}:${objectId}`) || component.displayName || objectId;
+    return [{
+      solutionid: component.solutionid,
+      kind,
+      label: definition?.label || 'Other',
+      objectId,
+      name,
+      logicalName: component.logicalName || '',
+      typeLabel: component.typeLabel || definition?.label || '',
+    }];
+  });
+}
+
+function weeklyComponentKind(component = {}) {
+  const componentType = Number(component.componenttype);
+  const logicalName = String(component.logicalName || '').toLowerCase();
+  const typeLabel = String(component.typeLabel || '').toLowerCase();
+  if (logicalName === 'bot') return 'agents';
+  if (componentType === 300 && typeLabel.includes('code app')) return 'codeApps';
+  if (componentType === 300) return 'canvasApps';
+  if (componentType === 80 || logicalName === 'appmodule') return 'modelDrivenApps';
+  if (componentType === 29) return 'flows';
+  if (componentType === 1) return 'tables';
+  return '';
+}
+
+async function loadWeeklyComponentNames(orgUrl, components, accountHomeId) {
+  const groups = {
+    agents: { collection: 'bots', idField: 'botid', select: 'botid,name,schemaname' },
+    canvasApps: { collection: 'canvasapps', idField: 'canvasappid', select: 'canvasappid,name,displayname,canvasapptype' },
+    codeApps: { collection: 'canvasapps', idField: 'canvasappid', select: 'canvasappid,name,displayname,canvasapptype' },
+    modelDrivenApps: { collection: 'appmodules', idField: 'appmoduleid', select: 'appmoduleid,name,uniquename' },
+    flows: { collection: 'workflows', idField: 'workflowid', select: 'workflowid,name,uniquename' },
+    tables: { collection: 'EntityDefinitions', idField: 'MetadataId', select: 'MetadataId,LogicalName,SchemaName,DisplayName' },
+  };
+  const names = new Map();
+  await Promise.all(Object.entries(groups).map(async ([kind, definition]) => {
+    const ids = [...new Set(components
+      .filter((component) => weeklyComponentKind(component) === kind)
+      .map((component) => normalizeGuid(component.objectid))
+      .filter(Boolean))];
+    for (const chunk of chunkArray(ids, 20)) {
+      const filter = chunk.map((id) => `${definition.idField} eq ${id}`).join(' or ');
+      let rows = [];
+      try {
+        rows = await targetDvGetAll(
+          orgUrl,
+          `${definition.collection}?$select=${definition.select}&$filter=${filter}`,
+          {},
+          accountHomeId,
+        );
+      } catch {
+        // Display names are best-effort; IDs still make the component list useful.
+      }
+      for (const row of rows) {
+        const id = normalizeGuid(row[definition.idField]);
+        const name = kind === 'tables'
+          ? getLabel(row.DisplayName) || row.SchemaName || row.LogicalName
+          : pickDisplayName(row) || pickLogicalName(row);
+        if (id && name) {
+          names.set(`${kind}:${id}`, name);
+        }
+      }
+    }
+  }));
+  return names;
+}
+
+function weeklyComponentCounts(components) {
+  const counts = emptyWeeklyComponentCounts();
+  for (const component of components) {
+    if (Object.hasOwn(counts, component.kind)) {
+      counts[component.kind] += 1;
+    }
+  }
+  return counts;
+}
+
+function weeklySolutionEvent(solution, eventType, eventAt, environment, accountHomeId, cutoffDate, components, componentCounts) {
+  if (!eventAt || formatLocalDateKey(eventAt) < cutoffDate) {
+    return null;
+  }
+  const solutionId = normalizeGuid(solution.solutionid);
+  const weekStart = startOfCalendarWeek(eventAt);
+  const event = {
+    key: weeklySolutionEventKey(solution, eventType, eventAt, environment, accountHomeId),
+    accountHomeId,
+    environmentId: environment.environmentId,
+    environmentDisplayName: environment.displayName,
+    environmentUrl: environment.orgUrl,
+    solutionId,
+    solutionName: solution.friendlyname || solution.uniquename || solutionId,
+    uniqueName: solution.uniquename || '',
+    version: solution.version || '',
+    isManaged: Boolean(solution.ismanaged),
+    publisherName: solution.publisher?.friendlyname || solution.publisher?.uniquename || '',
+    publisherUniqueName: solution.publisher?.uniquename || '',
+    eventType,
+    eventAt,
+    eventDate: formatLocalDateKey(eventAt),
+    weekStart,
+    collectedAt: new Date().toISOString(),
+    componentCounts,
+    components: components.map((component) => ({
+      ...component,
+      key: `${accountHomeId}:${environment.environmentId}:${solutionId}:${eventType}:${weekStart}:${component.kind}:${component.objectId}`,
+    })),
+  };
+  event.primaryComponent = primaryWeeklyComponent(event);
+  return event;
+}
+
+function weeklySolutionEventKey(solution, eventType, eventAt, environment, accountHomeId) {
+  return `${accountHomeId}:${weeklyEnvironmentId(environment)}:${normalizeGuid(solution.solutionid)}:${eventType}:${startOfCalendarWeek(eventAt)}`;
+}
+
 async function collectAutomatedSolutionRows(environments, options, accountHomeId = '', onEnvironment = null) {
   return mapWithConcurrency(environments, AUTOMATED_SOLUTION_ENVIRONMENT_CONCURRENCY, async (environment, index) => {
     onEnvironment?.(environment, index, environments.length);
-    const allSolutions = await listSolutionsForEnvironment(environment.orgUrl, accountHomeId);
+    const [allSolutions, customDataverseTables] = await Promise.all([
+      listSolutionsForEnvironment(environment.orgUrl, accountHomeId),
+      targetDvGetAll(environment.orgUrl, dataverseTableMetadataPath('custom'), {}, accountHomeId),
+    ]);
     const filteredSolutions = allSolutions.filter((solution) => shouldIncludeAutomatedSolution(solution, options));
     const components = await listSolutionComponentsForEnvironment(
       environment.orgUrl,
@@ -6413,6 +6935,7 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
         ...reportEnvironmentFields(environment),
       })),
       totalBeforeFilters: allSolutions.length,
+      dataverseTableCount: customDataverseTables.length,
     };
     onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
@@ -6463,6 +6986,7 @@ async function buildReportsSummary(body = {}) {
   const sessionsByEnvironment = groupRowsByEnvironment(agentSessionGroups);
   const flowRunsByEnvironment = groupRowsByEnvironment(flowRunGroups);
   const solutionsByEnvironment = groupRowsByEnvironment(solutionGroups);
+  const solutionGroupsByEnvironment = new Map(solutionGroups.map((group) => [group.environment.environmentId, group]));
   const modelMix = new Map();
 
   const rows = environments.map((environment) => {
@@ -6502,6 +7026,7 @@ async function buildReportsSummary(body = {}) {
       canvasAppCount: Number(componentTotals['# of Canvas Apps'] || 0),
       modelDrivenAppCount: Number(componentTotals['# of Model Driven Apps'] || 0),
       aiModelCount: Number(componentTotals['# of AI models'] || 0),
+      dataverseTableCount: Number(solutionGroupsByEnvironment.get(environment.environmentId)?.dataverseTableCount || 0),
       copilotStudioAgentCount: Number(componentTotals['# of Copilot Studio Agents'] || 0),
     };
   });
@@ -6576,7 +7101,7 @@ async function listSolutionComponentsForEnvironment(orgUrl, solutionIds, account
 async function enrichSolutionReportComponentsForEnvironment(orgUrl, components, accountHomeId = '') {
   const componentTypes = [...new Set(components
     .map((component) => Number(component.componenttype))
-    .filter((componentType) => componentType > 0))];
+    .filter((componentType) => componentType > 0 && !SOLUTION_COMPONENT_TYPES[componentType]))];
   const entityDetails = new Map(await mapWithConcurrency(componentTypes, 4, async (componentType) => [
     componentType,
     await resolveEntityForComponentTypeForEnvironment(orgUrl, componentType, accountHomeId).catch(() => ({})),
@@ -7144,9 +7669,10 @@ function isFailedFlowRun(row) {
 }
 
 function buildAutomatedSolutionTotalsRows(groups, options) {
-  return groups.map(({ environment, rows: solutionRows, totalBeforeFilters }) => {
+  return groups.map(({ environment, rows: solutionRows, totalBeforeFilters, dataverseTableCount }) => {
     const publishers = new Set(solutionRows.map((solution) => solution.publisher?.friendlyname || solution.publisher?.uniquename || '').filter(Boolean));
     const componentTotals = sumSolutionReportCountFields(solutionRows);
+    delete componentTotals['# of Dataverse tables'];
     return {
       'Environment display name': environment.displayName,
       'Environment id': environment.environmentId,
@@ -7158,6 +7684,7 @@ function buildAutomatedSolutionTotalsRows(groups, options) {
       'Hidden solutions': solutionRows.filter((solution) => solution.isvisible === false).length,
       'Distinct publishers': publishers.size,
       ...componentTotals,
+      'Custom Dataverse tables': Number(dataverseTableCount || 0),
       'Before filters': totalBeforeFilters,
       'Publisher exclusions': options.excludedPublishers.join(', '),
       'Managed included': options.includeManaged ? 'Yes' : 'No',
@@ -7185,7 +7712,7 @@ async function buildAutomatedSolutionTotalsWorkbook(groups, options) {
       ['# of Canvas Apps', 18],
       ['# of Model Driven Apps', 22],
       ['# of Copilot Studio Agents', 24],
-      ['# of Dataverse tables', 20],
+      ['Custom Dataverse tables', 24],
       ['# of AI models', 16],
       ['# of connection references', 23],
       ['# of environment variables', 23],
@@ -8539,20 +9066,35 @@ async function apiHttpRequest(method, url, options = {}) {
   const accessToken = options.accountHomeId
     ? await getAccessTokenForAccount(authResource, options.accountHomeId)
     : await getAccessTokenForSelectedAccount(authResource);
-  const response = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...(options.headers || {}),
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
-  const text = await response.text();
-  const data = parseJsonResponse(text);
-  if (!response.ok) {
-    throw new HttpError(response.status, errorMessageFromResponse(data) || `Request failed: ${response.status}`);
+  for (let attempt = 0; attempt <= DATAVERSE_THROTTLE_MAX_RETRIES; attempt += 1) {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(options.headers || {}),
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+    const text = await response.text();
+    const data = parseJsonResponse(text);
+    if (response.status === 429 && attempt < DATAVERSE_THROTTLE_MAX_RETRIES) {
+      await delay(dataverseRetryDelayMs(response.headers.get('retry-after'), attempt));
+      continue;
+    }
+    if (!response.ok) {
+      throw new HttpError(response.status, errorMessageFromResponse(data) || `Request failed: ${response.status}`);
+    }
+    return { data };
   }
-  return { data };
+  throw new HttpError(429, 'Dataverse request remained throttled after retrying.');
+}
+
+function dataverseRetryDelayMs(retryAfter, attempt) {
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(250, seconds * 1000);
+  const date = Date.parse(String(retryAfter || ''));
+  if (Number.isFinite(date)) return Math.max(250, date - Date.now());
+  return Math.min(30_000, 1000 * (2 ** attempt)) + Math.floor(Math.random() * 250);
 }
 
 async function apiTextRequest(method, url, options = {}) {
@@ -9031,6 +9573,8 @@ class HttpError extends Error {
 }
 
 export {
+  buildAutomatedSolutionTotalsRows,
+  dataverseTableMetadataPath,
   extractConnectionReferences,
   extractEnvironmentVariables,
   extractSolutionComponents,

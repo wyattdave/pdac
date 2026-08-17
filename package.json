@@ -1,6 +1,6 @@
 {
   "name": "powerdevbox-admin",
-  "version": "0.6.2",
+  "version": "0.6.8",
   "description": "Local Power DevBox Admin Center for Power Platform and Dataverse administration.",
   "license": "MIT",
   "homepage": "https://github.com/wyattdave/pdac#readme",
@@ -30,7 +30,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test testing/solution-package-analysis.test.mjs",
+    "test": "node --test testing/dataverse-table-count.test.mjs testing/node-weekly-report.test.mjs testing/solution-package-analysis.test.mjs testing/trend-export-import.test.mjs testing/weekly-report.test.mjs",
     "install-startup": "node scripts/background-manager.mjs install",
     "remove-startup": "node scripts/background-manager.mjs uninstall"
   },

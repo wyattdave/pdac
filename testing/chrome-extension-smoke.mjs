@@ -202,6 +202,9 @@ const appState = await evaluate(page, `(async () => {
   });
   const countColumn = aiHeaders.indexOf('count_of_events') + 1;
   aiWorksheet.getRow(2).getCell(countColumn).value = 3;
+  aiWorksheet.getRow(2).getCell(aiHeaders.indexOf('environment_display_name') + 1).value = 'Replacement smoke environment';
+  aiWorksheet.getRow(2).getCell(aiHeaders.indexOf('environment_id') + 1).value = 'replacement-smoke-environment';
+  aiWorksheet.getRow(2).getCell(aiHeaders.indexOf('environment_url') + 1).value = 'https://replacement-smoke.crm.dynamics.com';
   const secondImportBytes = await templateWorkbook.xlsx.writeBuffer();
   const secondImport = await request('/api/sql-tables/import', {
     method: 'POST',
@@ -222,6 +225,19 @@ const appState = await evaluate(page, `(async () => {
     String(today.getMonth() + 1).padStart(2, '0'),
     String(today.getDate()).padStart(2, '0'),
   ].join('-');
+  await database.reportCachePutEntry(todayKey, 'smoke-automated-older', {
+    version: 1,
+    kind: 'automated',
+    accountHomeId: '',
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    value: {
+      reportGroup: 'ai-events',
+      files: [{
+        filename: 'ai-flow-events-raw-stacked-older.xlsx',
+        base64: btoa('older smoke workbook'),
+      }],
+    },
+  });
   await database.reportCachePutEntry(todayKey, 'smoke-automated', {
     version: 1,
     kind: 'automated',
@@ -237,7 +253,26 @@ const appState = await evaluate(page, `(async () => {
   });
   const cachedReports = await request('/api/report-cache');
   const singleTableExport = await binaryRequest('/api/sql-tables/report_ai_flow_event_totals/export');
-  const allTablesExport = await binaryRequest('/api/sql-tables/export');
+  const allTablesExportResponse = await fetch('/api/sql-tables/export');
+  const allTablesExportBytes = await allTablesExportResponse.arrayBuffer();
+  const allTablesExportWorkbook = new ExcelJS.Workbook();
+  await allTablesExportWorkbook.xlsx.load(allTablesExportBytes);
+  const exportedAiHeaders = allTablesExportWorkbook
+    .getWorksheet('report_ai_flow_event_totals')
+    .getRow(1)
+    .values
+    .slice(1);
+  const unchangedExportImport = await request('/api/sql-tables/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ xlsx: toBase64(allTablesExportBytes) }),
+  });
+  const allTablesExport = {
+    status: allTablesExportResponse.status,
+    contentType: allTablesExportResponse.headers.get('content-type'),
+    byteLength: allTablesExportBytes.byteLength,
+    headersMatchTemplate: JSON.stringify(exportedAiHeaders) === JSON.stringify(aiHeaders),
+  };
   const deleteTables = await request('/api/sql-tables/records', { method: 'DELETE' });
   const sqlTablesAfterDelete = await request('/api/sql-tables');
   return {
@@ -268,6 +303,7 @@ const appState = await evaluate(page, `(async () => {
     trends,
     singleTableExport,
     allTablesExport,
+    unchangedExportImport,
     deleteTables,
     sqlTablesAfterDelete,
     indexedDb: {
@@ -320,7 +356,8 @@ if (appState.firstImport.status !== 200
   failures.push('Excel trend-data import or matching-row replacement failed.');
 }
 if (appState.cachedReports.status !== 200
-  || !appState.cachedReports.body.files?.some((file) => file.filename === 'ai-flow-events-totals-by-environment-smoke.xlsx')) {
+  || !appState.cachedReports.body.files?.some((file) => file.filename === 'ai-flow-events-totals-by-environment-smoke.xlsx')
+  || appState.cachedReports.body.files?.some((file) => file.filename === 'ai-flow-events-raw-stacked-older.xlsx')) {
   failures.push('Completed background report downloads were not returned by the cache API.');
 }
 const aiTrendTable = appState.trends.body.tables?.find(
@@ -337,6 +374,12 @@ for (const exported of [appState.singleTableExport, appState.allTablesExport]) {
     || exported.byteLength < 5000) {
     failures.push('An SQL-table Excel export failed.');
   }
+}
+if (!appState.allTablesExport.headersMatchTemplate
+  || appState.unchangedExportImport.status !== 200
+  || appState.unchangedExportImport.body.importedRows !== 1
+  || appState.unchangedExportImport.body.replacedRows !== 1) {
+  failures.push('The trend export schema does not round-trip through import.');
 }
 if (appState.deleteTables.status !== 200
   || appState.deleteTables.body.deletedRows !== 1
