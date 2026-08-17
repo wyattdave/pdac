@@ -170,6 +170,11 @@ test('defaults history to three months and exports one self-contained HTML page'
   assert.match(html, /\.table-wrap\{[^}]*height:0;[^}]*max-height:100%;[^}]*min-height:100%/);
   assert.match(html, /\.solution-toggle\{[^}]*overflow-wrap:anywhere/);
   assert.match(html, /body\.printing \.table-wrap\{height:auto;max-height:none;min-height:0;overflow:visible\}/);
+  assert.match(html, /@media screen and \(max-width:900px\)/);
+  assert.match(html, /@page\{size:A4 portrait;margin:6mm\}/);
+  assert.match(html, /-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important/);
+  assert.match(html, /grid-template-columns:minmax\(0,1fr\) 160px;break-inside:avoid-page;page-break-inside:avoid/);
+  assert.match(html, /tr\{break-inside:avoid-page;page-break-inside:avoid\}/);
   assert.doesNotMatch(html, /<(?:script|link)[^>]+(?:src|href)=/i);
 });
 
@@ -238,6 +243,9 @@ test('Node UI and standalone download use the completed compact weekly report', 
   const html = buildNodeStandaloneWeeklyReportHtml(model);
   assert.match(html, /locally collected PDAC data/);
   assert.match(html, /font-size:11px;min-width:760px/);
+  assert.match(html, /@page\{size:A4 portrait;margin:6mm\}/);
+  assert.match(html, /print-color-adjust:exact!important/);
+  assert.match(html, /\.chart-stack,\.chart,\.summary,\.metric\{break-inside:avoid-page;page-break-inside:avoid\}/);
   assert.doesNotMatch(html, /Chrome extension data/);
 });
 
