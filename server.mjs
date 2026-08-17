@@ -838,6 +838,7 @@ async function handleApi(req, res) {
     const body = await readJson(req);
     sendJson(res, 200, await checkWeeklyReportTracking({
       force: true,
+      full: Boolean(body.full),
       accountHomeId: body.accountHomeId || body.selectedAccountHomeId || '',
       environments: body.environments,
     }));
@@ -7367,6 +7368,7 @@ async function collectWeeklySolutionEvents(environment, accountHomeId, options =
   const existingByKey = new Map((options.existingEvents || []).map((event) => [event.key, event]));
   const pending = solutions.flatMap((solution) => ['created', 'modified'].flatMap((eventType) => {
     const eventAt = eventType === 'created' ? solution.createdon : solution.modifiedon;
+    if (eventType === 'modified' && sameWeeklyEventInstant(solution.createdon, solution.modifiedon)) return [];
     if (!eventAt || formatLocalDateKey(eventAt) < cutoffDate) return [];
     const key = weeklySolutionEventKey(solution, eventType, eventAt, environment, accountHomeId);
     const existing = existingByKey.get(key);
@@ -7567,6 +7569,15 @@ function weeklySolutionEvent(solution, eventType, eventAt, environment, accountH
 
 function weeklySolutionEventKey(solution, eventType, eventAt, environment, accountHomeId) {
   return `${accountHomeId}:${weeklyEnvironmentId(environment)}:${normalizeGuid(solution.solutionid)}:${eventType}:${startOfCalendarWeek(eventAt)}`;
+}
+
+function sameWeeklyEventInstant(left, right) {
+  if (!left || !right) return false;
+  const leftTime = Date.parse(String(left));
+  const rightTime = Date.parse(String(right));
+  return Number.isFinite(leftTime) && Number.isFinite(rightTime)
+    ? leftTime === rightTime
+    : String(left) === String(right);
 }
 
 async function collectAutomatedSolutionRows(environments, options, accountHomeId = '', onEnvironment = null) {

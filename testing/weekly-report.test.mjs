@@ -81,9 +81,37 @@ test('builds selected-week and historical report data without repeating a soluti
   assert.equal(model.selectedWeek.deployed.length, 1);
   assert.equal(model.selectedWeek.updated.length, 1);
   assert.equal(model.selectedWeek.updated[0].version, '1.0.0.1');
+  assert.deepEqual(model.selectedWeek.deployed[0].changeIndicators, ['deployed', 'updated']);
+  assert.deepEqual(model.selectedWeek.updated[0].changeIndicators, ['deployed', 'updated']);
   assert.deepEqual(model.selectedWeek.comparison.deployed, [1, 1]);
   assert.deepEqual(model.selectedWeek.comparison.updated, [0, 1]);
   assert.equal(model.history.deployed.length, 2);
+});
+
+test('same-timestamp deployments are not double counted as updates', () => {
+  const timestamp = '2026-08-11T10:00:00.000Z';
+  const deployedOnly = buildWeeklyReportModel([
+    event({ eventType: 'created', eventAt: timestamp }),
+    event({ eventType: 'modified', eventAt: timestamp }),
+  ], {
+    selectedWeekStart: '2026-08-10',
+    historyRange: { key: '2w', label: 'Last 2 weeks', start: '2026-08-03', end: '2026-08-16' },
+  });
+  assert.equal(deployedOnly.selectedWeek.deployed.length, 1);
+  assert.equal(deployedOnly.selectedWeek.updated.length, 0);
+  assert.deepEqual(deployedOnly.selectedWeek.deployed[0].changeIndicators, ['deployed']);
+  assert.deepEqual(deployedOnly.selectedWeek.comparison.updated, [0, 0]);
+
+  const deployedAndUpdated = buildWeeklyReportModel([
+    event({ eventType: 'created', eventAt: timestamp }),
+    event({ eventType: 'modified', eventAt: '2026-08-11T10:01:00.000Z' }),
+  ], {
+    selectedWeekStart: '2026-08-10',
+    historyRange: { key: '2w', label: 'Last 2 weeks', start: '2026-08-03', end: '2026-08-16' },
+  });
+  assert.equal(deployedAndUpdated.selectedWeek.deployed.length, 1);
+  assert.equal(deployedAndUpdated.selectedWeek.updated.length, 1);
+  assert.deepEqual(deployedAndUpdated.selectedWeek.deployed[0].changeIndicators, ['deployed', 'updated']);
 });
 
 test('uses the Solutions report managed, Microsoft, publisher, and environment filters', () => {
@@ -109,7 +137,7 @@ test('defaults history to three months and exports one self-contained HTML page'
   assert.equal(range.end, '2026-08-15');
   const model = buildWeeklyReportModel([
     event({ solutionName: 'Weekly <solution>' }),
-    event({ solutionName: 'Weekly <solution>', eventType: 'modified' }),
+    event({ solutionName: 'Weekly <solution>', eventType: 'modified', eventAt: '2026-08-12T10:00:00.000Z' }),
   ], {
     selectedWeekStart: '2026-08-10',
     historyRange: range,
@@ -122,6 +150,8 @@ test('defaults history to three months and exports one self-contained HTML page'
   assert.match(html, /<th>Type<\/th>/);
   assert.doesNotMatch(html, /<th>Version<\/th>/);
   assert.match(html, /Version 1\.0\.0\.0/);
+  assert.match(html, /change-indicator deployed[^>]*>Deployed</);
+  assert.match(html, /change-indicator updated[^>]*>Updated</);
   assert.equal((html.match(/<colgroup>/g) || []).length, 4);
   assert.match(html, /max-height:460px/);
   assert.match(html, /table\{[^}]*font-size:11px;[^}]*min-width:760px/);
@@ -135,10 +165,26 @@ test('defaults history to three months and exports one self-contained HTML page'
 test('weekly report is an exclusive Reports view that resets from the Reports tab', () => {
   assert.match(appHtml, /id="standardReportsContent"/);
   assert.match(appHtml, /id="weeklyReportPanel"[^>]+hidden/);
+  assert.match(appHtml, /id="weeklyReportLoading"[^>]+role="status"[^>]+hidden/);
+  assert.match(appHtml, /id="weeklyReportLoadingText"/);
   assert.match(appHtml, /id="weeklyReportEnvironment"/);
   assert.match(appScript, /async function openWeeklyReport\(\)[\s\S]+standardReportsContent\.hidden = true;[\s\S]+weeklyReportPanel\.hidden = false;/);
   assert.match(appScript, /function resetWeeklyReportView\(\)[\s\S]+standardReportsContent\.hidden = false;[\s\S]+weeklyReportPanel\.hidden = true;/);
   assert.match(appScript, /if \(name === 'reports'\) \{\s+resetWeeklyReportView\(\);/);
+});
+
+test('enabling weekly tracking triggers a full three-month load with visible progress', () => {
+  for (const source of [appScript, nodeAppScript]) {
+    assert.match(source, /await refreshWeeklyReportData\(\{ sync: true, full: true \}\);/);
+    assert.match(source, /Loading up to three months of solution history/);
+    assert.match(source, /function setWeeklyReportLoading\(loading, message/);
+    assert.match(source, /body: \{ accountHomeId, environments, full: Boolean\(options\.full\) \}/);
+  }
+  for (const source of [serverCore, nodeServer]) {
+    assert.match(source, /full: Boolean\(body\.full\)/);
+  }
+  assert.match(extensionStyles, /\.weekly-report-loading\s*\{[^}]*display:\s*flex;/s);
+  assert.match(nodeStyles, /\.weekly-report-loading\s*\{[^}]*display:\s*flex;/s);
 });
 
 test('extension weekly tables use the compact shared column proportions', () => {
@@ -193,11 +239,13 @@ test('weekly tracking is local-first, hourly, incremental, and periodically repa
   assert.match(serverCore, /lastSuccessfulSync - WEEKLY_REPORT_QUERY_OVERLAP_MS/);
   assert.match(serverCore, /existingEvents: eventsByEnvironment\.get\(environmentId\) \|\| \[\]/);
   assert.match(serverCore, /if \(!pending\.length\) \{\s+return \[\];\s+\}/);
+  assert.match(serverCore, /eventType === 'modified' && sameWeeklyEventInstant\(solution\.createdon, solution\.modifiedon\)/);
   assert.match(serverCore, /pendingSolutions\.map\(\(solution\) => solution\.solutionid\)/);
   assert.match(serverCore, /await weeklyReplaceEvents\(events\);/);
   assert.match(nodeServer, /WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 \* 60 \* 1000/);
   assert.match(nodeServer, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS = 24 \* 60 \* 60 \* 1000/);
   assert.match(nodeServer, /const requiresInitialSync = environments\.some/);
+  assert.match(nodeServer, /eventType === 'modified' && sameWeeklyEventInstant\(solution\.createdon, solution\.modifiedon\)/);
   assert.match(backgroundScript, /WEEKLY_REPORT_ALARM_NAME = 'weekly-report-check'/);
   assert.match(backgroundScript, /periodInMinutes: WEEKLY_REPORT_CHECK_INTERVAL_MS \/ \(60 \* 1000\)/);
   assert.match(backgroundScript, /chrome\.runtime\.onInstalled[\s\S]+checkBackgroundReports\(\)\.catch/);

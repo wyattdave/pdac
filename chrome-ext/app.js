@@ -122,6 +122,8 @@ const el = {
   weeklyReportRefreshButton: document.querySelector('#weeklyReportRefreshButton'),
   weeklyReportDownloadButton: document.querySelector('#weeklyReportDownloadButton'),
   weeklyReportStatus: document.querySelector('#weeklyReportStatus'),
+  weeklyReportLoading: document.querySelector('#weeklyReportLoading'),
+  weeklyReportLoadingText: document.querySelector('#weeklyReportLoadingText'),
   weeklyReportEnvironment: document.querySelector('#weeklyReportEnvironment'),
   weeklyReportWeek: document.querySelector('#weeklyReportWeek'),
   weeklyReportCurrent: document.querySelector('#weeklyReportCurrent'),
@@ -1060,7 +1062,7 @@ function applyWeeklyReportSettings(settings = {}) {
   const belongsToSelectedAccount = Boolean(accountHomeId && settings.accountHomeId === accountHomeId);
   const enabled = Boolean(settings.enabled && belongsToSelectedAccount);
   el.weeklyReportEnabled.checked = enabled;
-  el.weeklyReportRefreshButton.disabled = !enabled;
+  el.weeklyReportRefreshButton.disabled = state.weeklyReport.loading || !enabled;
   if (settings.enabled && !belongsToSelectedAccount) {
     el.weeklyReportStatus.textContent = 'Weekly tracking is configured for another signed-in account.';
     return;
@@ -1076,6 +1078,21 @@ function applyWeeklyReportSettings(settings = {}) {
   el.weeklyReportStatus.textContent = enabled
     ? 'Tracking is enabled. Refresh now or leave Chrome running for the hourly check.'
     : 'Tracking is off. Previously collected data remains available for up to three months.';
+}
+
+function setWeeklyReportLoading(loading, message = 'Loading weekly report data...') {
+  state.weeklyReport.loading = Boolean(loading);
+  el.weeklyReportPanel.setAttribute('aria-busy', loading ? 'true' : 'false');
+  el.weeklyReportLoading.hidden = !loading;
+  el.weeklyReportLoadingText.textContent = message;
+  el.weeklyReportEnabled.disabled = Boolean(loading);
+  if (loading) {
+    el.weeklyReportRefreshButton.disabled = true;
+    el.weeklyReportDownloadButton.disabled = true;
+    return;
+  }
+  applyWeeklyReportSettings(state.weeklyReport.settings || {});
+  el.weeklyReportDownloadButton.disabled = !state.weeklyReport.events.length;
 }
 
 async function openWeeklyReport() {
@@ -1129,8 +1146,16 @@ async function saveWeeklyReportSettings() {
     state.weeklyReport.settings = settings;
     applyWeeklyReportSettings(settings);
     if (enabled) {
-      await refreshWeeklyReportData({ sync: true });
-      toast('Weekly solution tracking enabled.');
+      try {
+        const result = await refreshWeeklyReportData({ sync: true, full: true });
+        toast(result?.status === 'error' || result?.status === 'partial'
+          ? 'Weekly solution tracking enabled. The initial history check completed with warnings.'
+          : 'Weekly solution tracking enabled and three-month history checked.', result?.status === 'error' ? 'error' : 'success');
+      } catch (error) {
+        el.weeklyReportStatus.textContent = `Tracking is enabled, but the initial history check failed: ${error.message}`;
+        toast('Weekly solution tracking is enabled, but the initial history check failed.', 'error');
+        console.error(error);
+      }
     } else {
       toast('Weekly solution tracking disabled.');
     }
@@ -1163,22 +1188,26 @@ async function refreshWeeklyReportData(options = {}) {
     el.weeklyReportStatus.textContent = 'Select a signed-in account to load weekly report data.';
     return;
   }
-  state.weeklyReport.loading = true;
-  el.weeklyReportStatus.textContent = options.sync
-    ? 'Checking for new and changed solutions...'
-    : 'Loading locally saved weekly report data...';
+  const loadingMessage = options.full
+    ? 'Loading up to three months of solution history...'
+    : options.sync
+      ? 'Checking for new and changed solutions...'
+      : 'Loading locally saved weekly report data...';
+  setWeeklyReportLoading(true, loadingMessage);
+  el.weeklyReportStatus.textContent = loadingMessage;
+  let syncResult = null;
   try {
     if (options.sync) {
       const environments = getAutomatedReportEnvironments('solutions');
       if (state.weeklyReport.settings?.enabled) {
         await syncWeeklyReportEnvironmentSettings();
       }
-      const result = await api('/api/weekly-report/sync', {
+      syncResult = await api('/api/weekly-report/sync', {
         method: 'POST',
-        body: { accountHomeId, environments },
+        body: { accountHomeId, environments, full: Boolean(options.full) },
         quiet: true,
       });
-      state.weeklyReport.settings = result;
+      state.weeklyReport.settings = syncResult;
     }
     const data = await api(`/api/weekly-report?accountHomeId=${encodeURIComponent(accountHomeId)}`, { quiet: true });
     state.weeklyReport.settings = data.settings || state.weeklyReport.settings;
@@ -1187,8 +1216,9 @@ async function refreshWeeklyReportData(options = {}) {
     renderWeeklyReport();
     el.weeklyReportDownloadButton.disabled = !state.weeklyReport.events.length;
   } finally {
-    state.weeklyReport.loading = false;
+    setWeeklyReportLoading(false);
   }
+  return syncResult;
 }
 
 function populateWeeklyReportWeeks(events = state.weeklyReport.events) {
@@ -1349,6 +1379,7 @@ function renderWeeklySolutionRows(record, rowId) {
   return `<tr>
     <td class="weekly-solution-cell">
       <button class="weekly-solution-button" type="button" data-weekly-detail="${escapeAttr(detailsId)}" aria-expanded="false">${escapeHtml(record.solutionName || record.uniqueName || 'Unnamed solution')}</button>
+      ${renderWeeklyChangeIndicators(record)}
       <div class="weekly-solution-meta">
         ${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}
         ${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}
@@ -1360,6 +1391,15 @@ function renderWeeklySolutionRows(record, rowId) {
     <td>${escapeHtml(formatWeeklyDateTime(record.eventAt))}</td>
   </tr>
   <tr id="${escapeAttr(detailsId)}" class="weekly-component-row" hidden><td colspan="9">${renderWeeklyComponents(record.components || [])}</td></tr>`;
+}
+
+function renderWeeklyChangeIndicators(record) {
+  const indicators = Array.isArray(record.changeIndicators) && record.changeIndicators.length
+    ? record.changeIndicators
+    : [record.eventType === 'modified' ? 'updated' : 'deployed'];
+  return `<div class="weekly-change-indicators">${indicators.map((indicator) => `
+    <span class="weekly-change-indicator ${escapeAttr(indicator)}">${indicator === 'updated' ? 'Updated' : 'Deployed'}</span>
+  `).join('')}</div>`;
 }
 
 function renderWeeklyComponents(components) {

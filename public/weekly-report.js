@@ -131,7 +131,7 @@ export function buildWeeklyReportModel(events = [], options = {}) {
   const previousWeekStart = addCalendarDays(selectedWeekStart, -7);
   const previousWeekEnd = addCalendarDays(selectedWeekStart, -1);
   const history = options.historyRange || historyDateRange('3m');
-  const normalized = (Array.isArray(events) ? events : [])
+  const normalizedEvents = (Array.isArray(events) ? events : [])
     .filter((event) => event && ['created', 'modified'].includes(event.eventType) && eventDateKey(event))
     .map((event) => ({
       ...event,
@@ -139,6 +139,7 @@ export function buildWeeklyReportModel(events = [], options = {}) {
       components: Array.isArray(event.components) ? event.components : [],
       primaryComponent: primaryWeeklyComponent(event),
     }));
+  const normalized = addWeeklyChangeIndicators(removeDuplicateDeploymentUpdates(normalizedEvents));
 
   const selected = buildPeriod(normalized, selectedWeekStart, selectedWeekEnd);
   const previous = buildPeriod(normalized, previousWeekStart, previousWeekEnd);
@@ -163,6 +164,49 @@ export function buildWeeklyReportModel(events = [], options = {}) {
       weeklyCounts: buildWeeklyCounts(normalized, history.start, history.end),
     },
   };
+}
+
+function removeDuplicateDeploymentUpdates(events) {
+  const createdInstants = new Map();
+  for (const event of events) {
+    if (event.eventType !== 'created') continue;
+    const key = weeklySolutionIdentity(event);
+    if (!createdInstants.has(key)) createdInstants.set(key, new Set());
+    createdInstants.get(key).add(normalizeEventInstant(event.eventAt));
+  }
+  return events.filter((event) => event.eventType !== 'modified'
+    || !createdInstants.get(weeklySolutionIdentity(event))?.has(normalizeEventInstant(event.eventAt)));
+}
+
+function addWeeklyChangeIndicators(events) {
+  const states = new Map();
+  for (const event of events) {
+    const key = weeklySolutionIdentity(event);
+    const state = states.get(key) || { deployed: false, updated: false };
+    state.deployed ||= event.eventType === 'created';
+    state.updated ||= event.eventType === 'modified';
+    states.set(key, state);
+  }
+  return events.map((event) => {
+    const state = states.get(weeklySolutionIdentity(event)) || {};
+    return {
+      ...event,
+      changeIndicators: [state.deployed ? 'deployed' : '', state.updated ? 'updated' : ''].filter(Boolean),
+    };
+  });
+}
+
+function weeklySolutionIdentity(event = {}) {
+  return [
+    event.accountHomeId || '',
+    event.environmentId || event.environmentUrl || '',
+    event.solutionId || event.solutionid || event.uniqueName || '',
+  ].join(':');
+}
+
+function normalizeEventInstant(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : String(value || '');
 }
 
 export function buildStandaloneWeeklyReportHtml(model = {}) {
@@ -192,6 +236,7 @@ th{font-size:10px;text-transform:uppercase;letter-spacing:.02em;background:#f8fa
 th.num,td.num{text-align:center;vertical-align:middle}
 .solution-toggle{border:0;background:none;color:#0f5ea8;font:inherit;font-weight:700;padding:0;cursor:pointer;text-align:left}
 .solution-toggle:before{content:'▸';display:inline-block;margin-right:7px;transition:transform .15s}.solution-toggle[aria-expanded=true]:before{transform:rotate(90deg)}
+.change-indicators{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.change-indicator{border:1px solid;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.04em;line-height:1;padding:3px 6px;text-transform:uppercase}.change-indicator.deployed{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8}.change-indicator.updated{background:#fef3c7;border-color:#fcd34d;color:#92400e}
 .solution-meta{color:#64748b;display:grid;font-size:12px;gap:3px;margin-top:7px}
 small{display:block;color:#64748b;margin-top:3px}
 .component-row td{background:#f8fafc;padding:14px 20px}
@@ -299,8 +344,15 @@ function standaloneTable(records) {
     const id = `detail-${safeId(record.eventType)}-${safeId(record.environmentId)}-${safeId(record.solutionId)}-${index}`;
     const components = record.components || [];
     const environment = record.environmentDisplayName || record.environmentId || '';
-    return `<tr><td><button class="solution-toggle" type="button" data-detail="${id}" aria-expanded="false">${escapeHtml(record.solutionName || record.uniqueName || 'Unnamed solution')}</button><div class="solution-meta">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}</div></td><td>${escapeHtml(record.primaryComponent || 'Other')}</td>${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="num">${Number(counts[key] || 0)}</td>`).join('')}<td>${escapeHtml(formatDateTime(record.eventAt))}</td></tr><tr id="${id}" class="component-row" hidden><td colspan="9">${standaloneComponents(components)}</td></tr>`;
+    return `<tr><td><button class="solution-toggle" type="button" data-detail="${id}" aria-expanded="false">${escapeHtml(record.solutionName || record.uniqueName || 'Unnamed solution')}</button>${standaloneChangeIndicators(record)}<div class="solution-meta">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}</div></td><td>${escapeHtml(record.primaryComponent || 'Other')}</td>${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="num">${Number(counts[key] || 0)}</td>`).join('')}<td>${escapeHtml(formatDateTime(record.eventAt))}</td></tr><tr id="${id}" class="component-row" hidden><td colspan="9">${standaloneComponents(components)}</td></tr>`;
   }).join('')}</tbody></table>`;
+}
+
+function standaloneChangeIndicators(record) {
+  const indicators = Array.isArray(record.changeIndicators) && record.changeIndicators.length
+    ? record.changeIndicators
+    : [record.eventType === 'modified' ? 'updated' : 'deployed'];
+  return `<div class="change-indicators">${indicators.map((indicator) => `<span class="change-indicator ${indicator}">${indicator === 'updated' ? 'Updated' : 'Deployed'}</span>`).join('')}</div>`;
 }
 
 function standaloneTableColgroup() {

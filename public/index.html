@@ -331,8 +331,15 @@
                 <button id="weeklyReportDownloadButton" type="button" disabled>Download HTML</button>
               </div>
             </div>
-            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. The server checks hourly while it is running and reconciles the full three-month window whenever this report opens.</p>
+            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. Turning it on performs an initial three-month check. The server then checks hourly and performs a daily recovery check while it is running.</p>
             <p id="weeklyReportStatus" class="muted" aria-live="polite">Open the report to load locally saved data.</p>
+            <div id="weeklyReportLoading" class="weekly-report-loading" role="status" aria-live="polite" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              <div>
+                <strong id="weeklyReportLoadingText">Loading weekly report data...</strong>
+                <span class="muted">Existing local report data remains available while the check completes.</span>
+              </div>
+            </div>
 
             <div class="weekly-report-controls">
               <label>

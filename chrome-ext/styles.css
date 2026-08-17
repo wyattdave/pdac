@@ -998,6 +998,33 @@ select:disabled {
   margin: -5px 0 0;
 }
 
+.weekly-report-loading {
+  align-items: center;
+  background: var(--soft);
+  border: 1px solid var(--soft-line);
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.weekly-report-loading .spinner {
+  flex: none;
+  height: 20px;
+  margin: 0;
+  width: 20px;
+}
+
+.weekly-report-loading div {
+  display: grid;
+  gap: 2px;
+}
+
+.weekly-report-loading strong,
+.weekly-report-loading span {
+  line-height: 1.35;
+}
+
 .weekly-history-title {
   border-top: 1px solid var(--line);
   margin: 14px 0 0;
@@ -1137,6 +1164,36 @@ select:disabled {
 
 .weekly-solution-button[aria-expanded="true"]::before {
   transform: rotate(90deg);
+}
+
+.weekly-change-indicators {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.weekly-change-indicator {
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 3px 6px;
+  text-transform: uppercase;
+}
+
+.weekly-change-indicator.deployed {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+.weekly-change-indicator.updated {
+  background: #fef3c7;
+  border-color: #fcd34d;
+  color: #92400e;
 }
 
 .weekly-component-row td {
