@@ -497,6 +497,8 @@ el.weeklyReportHistoryStart?.addEventListener('change', handleWeeklyHistoryRange
 el.weeklyReportHistoryEnd?.addEventListener('change', handleWeeklyHistoryRangeChange);
 el.weeklyReportCurrent?.addEventListener('click', handleWeeklySolutionToggle);
 el.weeklyReportHistory?.addEventListener('click', handleWeeklySolutionToggle);
+el.weeklyReportCurrent?.addEventListener('change', handleWeeklyReportFilter);
+el.weeklyReportHistory?.addEventListener('change', handleWeeklyReportFilter);
 el.sqlDeleteClose?.addEventListener('click', closeSqlDeleteModal);
 el.sqlDeleteCancel?.addEventListener('click', closeSqlDeleteModal);
 el.sqlDeleteConfirm?.addEventListener('click', () => {
@@ -1330,8 +1332,7 @@ function renderWeeklyPeriod(period, prefix, history) {
         <span class="weekly-summary-badge">${period.updated.length} updated</span>
       </div>
     </div>
-    ${renderWeeklyReportGroup('Solutions deployed', period.deployed, `${prefix}-deployed`, 'deployed')}
-    ${renderWeeklyReportGroup('Solutions updated', period.updated, `${prefix}-updated`, 'updated')}
+    ${renderWeeklyReportGroup(period, prefix)}
     <article class="weekly-chart-card weekly-comparison-card">
       <h5>${history ? 'Deployed and updated by week' : 'Selected week compared with previous week'}</h5>
       <div class="weekly-chart-canvas"><canvas id="${escapeAttr(prefix)}-comparison"></canvas></div>
@@ -1339,28 +1340,49 @@ function renderWeeklyPeriod(period, prefix, history) {
   </section>`;
 }
 
-function renderWeeklyReportGroup(title, records, prefix, eventLabel) {
+function renderWeeklyReportGroup(period, prefix) {
+  const records = period.solutions || [];
+  const tableId = `${prefix}-solutions-table`;
   return `<section class="weekly-report-group">
-    <h4>${escapeHtml(title)}</h4>
+    <div class="weekly-report-group-heading">
+      <h4>Solutions</h4>
+      <label class="weekly-change-filter">Show
+        <select data-weekly-change-filter data-weekly-table="${escapeAttr(tableId)}">
+          <option value="all">All</option>
+          <option value="deployed">Deployed</option>
+          <option value="updated">Updated</option>
+        </select>
+      </label>
+    </div>
     <div class="weekly-report-layout">
-      <div class="weekly-table-wrap">${renderWeeklySolutionTable(records, prefix)}</div>
-      <article class="weekly-chart-card">
-        <h5>${escapeHtml(eventLabel[0].toUpperCase() + eventLabel.slice(1))} solutions by primary component</h5>
-        <div class="weekly-chart-canvas"><canvas id="${escapeAttr(prefix)}-primary"></canvas></div>
-      </article>
+      <div class="weekly-table-wrap">${renderWeeklySolutionTable(records, `${prefix}-solutions`, tableId)}</div>
+      <div class="weekly-chart-stack">
+        <article class="weekly-chart-card">
+          <h5>Deployed solutions by primary component</h5>
+          <div class="weekly-chart-canvas"><canvas id="${escapeAttr(prefix)}-deployed-primary"></canvas></div>
+        </article>
+        <article class="weekly-chart-card">
+          <h5>Updated solutions by primary component</h5>
+          <div class="weekly-chart-canvas"><canvas id="${escapeAttr(prefix)}-updated-primary"></canvas></div>
+        </article>
+      </div>
     </div>
   </section>`;
 }
 
-function renderWeeklySolutionTable(records, prefix) {
+function renderWeeklySolutionTable(records, prefix, tableId) {
   if (!records.length) {
     return empty('No solutions in this period.');
   }
-  return `<table class="weekly-report-table">
+  return `<table id="${escapeAttr(tableId)}" class="weekly-report-table">
     ${weeklyReportTableColgroup()}
-    <thead><tr><th>Solution</th><th>Type</th><th class="numeric">Agent</th><th class="numeric">Canvas</th><th class="numeric">Code</th><th class="numeric">Model driven</th><th class="numeric">Flow</th><th class="numeric">Table</th><th>Event</th></tr></thead>
+    <thead><tr>${weeklySortableHeader('Solution', 'solution')}${weeklySortableHeader('Type', 'type')}${weeklySortableHeader('Agent', 'agent', true)}${weeklySortableHeader('Canvas', 'canvas', true)}${weeklySortableHeader('Code', 'code', true)}${weeklySortableHeader('Model driven', 'model', true)}${weeklySortableHeader('Flow', 'flow', true)}${weeklySortableHeader('Table', 'table', true)}${weeklySortableHeader('Event', 'event', true)}</tr></thead>
     <tbody>${records.map((record, index) => renderWeeklySolutionRows(record, `${prefix}-${index}`)).join('')}</tbody>
   </table>`;
+}
+
+function weeklySortableHeader(label, key, numeric = false) {
+  return `<th${numeric ? ' class="numeric"' : ''} data-weekly-sort-heading="${escapeAttr(key)}" aria-sort="none"><button class="weekly-sort-button" type="button" data-weekly-sort="${escapeAttr(key)}" data-weekly-sort-type="${numeric ? 'number' : 'text'}">${escapeHtml(label)}</button></th>`;
 }
 
 function weeklyReportTableColgroup() {
@@ -1376,9 +1398,12 @@ function renderWeeklySolutionRows(record, rowId) {
   const counts = record.componentCounts || {};
   const detailsId = `${rowId}-components`;
   const environment = record.environmentDisplayName || record.environmentId || '';
-  return `<tr>
+  const solutionName = record.solutionName || record.uniqueName || 'Unnamed solution';
+  const indicators = Array.isArray(record.changeIndicators) ? record.changeIndicators : [];
+  const eventSort = Date.parse(record.eventAt || '');
+  return `<tr data-weekly-solution-row data-weekly-detail-id="${escapeAttr(detailsId)}" data-weekly-change-types="${escapeAttr(indicators.join(' '))}" data-sort-solution="${escapeAttr(solutionName.toLocaleLowerCase())}" data-sort-type="${escapeAttr(String(record.primaryComponent || 'Other').toLocaleLowerCase())}" data-sort-agent="${Number(counts.agents || 0)}" data-sort-canvas="${Number(counts.canvasApps || 0)}" data-sort-code="${Number(counts.codeApps || 0)}" data-sort-model="${Number(counts.modelDrivenApps || 0)}" data-sort-flow="${Number(counts.flows || 0)}" data-sort-table="${Number(counts.tables || 0)}" data-sort-event="${Number.isFinite(eventSort) ? eventSort : 0}">
     <td class="weekly-solution-cell">
-      <button class="weekly-solution-button" type="button" data-weekly-detail="${escapeAttr(detailsId)}" aria-expanded="false">${escapeHtml(record.solutionName || record.uniqueName || 'Unnamed solution')}</button>
+      <button class="weekly-solution-button" type="button" data-weekly-detail="${escapeAttr(detailsId)}" aria-expanded="false">${escapeHtml(solutionName)}</button>
       ${renderWeeklyChangeIndicators(record)}
       <div class="weekly-solution-meta">
         ${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}
@@ -1416,6 +1441,11 @@ function renderWeeklyComponents(components) {
 }
 
 function handleWeeklySolutionToggle(event) {
+  const sortButton = event.target.closest('[data-weekly-sort]');
+  if (sortButton) {
+    sortWeeklySolutionTable(sortButton);
+    return;
+  }
   const button = event.target.closest('[data-weekly-detail]');
   if (!button) return;
   const details = document.getElementById(button.dataset.weeklyDetail || '');
@@ -1423,6 +1453,56 @@ function handleWeeklySolutionToggle(event) {
   const expanded = button.getAttribute('aria-expanded') === 'true';
   button.setAttribute('aria-expanded', String(!expanded));
   details.hidden = expanded;
+}
+
+function handleWeeklyReportFilter(event) {
+  const select = event.target.closest('[data-weekly-change-filter]');
+  if (!select) return;
+  const table = document.getElementById(select.dataset.weeklyTable || '');
+  if (!table) return;
+  const filter = select.value || 'all';
+  for (const row of table.querySelectorAll('tbody > tr[data-weekly-solution-row]')) {
+    const visible = filter === 'all' || String(row.dataset.weeklyChangeTypes || '').split(' ').includes(filter);
+    row.hidden = !visible;
+    if (!visible) {
+      const detail = document.getElementById(row.dataset.weeklyDetailId || '');
+      if (detail) detail.hidden = true;
+      row.querySelector('[data-weekly-detail]')?.setAttribute('aria-expanded', 'false');
+    }
+  }
+}
+
+function sortWeeklySolutionTable(button) {
+  const table = button.closest('table');
+  const tbody = table?.tBodies?.[0];
+  if (!table || !tbody) return;
+  const key = button.dataset.weeklySort || 'solution';
+  const direction = table.dataset.weeklySortKey === key && table.dataset.weeklySortDirection === 'ascending'
+    ? 'descending'
+    : 'ascending';
+  const multiplier = direction === 'ascending' ? 1 : -1;
+  const numeric = button.dataset.weeklySortType === 'number';
+  const records = [...tbody.querySelectorAll('tr[data-weekly-solution-row]')].map((row) => ({
+    row,
+    detail: document.getElementById(row.dataset.weeklyDetailId || ''),
+  }));
+  records.sort((left, right) => {
+    const leftValue = left.row.getAttribute(`data-sort-${key}`) || '';
+    const rightValue = right.row.getAttribute(`data-sort-${key}`) || '';
+    const comparison = numeric
+      ? Number(leftValue) - Number(rightValue)
+      : leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: 'base' });
+    return comparison * multiplier;
+  });
+  for (const record of records) {
+    tbody.append(record.row);
+    if (record.detail) tbody.append(record.detail);
+  }
+  table.dataset.weeklySortKey = key;
+  table.dataset.weeklySortDirection = direction;
+  for (const heading of table.querySelectorAll('[data-weekly-sort-heading]')) {
+    heading.setAttribute('aria-sort', heading.dataset.weeklySortHeading === key ? direction : 'none');
+  }
 }
 
 function createWeeklyReportCharts(model) {

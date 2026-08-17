@@ -7368,7 +7368,7 @@ async function collectWeeklySolutionEvents(environment, accountHomeId, options =
   const existingByKey = new Map((options.existingEvents || []).map((event) => [event.key, event]));
   const pending = solutions.flatMap((solution) => ['created', 'modified'].flatMap((eventType) => {
     const eventAt = eventType === 'created' ? solution.createdon : solution.modifiedon;
-    if (eventType === 'modified' && sameWeeklyEventInstant(solution.createdon, solution.modifiedon)) return [];
+    if (eventType === 'modified' && sameWeeklyEventDay(solution.createdon, solution.modifiedon)) return [];
     if (!eventAt || formatLocalDateKey(eventAt) < cutoffDate) return [];
     const key = weeklySolutionEventKey(solution, eventType, eventAt, environment, accountHomeId);
     const existing = existingByKey.get(key);
@@ -7571,13 +7571,13 @@ function weeklySolutionEventKey(solution, eventType, eventAt, environment, accou
   return `${accountHomeId}:${weeklyEnvironmentId(environment)}:${normalizeGuid(solution.solutionid)}:${eventType}:${startOfCalendarWeek(eventAt)}`;
 }
 
-function sameWeeklyEventInstant(left, right) {
+function sameWeeklyEventDay(left, right) {
   if (!left || !right) return false;
-  const leftTime = Date.parse(String(left));
-  const rightTime = Date.parse(String(right));
-  return Number.isFinite(leftTime) && Number.isFinite(rightTime)
-    ? leftTime === rightTime
-    : String(left) === String(right);
+  try {
+    return formatLocalDateKey(left) === formatLocalDateKey(right);
+  } catch {
+    return String(left).slice(0, 10) === String(right).slice(0, 10);
+  }
 }
 
 async function collectAutomatedSolutionRows(environments, options, accountHomeId = '', onEnvironment = null) {

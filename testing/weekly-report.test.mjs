@@ -88,11 +88,11 @@ test('builds selected-week and historical report data without repeating a soluti
   assert.equal(model.history.deployed.length, 2);
 });
 
-test('same-timestamp deployments are not double counted as updates', () => {
+test('same-day deployments are not double counted as updates', () => {
   const timestamp = '2026-08-11T10:00:00.000Z';
   const deployedOnly = buildWeeklyReportModel([
     event({ eventType: 'created', eventAt: timestamp }),
-    event({ eventType: 'modified', eventAt: timestamp }),
+    event({ eventType: 'modified', eventAt: '2026-08-11T10:01:00.000Z' }),
   ], {
     selectedWeekStart: '2026-08-10',
     historyRange: { key: '2w', label: 'Last 2 weeks', start: '2026-08-03', end: '2026-08-16' },
@@ -104,13 +104,14 @@ test('same-timestamp deployments are not double counted as updates', () => {
 
   const deployedAndUpdated = buildWeeklyReportModel([
     event({ eventType: 'created', eventAt: timestamp }),
-    event({ eventType: 'modified', eventAt: '2026-08-11T10:01:00.000Z' }),
+    event({ eventType: 'modified', eventAt: '2026-08-12T10:01:00.000Z' }),
   ], {
     selectedWeekStart: '2026-08-10',
     historyRange: { key: '2w', label: 'Last 2 weeks', start: '2026-08-03', end: '2026-08-16' },
   });
   assert.equal(deployedAndUpdated.selectedWeek.deployed.length, 1);
   assert.equal(deployedAndUpdated.selectedWeek.updated.length, 1);
+  assert.equal(deployedAndUpdated.selectedWeek.solutions.length, 1);
   assert.deepEqual(deployedAndUpdated.selectedWeek.deployed[0].changeIndicators, ['deployed', 'updated']);
 });
 
@@ -147,12 +148,16 @@ test('defaults history to three months and exports one self-contained HTML page'
   assert.match(html, /Weekly &lt;solution&gt;/);
   assert.match(html, /<style>[\s\S]+<\/style>/);
   assert.match(html, /<script>[\s\S]+<\/script>/);
-  assert.match(html, /<th>Type<\/th>/);
+  assert.match(html, /data-sort="type"[^>]*>Type<\/button>/);
   assert.doesNotMatch(html, /<th>Version<\/th>/);
   assert.match(html, /Version 1\.0\.0\.0/);
   assert.match(html, /change-indicator deployed[^>]*>Deployed</);
   assert.match(html, /change-indicator updated[^>]*>Updated</);
-  assert.equal((html.match(/<colgroup>/g) || []).length, 4);
+  assert.equal((html.match(/<colgroup>/g) || []).length, 2);
+  assert.match(html, /data-change-filter/);
+  assert.match(html, /data-sort="solution"/);
+  assert.match(html, /Deployed solutions by primary component/);
+  assert.match(html, /Updated solutions by primary component/);
   assert.match(html, /max-height:460px/);
   assert.match(html, /table\{[^}]*font-size:11px;[^}]*min-width:760px/);
   assert.match(html, /col\.col-solution\{width:23%\}col\.col-type\{width:11%\}col\.col-count\{width:7\.5%\}col\.col-event\{width:21%\}/);
@@ -193,6 +198,20 @@ test('extension weekly tables use the compact shared column proportions', () => 
   assert.match(extensionStyles, /\.weekly-col-type\s*\{\s*width:\s*11%;\s*\}/);
   assert.match(extensionStyles, /\.weekly-col-count\s*\{\s*width:\s*7\.5%;\s*\}/);
   assert.match(extensionStyles, /\.weekly-col-event\s*\{\s*width:\s*21%;\s*\}/);
+});
+
+test('weekly periods use one filterable sortable solution table with both charts alongside', () => {
+  for (const source of [appScript, nodeAppScript]) {
+    assert.match(source, /const records = period\.solutions \|\| \[\];/);
+    assert.match(source, /data-weekly-change-filter/);
+    assert.match(source, /<option value="all">All<\/option>/);
+    assert.match(source, /function sortWeeklySolutionTable\(button\)/);
+    assert.match(source, /weeklySortableHeader\('Event', 'event', true\)/);
+    assert.match(source, /Deployed solutions by primary component/);
+    assert.match(source, /Updated solutions by primary component/);
+  }
+  assert.match(extensionStyles, /\.weekly-chart-stack\s*\{[^}]*display:\s*grid;/s);
+  assert.match(nodeStyles, /\.weekly-sort-button::after\s*\{[^}]*content:\s*"\\2195";/s);
 });
 
 test('Node UI and standalone download use the completed compact weekly report', () => {
@@ -239,13 +258,13 @@ test('weekly tracking is local-first, hourly, incremental, and periodically repa
   assert.match(serverCore, /lastSuccessfulSync - WEEKLY_REPORT_QUERY_OVERLAP_MS/);
   assert.match(serverCore, /existingEvents: eventsByEnvironment\.get\(environmentId\) \|\| \[\]/);
   assert.match(serverCore, /if \(!pending\.length\) \{\s+return \[\];\s+\}/);
-  assert.match(serverCore, /eventType === 'modified' && sameWeeklyEventInstant\(solution\.createdon, solution\.modifiedon\)/);
+  assert.match(serverCore, /eventType === 'modified' && sameWeeklyEventDay\(solution\.createdon, solution\.modifiedon\)/);
   assert.match(serverCore, /pendingSolutions\.map\(\(solution\) => solution\.solutionid\)/);
   assert.match(serverCore, /await weeklyReplaceEvents\(events\);/);
   assert.match(nodeServer, /WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 \* 60 \* 1000/);
   assert.match(nodeServer, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS = 24 \* 60 \* 60 \* 1000/);
   assert.match(nodeServer, /const requiresInitialSync = environments\.some/);
-  assert.match(nodeServer, /eventType === 'modified' && sameWeeklyEventInstant\(solution\.createdon, solution\.modifiedon\)/);
+  assert.match(nodeServer, /eventType === 'modified' && sameWeeklyEventDay\(solution\.createdon, solution\.modifiedon\)/);
   assert.match(backgroundScript, /WEEKLY_REPORT_ALARM_NAME = 'weekly-report-check'/);
   assert.match(backgroundScript, /periodInMinutes: WEEKLY_REPORT_CHECK_INTERVAL_MS \/ \(60 \* 1000\)/);
   assert.match(backgroundScript, /chrome\.runtime\.onInstalled[\s\S]+checkBackgroundReports\(\)\.catch/);

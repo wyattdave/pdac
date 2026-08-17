@@ -139,7 +139,7 @@ export function buildWeeklyReportModel(events = [], options = {}) {
       components: Array.isArray(event.components) ? event.components : [],
       primaryComponent: primaryWeeklyComponent(event),
     }));
-  const normalized = addWeeklyChangeIndicators(removeDuplicateDeploymentUpdates(normalizedEvents));
+  const normalized = removeDuplicateDeploymentUpdates(normalizedEvents);
 
   const selected = buildPeriod(normalized, selectedWeekStart, selectedWeekEnd);
   const previous = buildPeriod(normalized, previousWeekStart, previousWeekEnd);
@@ -167,33 +167,15 @@ export function buildWeeklyReportModel(events = [], options = {}) {
 }
 
 function removeDuplicateDeploymentUpdates(events) {
-  const createdInstants = new Map();
+  const createdDays = new Map();
   for (const event of events) {
     if (event.eventType !== 'created') continue;
     const key = weeklySolutionIdentity(event);
-    if (!createdInstants.has(key)) createdInstants.set(key, new Set());
-    createdInstants.get(key).add(normalizeEventInstant(event.eventAt));
+    if (!createdDays.has(key)) createdDays.set(key, new Set());
+    createdDays.get(key).add(eventDateKey(event));
   }
   return events.filter((event) => event.eventType !== 'modified'
-    || !createdInstants.get(weeklySolutionIdentity(event))?.has(normalizeEventInstant(event.eventAt)));
-}
-
-function addWeeklyChangeIndicators(events) {
-  const states = new Map();
-  for (const event of events) {
-    const key = weeklySolutionIdentity(event);
-    const state = states.get(key) || { deployed: false, updated: false };
-    state.deployed ||= event.eventType === 'created';
-    state.updated ||= event.eventType === 'modified';
-    states.set(key, state);
-  }
-  return events.map((event) => {
-    const state = states.get(weeklySolutionIdentity(event)) || {};
-    return {
-      ...event,
-      changeIndicators: [state.deployed ? 'deployed' : '', state.updated ? 'updated' : ''].filter(Boolean),
-    };
-  });
+    || !createdDays.get(weeklySolutionIdentity(event))?.has(eventDateKey(event)));
 }
 
 function weeklySolutionIdentity(event = {}) {
@@ -202,11 +184,6 @@ function weeklySolutionIdentity(event = {}) {
     event.environmentId || event.environmentUrl || '',
     event.solutionId || event.solutionid || event.uniqueName || '',
   ].join(':');
-}
-
-function normalizeEventInstant(value) {
-  const parsed = Date.parse(String(value || ''));
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : String(value || '');
 }
 
 export function buildStandaloneWeeklyReportHtml(model = {}) {
@@ -228,12 +205,14 @@ h1,h2,h3{margin:0 0 8px}h1{font-size:28px}h2{margin-top:30px;font-size:22px}h3{f
 .muted{color:#64748b;margin:4px 0}
 .panel{background:#fff;border:1px solid #dbe3ee;border-radius:14px;padding:20px;margin-top:16px;box-shadow:0 5px 18px rgba(15,23,42,.05)}
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,.34fr);gap:18px;align-items:start}
+.table-panel{display:grid;gap:8px;min-width:0}.table-toolbar{display:flex;justify-content:flex-end}.change-filter{align-items:center;display:inline-flex;gap:6px;font-size:12px}.change-filter select{border:1px solid #cbd5e1;border-radius:6px;padding:5px 24px 5px 7px}.chart-stack{display:grid;gap:14px;min-width:0}
 .table-wrap{border:1px solid #dbe3ee;border-radius:10px;max-height:460px;min-width:0;overflow:auto}
 table{border-collapse:collapse;font-size:11px;min-width:760px;table-layout:fixed;width:100%}
 col.col-solution{width:23%}col.col-type{width:11%}col.col-count{width:7.5%}col.col-event{width:21%}
 th,td{text-align:left;padding:7px 5px;border-bottom:1px solid #e7edf5;vertical-align:top}
 th{font-size:10px;text-transform:uppercase;letter-spacing:.02em;background:#f8fafc;color:#475569;position:sticky;top:0;z-index:2}
 th.num,td.num{text-align:center;vertical-align:middle}
+.sort-button{align-items:center;background:none;border:0;color:inherit;cursor:pointer;display:inline-flex;font:inherit;gap:3px;justify-content:flex-start;padding:0;text-align:left;text-transform:inherit;width:100%}.sort-button:after{content:'↕';font-size:11px;opacity:.65}th.num .sort-button{justify-content:center;text-align:center}th[aria-sort=ascending] .sort-button:after{content:'↑';opacity:1}th[aria-sort=descending] .sort-button:after{content:'↓';opacity:1}
 .solution-toggle{border:0;background:none;color:#0f5ea8;font:inherit;font-weight:700;padding:0;cursor:pointer;text-align:left}
 .solution-toggle:before{content:'▸';display:inline-block;margin-right:7px;transition:transform .15s}.solution-toggle[aria-expanded=true]:before{transform:rotate(90deg)}
 .change-indicators{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}.change-indicator{border:1px solid;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.04em;line-height:1;padding:3px 6px;text-transform:uppercase}.change-indicator.deployed{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8}.change-indicator.updated{background:#fef3c7;border-color:#fcd34d;color:#92400e}
@@ -250,7 +229,7 @@ small{display:block;color:#64748b;margin-top:3px}
 .actions{display:flex;justify-content:flex-end;margin-bottom:10px}button.print{background:#155eef;color:white;border:0;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer}
 body.printing .table-wrap{max-height:none;overflow:visible}
 @media(max-width:900px){.grid{grid-template-columns:1fr}main{padding:14px}}
-@media print{body{background:#fff}main{max-width:none;padding:0}.panel{box-shadow:none;break-inside:auto}.actions{display:none}.table-wrap{max-height:none;overflow:visible}th{position:static}}
+@media print{body{background:#fff}main{max-width:none;padding:0}.panel{box-shadow:none;break-inside:auto}.actions,.table-toolbar{display:none}.table-wrap{max-height:none;overflow:visible}th{position:static}}
 </style>
 </head>
 <body><main>
@@ -260,7 +239,10 @@ ${standalonePeriodHtml(selectedWeek.label || 'Selected week', selectedWeek, sele
 ${standalonePeriodHtml(`${history.label || 'Selected range'} (${formatShortDateRange(history.start, history.end)})`, history, { weeklyCounts: history.weeklyCounts || [] })}
 </main>
 <script>
-document.addEventListener('click',function(event){var button=event.target.closest('[data-detail]');if(!button)return;var row=document.getElementById(button.getAttribute('data-detail'));var open=button.getAttribute('aria-expanded')==='true';button.setAttribute('aria-expanded',String(!open));if(row)row.hidden=open;});
+document.addEventListener('click',function(event){var sort=event.target.closest('[data-sort]');if(sort){sortTable(sort);return;}var button=event.target.closest('[data-detail]');if(!button)return;var row=document.getElementById(button.getAttribute('data-detail'));var open=button.getAttribute('aria-expanded')==='true';button.setAttribute('aria-expanded',String(!open));if(row)row.hidden=open;});
+document.addEventListener('change',function(event){var select=event.target.closest('[data-change-filter]');if(!select)return;filterTable(select);});
+function filterTable(select){var table=document.getElementById(select.getAttribute('data-table'));if(!table)return;var filter=select.value||'all';table.querySelectorAll('tbody>tr[data-record]').forEach(function(row){var visible=filter==='all'||(row.getAttribute('data-changes')||'').split(' ').includes(filter);row.hidden=!visible;if(!visible){var detail=document.getElementById(row.getAttribute('data-detail-id'));if(detail)detail.hidden=true;var button=row.querySelector('[data-detail]');if(button)button.setAttribute('aria-expanded','false');}});}
+function sortTable(button){var table=button.closest('table');var body=table&&table.tBodies[0];if(!body)return;var key=button.getAttribute('data-sort');var direction=table.getAttribute('data-sort-key')===key&&table.getAttribute('data-sort-direction')==='ascending'?'descending':'ascending';var multiplier=direction==='ascending'?1:-1;var numeric=button.getAttribute('data-sort-type')==='number';var records=Array.from(body.querySelectorAll('tr[data-record]')).map(function(row){return{row:row,detail:document.getElementById(row.getAttribute('data-detail-id'))};});records.sort(function(left,right){var a=left.row.getAttribute('data-sort-'+key)||'';var b=right.row.getAttribute('data-sort-'+key)||'';var comparison=numeric?Number(a)-Number(b):a.localeCompare(b,undefined,{numeric:true,sensitivity:'base'});return comparison*multiplier;});records.forEach(function(record){body.append(record.row);if(record.detail)body.append(record.detail);});table.setAttribute('data-sort-key',key);table.setAttribute('data-sort-direction',direction);table.querySelectorAll('[data-sort-heading]').forEach(function(heading){heading.setAttribute('aria-sort',heading.getAttribute('data-sort-heading')===key?direction:'none');});}
 function printWeeklyReport(){document.body.classList.add('printing');requestAnimationFrame(function(){requestAnimationFrame(function(){window.print();});});}
 window.addEventListener('afterprint',function(){document.body.classList.remove('printing');});
 </script>
@@ -272,9 +254,22 @@ function buildPeriod(events, start, end) {
     const key = eventDateKey(event);
     return key >= start && key <= end;
   });
-  const deployed = deduplicateSolutions(periodEvents.filter((event) => event.eventType === 'created'));
-  const updated = deduplicateSolutions(periodEvents.filter((event) => event.eventType === 'modified'));
+  const deployedRecords = deduplicateSolutions(periodEvents.filter((event) => event.eventType === 'created'));
+  const updatedRecords = deduplicateSolutions(periodEvents.filter((event) => event.eventType === 'modified'));
+  const deployedKeys = new Set(deployedRecords.map(weeklySolutionIdentity));
+  const updatedKeys = new Set(updatedRecords.map(weeklySolutionIdentity));
+  const withIndicators = (record) => ({
+    ...record,
+    changeIndicators: [
+      deployedKeys.has(weeklySolutionIdentity(record)) ? 'deployed' : '',
+      updatedKeys.has(weeklySolutionIdentity(record)) ? 'updated' : '',
+    ].filter(Boolean),
+  });
+  const deployed = deployedRecords.map(withIndicators);
+  const updated = updatedRecords.map(withIndicators);
+  const solutions = deduplicateSolutions([...deployed, ...updated]).map(withIndicators);
   return {
+    solutions,
     deployed,
     updated,
     deployedPrimaryMix: primaryMix(deployed),
@@ -327,25 +322,34 @@ function buildWeeklyCounts(events, start, end) {
 function standalonePeriodHtml(title, period, comparison) {
   const deployed = period.deployed || [];
   const updated = period.updated || [];
+  const solutions = period.solutions || deduplicateSolutions([...deployed, ...updated]);
+  const prefix = `period-${safeId(title)}`;
   return `<section class="panel"><h2>${escapeHtml(title)}</h2><div class="summary"><div class="metric"><span>Deployed</span><strong>${deployed.length}</strong></div><div class="metric"><span>Updated</span><strong>${updated.length}</strong></div></div>
-${standaloneReportGroup('Solutions deployed', deployed, period.deployedPrimaryMix || [])}
-${standaloneReportGroup('Solutions updated', updated, period.updatedPrimaryMix || [])}
+${standaloneReportGroup(solutions, period.deployedPrimaryMix || [], period.updatedPrimaryMix || [], prefix)}
 ${standaloneComparisonChart(comparison)}</section>`;
 }
 
-function standaloneReportGroup(title, records, mix) {
-  return `<h3 style="margin-top:24px">${escapeHtml(title)}</h3><div class="grid"><div class="table-wrap">${standaloneTable(records)}</div>${standalonePrimaryChart(mix)}</div>`;
+function standaloneReportGroup(records, deployedMix, updatedMix, prefix) {
+  const tableId = `${prefix}-table`;
+  return `<h3 style="margin-top:24px">Solutions</h3><div class="grid"><div class="table-panel"><div class="table-toolbar"><label class="change-filter">Show <select data-change-filter data-table="${escapeHtml(tableId)}"><option value="all">All</option><option value="deployed">Deployed</option><option value="updated">Updated</option></select></label></div><div class="table-wrap">${standaloneTable(records, tableId)}</div></div><div class="chart-stack">${standalonePrimaryChart(deployedMix, 'Deployed solutions by primary component')}${standalonePrimaryChart(updatedMix, 'Updated solutions by primary component')}</div></div>`;
 }
 
-function standaloneTable(records) {
+function standaloneTable(records, tableId) {
   if (!records.length) return '<div class="empty">No solutions in this period.</div>';
-  return `<table>${standaloneTableColgroup()}<thead><tr><th>Solution</th><th>Type</th><th class="num">Agent</th><th class="num">Canvas</th><th class="num">Code</th><th class="num">Model driven</th><th class="num">Flow</th><th class="num">Table</th><th>Event</th></tr></thead><tbody>${records.map((record, index) => {
+  return `<table id="${escapeHtml(tableId)}">${standaloneTableColgroup()}<thead><tr>${standaloneSortableHeader('Solution', 'solution')}${standaloneSortableHeader('Type', 'type')}${standaloneSortableHeader('Agent', 'agent', true)}${standaloneSortableHeader('Canvas', 'canvas', true)}${standaloneSortableHeader('Code', 'code', true)}${standaloneSortableHeader('Model driven', 'model', true)}${standaloneSortableHeader('Flow', 'flow', true)}${standaloneSortableHeader('Table', 'table', true)}${standaloneSortableHeader('Event', 'event', true)}</tr></thead><tbody>${records.map((record, index) => {
     const counts = { ...emptyWeeklyComponentCounts(), ...(record.componentCounts || {}) };
-    const id = `detail-${safeId(record.eventType)}-${safeId(record.environmentId)}-${safeId(record.solutionId)}-${index}`;
+    const id = `${safeId(tableId)}-detail-${safeId(record.eventType)}-${safeId(record.environmentId)}-${safeId(record.solutionId)}-${index}`;
     const components = record.components || [];
     const environment = record.environmentDisplayName || record.environmentId || '';
-    return `<tr><td><button class="solution-toggle" type="button" data-detail="${id}" aria-expanded="false">${escapeHtml(record.solutionName || record.uniqueName || 'Unnamed solution')}</button>${standaloneChangeIndicators(record)}<div class="solution-meta">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}</div></td><td>${escapeHtml(record.primaryComponent || 'Other')}</td>${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="num">${Number(counts[key] || 0)}</td>`).join('')}<td>${escapeHtml(formatDateTime(record.eventAt))}</td></tr><tr id="${id}" class="component-row" hidden><td colspan="9">${standaloneComponents(components)}</td></tr>`;
+    const solutionName = record.solutionName || record.uniqueName || 'Unnamed solution';
+    const changes = Array.isArray(record.changeIndicators) ? record.changeIndicators.join(' ') : '';
+    const eventSort = Date.parse(record.eventAt || '');
+    return `<tr data-record data-detail-id="${id}" data-changes="${escapeHtml(changes)}" data-sort-solution="${escapeHtml(solutionName.toLocaleLowerCase())}" data-sort-type="${escapeHtml(String(record.primaryComponent || 'Other').toLocaleLowerCase())}" data-sort-agent="${Number(counts.agents || 0)}" data-sort-canvas="${Number(counts.canvasApps || 0)}" data-sort-code="${Number(counts.codeApps || 0)}" data-sort-model="${Number(counts.modelDrivenApps || 0)}" data-sort-flow="${Number(counts.flows || 0)}" data-sort-table="${Number(counts.tables || 0)}" data-sort-event="${Number.isFinite(eventSort) ? eventSort : 0}"><td><button class="solution-toggle" type="button" data-detail="${id}" aria-expanded="false">${escapeHtml(solutionName)}</button>${standaloneChangeIndicators(record)}<div class="solution-meta">${record.version ? `<span>Version ${escapeHtml(record.version)}</span>` : ''}${record.publisherName ? `<span>Publisher: ${escapeHtml(record.publisherName)}</span>` : ''}${environment ? `<span>Environment: ${escapeHtml(environment)}</span>` : ''}</div></td><td>${escapeHtml(record.primaryComponent || 'Other')}</td>${['agents', 'canvasApps', 'codeApps', 'modelDrivenApps', 'flows', 'tables'].map((key) => `<td class="num">${Number(counts[key] || 0)}</td>`).join('')}<td>${escapeHtml(formatDateTime(record.eventAt))}</td></tr><tr id="${id}" class="component-row" hidden><td colspan="9">${standaloneComponents(components)}</td></tr>`;
   }).join('')}</tbody></table>`;
+}
+
+function standaloneSortableHeader(label, key, numeric = false) {
+  return `<th${numeric ? ' class="num"' : ''} data-sort-heading="${key}" aria-sort="none"><button class="sort-button" type="button" data-sort="${key}" data-sort-type="${numeric ? 'number' : 'text'}">${escapeHtml(label)}</button></th>`;
 }
 
 function standaloneChangeIndicators(record) {
@@ -364,10 +368,10 @@ function standaloneComponents(components) {
   return `<ul class="component-list">${components.map((component) => `<li><span class="component-kind">${escapeHtml(component.label || component.kind || 'Component')}</span><strong>${escapeHtml(component.name || component.objectId || 'Unnamed component')}</strong>${component.logicalName ? `<small>${escapeHtml(component.logicalName)}</small>` : ''}</li>`).join('')}</ul>`;
 }
 
-function standalonePrimaryChart(mix) {
+function standalonePrimaryChart(mix, title) {
   const rows = Array.isArray(mix) ? mix : [];
   const max = Math.max(1, ...rows.map((row) => Number(row.count || 0)));
-  return `<div class="chart"><strong>Solutions by primary component</strong>${rows.map((row) => `<div class="bar-row"><span>${escapeHtml(row.label)}</span><div class="track"><div class="bar" style="width:${(Number(row.count || 0) / max) * 100}%;background:${row.color}"></div></div><b>${Number(row.count || 0)}</b></div>`).join('')}</div>`;
+  return `<div class="chart"><strong>${escapeHtml(title || 'Solutions by primary component')}</strong>${rows.map((row) => `<div class="bar-row"><span>${escapeHtml(row.label)}</span><div class="track"><div class="bar" style="width:${(Number(row.count || 0) / max) * 100}%;background:${row.color}"></div></div><b>${Number(row.count || 0)}</b></div>`).join('')}</div>`;
 }
 
 function standaloneComparisonChart(comparison = {}) {

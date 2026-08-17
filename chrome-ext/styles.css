@@ -1067,11 +1067,42 @@ select:disabled {
   gap: 10px;
 }
 
+.weekly-report-group-heading {
+  align-items: end;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.weekly-report-group-heading h4 {
+  margin: 0;
+}
+
+.weekly-change-filter {
+  align-items: center;
+  display: inline-flex;
+  flex-direction: row;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.weekly-change-filter select {
+  min-height: 32px;
+  min-width: 105px;
+  padding: 4px 28px 4px 8px;
+}
+
 .weekly-report-layout {
   align-items: start;
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(0, 1fr) minmax(230px, 0.34fr);
+}
+
+.weekly-chart-stack {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
 }
 
 .weekly-table-wrap {
@@ -1124,6 +1155,48 @@ select:disabled {
   text-transform: uppercase;
   top: 0;
   z-index: 2;
+}
+
+.weekly-sort-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: inline-flex;
+  font: inherit;
+  gap: 4px;
+  justify-content: flex-start;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+  text-transform: inherit;
+  width: 100%;
+}
+
+.weekly-sort-button:hover {
+  background: transparent;
+  color: var(--link);
+}
+
+.weekly-sort-button::after {
+  content: "\2195";
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+.weekly-report-table th.numeric .weekly-sort-button {
+  justify-content: center;
+  text-align: center;
+}
+
+.weekly-report-table th[aria-sort="ascending"] .weekly-sort-button::after {
+  content: "\2191";
+  opacity: 1;
+}
+
+.weekly-report-table th[aria-sort="descending"] .weekly-sort-button::after {
+  content: "\2193";
+  opacity: 1;
 }
 
 .weekly-report-table .numeric {
