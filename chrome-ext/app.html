@@ -331,7 +331,7 @@
                 <button id="weeklyReportDownloadButton" type="button" disabled>Download HTML</button>
               </div>
             </div>
-            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. Turning it on performs an initial three-month check. Chrome then checks hourly and performs a daily recovery check in the background.</p>
+            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. Turning it on backfills the initial three months once. Each refresh and hourly background check then requests only changes since the locally saved last poll.</p>
             <p id="weeklyReportStatus" class="muted" aria-live="polite">Open the report to load locally saved data.</p>
             <div id="weeklyReportLoading" class="weekly-report-loading" role="status" aria-live="polite" hidden>
               <span class="spinner" aria-hidden="true"></span>

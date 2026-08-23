@@ -1,8 +1,8 @@
 // PDAC extension service worker.
 //
 // The toolbar button opens the full-page app. Separate alarms run daily-report
-// checks every five minutes and weekly-report checks hourly, with catch-up
-// checks whenever the browser starts.
+// checks every five minutes and weekly-report checks hourly, resuming from
+// each environment's locally persisted poll cursor whenever the browser starts.
 
 // ExcelJS must attach itself to globalThis before server-core is evaluated.
 import './lib/exceljs.min.js';

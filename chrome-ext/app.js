@@ -1186,7 +1186,7 @@ async function refreshWeeklyReportData(options = {}) {
   const accountHomeId = resolveRequestAccountId();
   if (!accountHomeId) {
     state.weeklyReport.events = [];
-    renderWeeklyReport();
+    renderWeeklyReport({ preferPopulatedWeek: true });
     el.weeklyReportStatus.textContent = 'Select a signed-in account to load weekly report data.';
     return;
   }
@@ -1198,6 +1198,7 @@ async function refreshWeeklyReportData(options = {}) {
   setWeeklyReportLoading(true, loadingMessage);
   el.weeklyReportStatus.textContent = loadingMessage;
   let syncResult = null;
+  let loadedLocalData = false;
   try {
     if (options.sync) {
       const environments = getAutomatedReportEnvironments('solutions');
@@ -1213,30 +1214,40 @@ async function refreshWeeklyReportData(options = {}) {
     }
     const data = await api(`/api/weekly-report?accountHomeId=${encodeURIComponent(accountHomeId)}`, { quiet: true });
     state.weeklyReport.settings = data.settings || state.weeklyReport.settings;
-    state.weeklyReport.events = data.events || [];
+    state.weeklyReport.events = Array.isArray(data.events) ? data.events : [];
     applyWeeklyReportSettings(state.weeklyReport.settings);
-    renderWeeklyReport();
+    renderWeeklyReport({ preferPopulatedWeek: true });
+    loadedLocalData = true;
     el.weeklyReportDownloadButton.disabled = !state.weeklyReport.events.length;
   } finally {
     setWeeklyReportLoading(false);
+    if (loadedLocalData) updateWeeklyReportLoadedStatus();
   }
   return syncResult;
 }
 
-function populateWeeklyReportWeeks(events = state.weeklyReport.events) {
+function populateWeeklyReportWeeks(events = state.weeklyReport.events, options = {}) {
   const selected = el.weeklyReportWeek.value || startOfCalendarWeek();
   const weeks = new Set([startOfCalendarWeek()]);
+  const populatedWeeks = new Set();
   for (let index = 0; index < 14; index += 1) {
     weeks.add(addCalendarDays(startOfCalendarWeek(), index * -7));
   }
   for (const event of events) {
-    if (event.weekStart) weeks.add(event.weekStart);
+    const weekStart = event.weekStart || (event.eventAt ? startOfCalendarWeek(event.eventAt) : '');
+    if (weekStart) {
+      weeks.add(weekStart);
+      populatedWeeks.add(weekStart);
+    }
   }
   const sorted = [...weeks].sort().reverse();
   el.weeklyReportWeek.innerHTML = sorted.map((weekStart) => `
     <option value="${escapeAttr(weekStart)}">Week of ${escapeHtml(formatWeeklyDateLabel(weekStart))}</option>
   `).join('');
-  el.weeklyReportWeek.value = sorted.includes(selected) ? selected : sorted[0];
+  const populated = [...populatedWeeks].sort().reverse();
+  el.weeklyReportWeek.value = options.preferPopulatedWeek && populated.length && !populatedWeeks.has(selected)
+    ? populated[0]
+    : sorted.includes(selected) ? selected : sorted[0];
 }
 
 function populateWeeklyReportEnvironments(events) {
@@ -1269,6 +1280,25 @@ function weeklySolutionReportFilters() {
   };
 }
 
+function updateWeeklyReportLoadedStatus() {
+  if (state.weeklyReport.settings?.lastError) return;
+  const storedCount = state.weeklyReport.events.length;
+  if (!storedCount) {
+    el.weeklyReportStatus.textContent = 'No locally saved weekly solution changes were found for this account.';
+    return;
+  }
+  const visibleCount = filterWeeklyReportEvents(
+    state.weeklyReport.events,
+    weeklySolutionReportFilters(),
+  ).length;
+  const hiddenCount = storedCount - visibleCount;
+  const pollTimes = Object.values(state.weeklyReport.settings?.environmentSync || {})
+    .map((sync) => Date.parse(sync.lastPollAt || sync.lastSuccessfulSyncAt || ''))
+    .filter(Number.isFinite);
+  const lastPoll = pollTimes.length ? formatWeeklyDateTime(new Date(Math.max(...pollTimes)).toISOString()) : '';
+  el.weeklyReportStatus.textContent = `${storedCount.toLocaleString()} locally saved event${storedCount === 1 ? '' : 's'} loaded${hiddenCount ? `; ${hiddenCount.toLocaleString()} hidden by the Solutions report filters` : ''}${lastPoll ? ` · Last poll ${lastPoll}` : ''}.`;
+}
+
 function handleWeeklyHistoryRangeChange() {
   syncWeeklyHistoryRangeVisibility();
   localStorage.setItem(WEEKLY_REPORT_RANGE_KEY, JSON.stringify({
@@ -1285,7 +1315,7 @@ function syncWeeklyHistoryRangeVisibility() {
   el.weeklyReportHistoryEnd.disabled = !custom;
 }
 
-function renderWeeklyReport() {
+function renderWeeklyReport(options = {}) {
   destroyWeeklyReportCharts();
   const solutionFilteredEvents = filterWeeklyReportEvents(
     state.weeklyReport.events,
@@ -1297,7 +1327,7 @@ function renderWeeklyReport() {
     includeMicrosoftOwned: true,
     environmentId: el.weeklyReportEnvironment.value,
   });
-  populateWeeklyReportWeeks(filteredEvents);
+  populateWeeklyReportWeeks(filteredEvents, options);
   const history = historyDateRange(
     el.weeklyReportHistoryRange.value,
     el.weeklyReportHistoryStart.value,

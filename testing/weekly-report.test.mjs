@@ -187,6 +187,9 @@ test('weekly report is an exclusive Reports view that resets from the Reports ta
   assert.match(appScript, /async function openWeeklyReport\(\)[\s\S]+standardReportsContent\.hidden = true;[\s\S]+weeklyReportPanel\.hidden = false;/);
   assert.match(appScript, /function resetWeeklyReportView\(\)[\s\S]+standardReportsContent\.hidden = false;[\s\S]+weeklyReportPanel\.hidden = true;/);
   assert.match(appScript, /if \(name === 'reports'\) \{\s+resetWeeklyReportView\(\);/);
+  assert.match(appScript, /renderWeeklyReport\(\{ preferPopulatedWeek: true \}\);/);
+  assert.match(appScript, /options\.preferPopulatedWeek && populated\.length && !populatedWeeks\.has\(selected\)/);
+  assert.match(appScript, /locally saved event/);
 });
 
 test('enabling weekly tracking triggers a full three-month load with visible progress', () => {
@@ -267,23 +270,30 @@ test('Chrome stores weekly events and components in dedicated IndexedDB stores',
   assert.match(serverDb, /export async function weeklyListEvents/);
 });
 
-test('weekly tracking is local-first, hourly, incremental, and periodically repairs missing history', () => {
+test('weekly tracking is local-first, hourly, and resumes incrementally from a persisted poll cursor', () => {
   assert.match(appScript, /await refreshWeeklyReportData\(\);\s+if \(weeklyReportRefreshDue\(\)\) \{\s+await refreshWeeklyReportData\(\{ sync: true \}\);/);
   assert.match(appScript, /now - lastChecked >= 60 \* 60 \* 1000/);
   assert.match(serverCore, /WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 \* 60 \* 1000/);
-  assert.match(serverCore, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS = 24 \* 60 \* 60 \* 1000/);
+  assert.doesNotMatch(serverCore, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS/);
   assert.match(serverCore, /const requiresInitialSync = environments\.some/);
   assert.match(serverCore, /!force && !requiresInitialSync && Number\.isFinite\(lastChecked\)/);
-  assert.match(serverCore, /lastSuccessfulSync - WEEKLY_REPORT_QUERY_OVERLAP_MS/);
+  assert.match(serverCore, /const initialBackfill = !Number\.isFinite\(lastPollAt\) \|\| !Number\.isFinite\(backfillCompletedAt\)/);
+  assert.match(serverCore, /lastPollAt - WEEKLY_REPORT_QUERY_OVERLAP_MS/);
+  assert.match(serverCore, /lastPollAt: startedAt/);
+  assert.match(serverCore, /backfillCompletedAt: outcome\.initialBackfill \? startedAt/);
   assert.match(serverCore, /existingEvents: eventsByEnvironment\.get\(environmentId\) \|\| \[\]/);
   assert.match(serverCore, /if \(!pending\.length\) \{\s+return \[\];\s+\}/);
   assert.match(serverCore, /eventType === 'modified' && sameWeeklyEventDay\(solution\.createdon, solution\.modifiedon\)/);
   assert.match(serverCore, /pendingSolutions\.map\(\(solution\) => solution\.solutionid\)/);
   assert.match(serverCore, /await weeklyReplaceEvents\(events\);/);
+  assert.match(serverCore, /await saveWeeklyEventsFromSolutionReportGroups\(rowsByEnvironment, accountHomeId\);/);
+  assert.match(serverCore, /weeklyComponents: weeklyComponentsFromSolutionReport\(solutionComponents\)/);
   assert.match(nodeServer, /WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 \* 60 \* 1000/);
-  assert.match(nodeServer, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS = 24 \* 60 \* 60 \* 1000/);
+  assert.doesNotMatch(nodeServer, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS/);
   assert.match(nodeServer, /const requiresInitialSync = environments\.some/);
+  assert.match(nodeServer, /lastPollAt - WEEKLY_REPORT_QUERY_OVERLAP_MS/);
   assert.match(nodeServer, /eventType === 'modified' && sameWeeklyEventDay\(solution\.createdon, solution\.modifiedon\)/);
+  assert.match(nodeServer, /await saveWeeklyEventsFromSolutionReportGroups\(rowsByEnvironment, accountHomeId\);/);
   assert.match(backgroundScript, /WEEKLY_REPORT_ALARM_NAME = 'weekly-report-check'/);
   assert.match(backgroundScript, /periodInMinutes: WEEKLY_REPORT_CHECK_INTERVAL_MS \/ \(60 \* 1000\)/);
   assert.match(backgroundScript, /chrome\.runtime\.onInstalled[\s\S]+checkBackgroundReports\(\)\.catch/);

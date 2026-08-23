@@ -64,7 +64,6 @@ const WEEKLY_REPORT_SETTINGS_PATH = join(APP_DATA_DIR, 'weekly-report-settings.j
 const REPORT_TREND_RETENTION_DAYS = 730;
 const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const WEEKLY_REPORT_QUERY_OVERLAP_MS = 10 * 60 * 1000;
 const CONNECTION_CREATION_TIMEOUT_MS = 10 * 60 * 1000;
 const CONNECTION_CALLBACK_PROTOCOL_VERSION = '1';
@@ -5441,9 +5440,13 @@ function normalizeWeeklyEnvironmentSync(value = {}) {
   return Object.fromEntries(Object.entries(value).flatMap(([environmentId, state]) => {
     const key = String(environmentId || '').trim();
     if (!key || !state || typeof state !== 'object') return [];
+    const lastPollAt = String(state.lastPollAt || state.lastSuccessfulSyncAt || '');
+    const backfillCompletedAt = String(state.backfillCompletedAt || state.lastFullReconcileAt || '');
     return [[key, {
-      lastSuccessfulSyncAt: String(state.lastSuccessfulSyncAt || ''),
-      lastFullReconcileAt: String(state.lastFullReconcileAt || ''),
+      lastPollAt,
+      backfillCompletedAt,
+      lastSuccessfulSyncAt: lastPollAt,
+      lastFullReconcileAt: backfillCompletedAt,
       lastError: String(state.lastError || ''),
     }]];
   }));
@@ -5503,7 +5506,8 @@ async function checkWeeklyReportTracking(options = {}) {
   const lastChecked = Date.parse(stored.lastCheckedAt || '');
   const requiresInitialSync = environments.some((environment) => {
     const syncState = stored.environmentSync?.[weeklyEnvironmentId(environment)];
-    return !Number.isFinite(Date.parse(syncState?.lastSuccessfulSyncAt || ''));
+    return !Number.isFinite(Date.parse(syncState?.lastPollAt || syncState?.lastSuccessfulSyncAt || ''))
+      || !Number.isFinite(Date.parse(syncState?.backfillCompletedAt || syncState?.lastFullReconcileAt || ''));
   });
   if (!force && !requiresInitialSync && Number.isFinite(lastChecked) && Date.now() - lastChecked < WEEKLY_REPORT_CHECK_INTERVAL_MS) {
     return { status: 'not-due', ...stored };
@@ -5518,26 +5522,20 @@ async function checkWeeklyReportTracking(options = {}) {
     const existingEvents = await weeklyListEvents(accountHomeId);
     const eventsByEnvironment = groupWeeklyEventsByEnvironment(existingEvents);
     const environmentSync = { ...(stored.environmentSync || {}) };
-    const startedAtMs = Date.parse(startedAt);
     const outcomes = await mapWithConcurrency(environments, AUTOMATED_SOLUTION_ENVIRONMENT_CONCURRENCY, async (environment) => {
       const environmentId = weeklyEnvironmentId(environment);
       const syncState = environmentSync[environmentId] || {};
-      const lastSuccessfulSync = Date.parse(syncState.lastSuccessfulSyncAt || '');
-      const lastFullReconcile = Date.parse(syncState.lastFullReconcileAt || '');
-      const fullReconcile = Boolean(
-        options.full ||
-        !Number.isFinite(lastSuccessfulSync) ||
-        !Number.isFinite(lastFullReconcile) ||
-        startedAtMs - lastFullReconcile >= WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS
-      );
-      const sinceInstant = fullReconcile
+      const lastPollAt = Date.parse(syncState.lastPollAt || syncState.lastSuccessfulSyncAt || '');
+      const backfillCompletedAt = Date.parse(syncState.backfillCompletedAt || syncState.lastFullReconcileAt || '');
+      const initialBackfill = !Number.isFinite(lastPollAt) || !Number.isFinite(backfillCompletedAt);
+      const sinceInstant = initialBackfill
         ? new Date(`${cutoff}T00:00:00`).toISOString()
-        : new Date(Math.max(0, lastSuccessfulSync - WEEKLY_REPORT_QUERY_OVERLAP_MS)).toISOString();
+        : new Date(Math.max(0, lastPollAt - WEEKLY_REPORT_QUERY_OVERLAP_MS)).toISOString();
       try {
         return {
           environment,
           environmentId,
-          fullReconcile,
+          initialBackfill,
           events: await collectWeeklySolutionEvents(environment, accountHomeId, {
             cutoffDate: cutoff,
             sinceInstant,
@@ -5546,7 +5544,7 @@ async function checkWeeklyReportTracking(options = {}) {
           error: '',
         };
       } catch (error) {
-        return { environment, environmentId, fullReconcile, events: [], error: errorMessage(error) };
+        return { environment, environmentId, initialBackfill, events: [], error: errorMessage(error) };
       }
     });
     const events = outcomes.flatMap((outcome) => outcome.events);
@@ -5562,8 +5560,10 @@ async function checkWeeklyReportTracking(options = {}) {
         ? { ...previous, lastError: outcome.error }
         : {
             ...previous,
+            lastPollAt: startedAt,
+            backfillCompletedAt: outcome.initialBackfill ? startedAt : previous.backfillCompletedAt || previous.lastFullReconcileAt || '',
             lastSuccessfulSyncAt: startedAt,
-            lastFullReconcileAt: outcome.fullReconcile ? startedAt : previous.lastFullReconcileAt || '',
+            lastFullReconcileAt: outcome.initialBackfill ? startedAt : previous.lastFullReconcileAt || previous.backfillCompletedAt || '',
             lastError: '',
           };
     }
@@ -6908,43 +6908,16 @@ async function importTrendDataWorkbook(xlsxBase64, fallbackAccountHomeId = '') {
 
 async function exportSqlTablesWorkbook() {
   const db = await getReportTrendDb();
-  const tableNames = getUserSqlTableNames(db);
-  const tableInfos = tableNames.map((name) => getSqlTableInfo(db, name));
+  const template = await buildTrendDataImportTemplate(selected.accountHomeId);
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'PDAC';
-  workbook.created = new Date();
-  const summary = workbook.addWorksheet('SQL Tables', {
-    views: [{ state: 'frozen', ySplit: 1 }],
-  });
-  summary.columns = [
-    { header: 'Table', key: 'name', width: 36 },
-    { header: 'Rows', key: 'rowCount', width: 14 },
-    { header: 'Storage bytes', key: 'storageBytes', width: 18 },
-  ];
-  summary.addRows(tableInfos);
-  styleSqlWorksheet(summary, 3, tableInfos.length);
-
-  const usedNames = new Set(['SQL Tables']);
-  for (const tableName of tableNames) {
-    const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(tableName)}`).all();
-    const definition = reportTotalTableDefinitionByName(tableName);
-    const columns = definition
-      ? trendDataImportColumns(definition)
-      : rows.length
-        ? Object.keys(rows[0])
-        : getSqlTableColumns(db, tableName);
-    const worksheet = workbook.addWorksheet(uniqueWorksheetName(tableName, usedNames), {
-      views: [{ state: 'frozen', ySplit: 1 }],
-    });
-    worksheet.columns = columns.map((column) => ({
-      header: column,
-      key: column,
-      width: columnWidth(column),
-    }));
-    worksheet.addRows(rows);
+  await workbook.xlsx.load(template);
+  for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
+    const rows = db.prepare(`SELECT * FROM ${quoteSqlIdentifier(definition.tableName)}`).all();
+    const columns = trendDataImportColumns(definition);
+    const worksheet = workbook.getWorksheet(definition.tableName);
+    worksheet.addRows(rows.map((row) => columns.map((column) => row[column] ?? '')));
     styleSqlWorksheet(worksheet, columns.length, rows.length);
   }
-
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }
 
@@ -7178,6 +7151,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
   const rowsByEnvironment = await collectAutomatedSolutionRows(environments, solutionOptions, accountHomeId, reportProgress);
   if (saveTrends && reportType !== 'raw') {
+    await saveWeeklyEventsFromSolutionReportGroups(rowsByEnvironment, accountHomeId);
     await saveAutomatedReportTrendSnapshot({
       accountHomeId,
       group,
@@ -7358,6 +7332,70 @@ async function collectAutomatedFlowRunRows(environments, dateRange, accountHomeI
   return groups;
 }
 
+async function saveWeeklyEventsFromSolutionReportGroups(groups = [], accountHomeId = '') {
+  const normalizedAccountHomeId = String(accountHomeId || '').trim();
+  if (!normalizedAccountHomeId || !groups.length) return;
+  const cutoffDate = weeklyRetentionCutoff();
+  const pollAt = new Date().toISOString();
+  const eventsByKey = new Map();
+  for (const { environment, rows = [] } of groups) {
+    for (const solution of rows) {
+      const componentCounts = weeklyCountsFromSolutionReport(solution);
+      const components = Array.isArray(solution.weeklyComponents) ? solution.weeklyComponents : [];
+      for (const eventType of ['created', 'modified']) {
+        const eventAt = eventType === 'created' ? solution.createdon : solution.modifiedon;
+        if (eventType === 'modified' && sameWeeklyEventDay(solution.createdon, solution.modifiedon)) continue;
+        const event = weeklySolutionEvent(
+          solution,
+          eventType,
+          eventAt,
+          environment,
+          normalizedAccountHomeId,
+          cutoffDate,
+          components,
+          componentCounts,
+        );
+        if (event) eventsByKey.set(event.key, event);
+      }
+    }
+  }
+  if (eventsByKey.size) await weeklyReplaceEvents([...eventsByKey.values()]);
+  await weeklyDeleteEventsBefore(cutoffDate);
+
+  const settings = await readWeeklyReportSettings();
+  if (settings.accountHomeId && settings.accountHomeId !== normalizedAccountHomeId) return;
+  const environmentSync = { ...(settings.environmentSync || {}) };
+  for (const { environment } of groups) {
+    const environmentId = weeklyEnvironmentId(environment);
+    if (!environmentId) continue;
+    environmentSync[environmentId] = {
+      ...(environmentSync[environmentId] || {}),
+      lastPollAt: pollAt,
+      backfillCompletedAt: pollAt,
+      lastSuccessfulSyncAt: pollAt,
+      lastFullReconcileAt: pollAt,
+      lastError: '',
+    };
+  }
+  await writeWeeklyReportSettings(normalizeWeeklyReportSettings({
+    ...settings,
+    accountHomeId: normalizedAccountHomeId,
+    environmentSync,
+  }));
+}
+
+function weeklyCountsFromSolutionReport(solution = {}) {
+  return {
+    ...emptyWeeklyComponentCounts(),
+    agents: Number(solution['# of Copilot Studio Agents'] || 0),
+    canvasApps: Number(solution['# of Canvas Apps'] || 0),
+    codeApps: Number(solution['# of Code Apps'] || 0),
+    modelDrivenApps: Number(solution['# of Model Driven Apps'] || 0),
+    flows: Number(solution['# of flows'] || 0),
+    tables: Number(solution['# of Dataverse tables'] || 0),
+  };
+}
+
 async function collectWeeklySolutionEvents(environment, accountHomeId, options = {}) {
   const cutoffDate = options.cutoffDate || weeklyRetentionCutoff();
   const sinceInstant = options.sinceInstant || new Date(`${cutoffDate}T00:00:00`).toISOString();
@@ -7479,6 +7517,27 @@ function weeklyComponentKind(component = {}) {
   if (componentType === 29) return 'flows';
   if (componentType === 1) return 'tables';
   return '';
+}
+
+function weeklyComponentsFromSolutionReport(components = []) {
+  const seen = new Set();
+  return components.flatMap((component) => {
+    const kind = weeklyComponentKind(component);
+    const objectId = normalizeGuid(component.objectid);
+    const key = `${kind}:${objectId}`;
+    if (!kind || !objectId || seen.has(key)) return [];
+    seen.add(key);
+    const definition = WEEKLY_COMPONENT_TYPES.find((item) => item.key === kind);
+    return [{
+      solutionid: normalizeGuid(component.solutionid),
+      kind,
+      label: definition?.label || component.typeLabel || 'Other',
+      objectId,
+      name: component.displayName || component.logicalName || objectId,
+      logicalName: component.logicalName || '',
+      typeLabel: component.typeLabel || definition?.label || '',
+    }];
+  });
 }
 
 async function loadWeeklyComponentNames(orgUrl, components, accountHomeId) {
@@ -7612,11 +7671,15 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
     const componentsBySolution = groupSolutionComponentsBySolution(typedComponents);
     const group = {
       environment,
-      rows: filteredSolutions.map((solution) => ({
-        ...solution,
-        ...solutionReportCountFields(componentsBySolution.get(normalizeGuid(solution.solutionid)) || []),
-        ...reportEnvironmentFields(environment),
-      })),
+      rows: filteredSolutions.map((solution) => {
+        const solutionComponents = componentsBySolution.get(normalizeGuid(solution.solutionid)) || [];
+        return {
+          ...solution,
+          ...solutionReportCountFields(solutionComponents),
+          ...reportEnvironmentFields(environment),
+          weeklyComponents: weeklyComponentsFromSolutionReport(solutionComponents),
+        };
+      }),
       totalBeforeFilters: allSolutions.length,
       dataverseTableCount: customDataverseTables.length,
     };

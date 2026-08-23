@@ -125,6 +125,10 @@ test('server keeps latest report downloads and round-trips trend exports', async
     assert.equal(exportResponse.status, 200);
     const exportBytes = await exportResponse.arrayBuffer();
     const exportWorkbook = await loadWorkbook(exportBytes);
+    assert.deepEqual(
+      exportWorkbook.worksheets.map((worksheet) => worksheet.name),
+      templateWorkbook.worksheets.map((worksheet) => worksheet.name),
+    );
     const exportedDataWorksheet = exportWorkbook.getWorksheet(tableName);
     assert.equal(exportedDataWorksheet.rowCount, 2);
     assert.equal(
