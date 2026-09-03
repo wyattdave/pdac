@@ -1697,6 +1697,17 @@ select:disabled {
   min-height: 74px;
 }
 
+.role-assignment-row.assigned {
+  background: var(--soft);
+  border-color: var(--soft-line);
+  box-shadow: inset 4px 0 0 var(--primary);
+}
+
+.role-assignment-row.assigned .role-assignment-action {
+  color: var(--link);
+  font-weight: 650;
+}
+
 .solution-filters {
   align-items: end;
   display: grid;

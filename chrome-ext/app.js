@@ -343,6 +343,7 @@ const state = {
   pendingConnectionDeleteId: '',
   pendingSqlDelete: false,
   roles: [],
+  assignedRoles: [],
   selectedTeamId: '',
   roleAssignmentPrincipal: null,
   solutions: [],
@@ -525,11 +526,15 @@ el.createTeamForm.addEventListener('submit', createEnvironmentTeam);
 el.roleAssignmentClose.addEventListener('click', closeRoleAssignmentModal);
 el.roleAssignmentSearch.addEventListener('input', renderRoleAssignmentList);
 el.roleAssignmentRoles.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-role-assignment-id]');
+  const button = event.target.closest('[data-role-assignment-action]');
   if (!button) {
     return;
   }
-  assignSecurityRole(button.dataset.roleAssignmentId || '', button).catch((error) => {
+  const action = button.dataset.roleAssignmentAction;
+  const task = action === 'remove'
+    ? removeSecurityRole(button.dataset.assignedRoleId || '', button)
+    : assignSecurityRole(button.dataset.roleAssignmentId || '', button);
+  task.catch((error) => {
     toast(error.message, 'error');
     console.error(error);
   });
@@ -545,7 +550,10 @@ el.usersList.addEventListener('click', (event) => {
   }
   const button = event.target.closest('[data-principal-action="assign-role"]');
   if (button) {
-    openRoleAssignmentModal(button.dataset.principalType || '', button.dataset.principalId || '');
+    openRoleAssignmentModal(button.dataset.principalType || '', button.dataset.principalId || '').catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
   }
 });
 el.teamsList.addEventListener('click', (event) => {
@@ -559,7 +567,10 @@ el.teamsList.addEventListener('click', (event) => {
   }
   const assignButton = event.target.closest('[data-principal-action="assign-role"]');
   if (assignButton) {
-    openRoleAssignmentModal(assignButton.dataset.principalType || '', assignButton.dataset.principalId || '');
+    openRoleAssignmentModal(assignButton.dataset.principalType || '', assignButton.dataset.principalId || '').catch((error) => {
+      toast(error.message, 'error');
+      console.error(error);
+    });
     return;
   }
   const selectButton = event.target.closest('[data-team-select]');
@@ -3099,7 +3110,10 @@ async function loadCachedChartsDashboard() {
   try {
     el.chartsStatus.textContent = 'Preparing charts from local trend data...';
     const params = new URLSearchParams({ accountHomeId, range: '730d', latestOnly: 'true' });
-    const stored = await api(`/api/report-trends?${params.toString()}`, { quiet: true });
+    const stored = await hydrateReportComponentNames(
+      await api(`/api/report-trends?${params.toString()}`, { quiet: true }),
+      accountHomeId,
+    );
     if (resolveRequestAccountId() !== accountHomeId) return;
     const data = buildLatestSqlChartsDashboard(stored);
     if (!Array.isArray(data.rows) || !data.rows.length) {
@@ -3117,6 +3131,85 @@ async function loadCachedChartsDashboard() {
   }
 }
 
+async function hydrateReportComponentNames(stored, accountHomeId) {
+  const solutionTable = (stored.tables || []).find((table) => table.tableName === 'report_solution_totals');
+  const latestRows = new Map();
+  for (const row of solutionTable?.rows || []) {
+    const values = row.values || {};
+    const environmentId = values.environment_id || values.environment_display_name || '';
+    const existing = latestRows.get(environmentId);
+    if (!existing || String(row.collectedAt || '') > String(existing.collectedAt || '')) latestRows.set(environmentId, row);
+  }
+  const missing = [...latestRows.values()].filter((row) => {
+    const values = row.values || {};
+    const names = componentNameGroupForEnvironment(stored.componentNames, {
+      id: values.environment_id,
+      label: values.environment_display_name,
+      url: values.environment_url,
+    });
+    return solutionComponentNamesMissing(values, names);
+  });
+  if (!missing.length) return stored;
+
+  const firstValues = missing[0].values || {};
+  try {
+    const refreshed = await api('/api/report-component-names', {
+      method: 'POST',
+      quiet: true,
+      body: {
+        accountHomeId,
+        environments: missing.map((row) => ({
+          name: row.values?.environment_id || row.values?.environment_display_name || '',
+          environmentName: row.values?.environment_id || row.values?.environment_display_name || '',
+          environmentId: row.values?.environment_id || '',
+          displayName: row.values?.environment_display_name || '',
+          orgUrl: row.values?.environment_url || '',
+        })),
+        solutionOptions: {
+          excludedPublishers: firstValues.publisher_exclusions || '',
+          includeManaged: String(firstValues.managed_included || '').toLowerCase() === 'yes',
+          includeMicrosoftOwned: String(firstValues.microsoft_owned_included || '').toLowerCase() === 'yes',
+        },
+      },
+    });
+    for (const row of missing) {
+      const values = row.values || {};
+      const totals = componentNameGroupForEnvironment(refreshed.componentTotals, {
+        id: values.environment_id,
+        label: values.environment_display_name,
+        url: values.environment_url,
+      });
+      if (totals) Object.assign(values, totals);
+    }
+    return {
+      ...stored,
+      componentNames: { ...(stored.componentNames || {}), ...(refreshed.componentNames || {}) },
+    };
+  } catch (error) {
+    console.warn('Unable to refresh solution component names.', error);
+    return stored;
+  }
+}
+
+function solutionComponentNamesMissing(values, names) {
+  const metrics = [
+    ['included_solutions', 'solutions'],
+    ['number_of_flows', 'flows'],
+    ['number_of_code_apps', 'codeApps'],
+    ['number_of_canvas_apps', 'canvasApps'],
+    ['number_of_model_driven_apps', 'modelDrivenApps'],
+    ['number_of_copilot_studio_agents', 'agents'],
+    ['number_of_dataverse_tables', 'tables'],
+    ['number_of_ai_models', 'aiModels'],
+    ['number_of_dataflows', 'dataflows'],
+  ];
+  return metrics.some(([valueKey, namesKind]) => {
+    const count = number(values?.[valueKey]);
+    const list = Array.isArray(names?.[namesKind]) ? names[namesKind] : [];
+    return list.length !== count;
+  });
+}
+
 function buildLatestSqlChartsDashboard(data = {}) {
   const tables = new Map((data.tables || []).map((table) => [table.tableName, table]));
   const latest = new Map();
@@ -3131,7 +3224,11 @@ function buildLatestSqlChartsDashboard(data = {}) {
   const rows = new Map();
   const ensureRow = (values) => {
     const id = values.environment_id || values.environment_display_name || '';
-    if (!rows.has(id)) rows.set(id, { environmentId: id, environmentDisplayName: values.environment_display_name || id });
+    if (!rows.has(id)) rows.set(id, {
+      environmentId: id,
+      environmentDisplayName: values.environment_display_name || id,
+      environmentUrl: values.environment_url || '',
+    });
     return rows.get(id);
   };
   for (const [key, row] of latest) {
@@ -3151,7 +3248,16 @@ function buildLatestSqlChartsDashboard(data = {}) {
     });
   }
   const collected = [...latest.values()].map((row) => row.collectedAt).filter(Boolean).sort();
-  return { rows: [...rows.values()], modelMix: [], generatedAt: collected.at(-1) || '' };
+  const componentNames = data.componentNames && typeof data.componentNames === 'object' ? data.componentNames : {};
+  const dashboardRows = [...rows.values()].map((row) => ({
+    ...row,
+    componentNames: componentNameGroupForEnvironment(componentNames, {
+      id: row.environmentId,
+      label: row.environmentDisplayName,
+      url: row.environmentUrl,
+    }),
+  }));
+  return { rows: dashboardRows, modelMix: [], generatedAt: collected.at(-1) || '' };
 }
 
 function removeAutomatedReportDownloads(apiGroup) {
@@ -3460,13 +3566,13 @@ function renderChartsDashboard(data = {}) {
       datasets: [reportDataset('Events', modelMix.map((row) => number(row.eventCount)), reportPalette(modelMix.length))],
     }] : []),
     reportMetricChart('copilot-sessions', 'Copilot sessions by environment', 'Current calendar month', rows, 'copilotSessions', '#7c3aed'),
-    reportMetricChart('solution-count', 'Solution count by environment', 'Includes managed and Microsoft-owned solutions', rows, 'solutionCount', '#0f766e'),
-    reportMetricChart('flow-count', 'Flow count by environment', 'Solution components', rows, 'flowCount', '#0284c7'),
-    reportMetricChart('code-app-count', 'Code app count by environment', 'Solution components', rows, 'codeAppCount', '#be123c'),
-    reportMetricChart('canvas-app-count', 'Canvas app count by environment', 'Solution components', rows, 'canvasAppCount', '#db2777'),
-    reportMetricChart('model-driven-app-count', 'Model-driven app count by environment', 'Solution components', rows, 'modelDrivenAppCount', '#d97706'),
-    reportMetricChart('ai-model-count', 'AI model count by environment', 'Solution components', rows, 'aiModelCount', '#4f46e5'),
-    reportMetricChart('copilot-agent-count', 'Copilot Studio agent count by environment', 'Solution components', rows, 'copilotStudioAgentCount', '#8b5cf6'),
+    reportMetricChart('solution-count', 'Solution count by environment', 'Includes managed and Microsoft-owned solutions', rows, 'solutionCount', '#0f766e', 'solutions'),
+    reportMetricChart('flow-count', 'Flow count by environment', 'Solution components', rows, 'flowCount', '#0284c7', 'flows'),
+    reportMetricChart('code-app-count', 'Code app count by environment', 'Solution components', rows, 'codeAppCount', '#be123c', 'codeApps'),
+    reportMetricChart('canvas-app-count', 'Canvas app count by environment', 'Solution components', rows, 'canvasAppCount', '#db2777', 'canvasApps'),
+    reportMetricChart('model-driven-app-count', 'Model-driven app count by environment', 'Solution components', rows, 'modelDrivenAppCount', '#d97706', 'modelDrivenApps'),
+    reportMetricChart('ai-model-count', 'AI model count by environment', 'Solution components', rows, 'aiModelCount', '#4f46e5', 'aiModels'),
+    reportMetricChart('copilot-agent-count', 'Copilot Studio agent count by environment', 'Solution components', rows, 'copilotStudioAgentCount', '#8b5cf6', 'agents'),
   ];
   el.chartsGrid.innerHTML = charts.map((chart) => `
     <section class="report-chart-card">
@@ -3501,7 +3607,7 @@ function renderChartsPlaceholder() {
   }
 }
 
-function reportMetricChart(id, title, subtitle, rows, field, color) {
+function reportMetricChart(id, title, subtitle, rows, field, color, namesKind = '') {
   return {
     id,
     title,
@@ -3509,6 +3615,9 @@ function reportMetricChart(id, title, subtitle, rows, field, color) {
     type: 'bar',
     labels: rows.map(reportEnvironmentLabel),
     datasets: [reportDataset(title, rows.map((row) => number(row[field])), color)],
+    tooltipNames: namesKind
+      ? rows.map((row) => (Array.isArray(row.componentNames?.[namesKind]) ? row.componentNames[namesKind] : null))
+      : null,
   };
 }
 
@@ -3523,7 +3632,7 @@ function renderReportsDashboard(data = {}) {
     return;
   }
   destroyTrendCharts();
-  const charts = buildTrendCharts(Array.isArray(data.tables) ? data.tables : [], data.range || {});
+  const charts = buildTrendCharts(Array.isArray(data.tables) ? data.tables : [], data.range || {}, data.componentNames || {});
   if (!charts.length) {
     renderReportsPlaceholder();
     return;
@@ -3564,7 +3673,7 @@ function renderReportsPlaceholder() {
   el.reportsCharts.innerHTML = empty('Enable trend data to be saved, then run reports to populate trends.');
 }
 
-function buildTrendCharts(tables, range = {}) {
+function buildTrendCharts(tables, range = {}, componentNames = {}) {
   const tableMap = new Map((Array.isArray(tables) ? tables : []).map((table) => [table.tableName, table]));
   const charts = [
     buildAiRollingCreditChart(tableMap.get('report_ai_flow_event_totals'), range, {
@@ -3590,7 +3699,7 @@ function buildTrendCharts(tables, range = {}) {
     ...solutionTrendDefinitions().map((definition) => buildStackedEnvironmentBarChart(
       tableMap.get('report_solution_totals'),
       range,
-      definition,
+      { ...definition, componentNames },
     )),
   ];
   return charts.filter(Boolean);
@@ -3755,6 +3864,9 @@ function buildStackedEnvironmentBarChart(table, range, options) {
     yTitle: options.yTitle || 'Count',
     environments,
     selectedEnvironmentIds,
+    tooltipNamesByDataset: options.namesKind
+      ? selectedEnvironments.map((environment) => componentNamesForEnvironment(options.componentNames, environment, options.namesKind))
+      : null,
     datasets: selectedEnvironments.map((environment, index) => reportDataset(
       environment.label,
       dateLabels.map((date) => values.get(`${environment.id}:${date}`) || 0),
@@ -3817,16 +3929,34 @@ function buildFlowRunStatusChart(table, range) {
 
 function solutionTrendDefinitions() {
   return [
-    { id: 'solutions-count-by-environment', title: 'Solution count', valueKey: 'included_solutions', yTitle: 'Solutions' },
-    { id: 'solutions-flow-count-by-environment', title: 'Flow count', valueKey: 'number_of_flows', yTitle: 'Flows' },
-    { id: 'solutions-canvas-app-count-by-environment', title: 'Canvas app count', valueKey: 'number_of_canvas_apps', yTitle: 'Canvas apps' },
-    { id: 'solutions-model-driven-app-count-by-environment', title: 'Model driven app count', valueKey: 'number_of_model_driven_apps', yTitle: 'Model driven apps' },
-    { id: 'solutions-code-app-count-by-environment', title: 'Code app count', valueKey: 'number_of_code_apps', yTitle: 'Code Apps' },
-    { id: 'solutions-agent-count-by-environment', title: 'Agent count', valueKey: 'number_of_copilot_studio_agents', yTitle: 'Agents' },
-    { id: 'solutions-ai-model-count-by-environment', title: 'AI model count', valueKey: 'number_of_ai_models', yTitle: 'AI models' },
-    { id: 'solutions-dataflow-count-by-environment', title: 'Dataflow count', valueKey: 'number_of_dataflows', yTitle: 'Dataflows' },
-    { id: 'solutions-dataverse-table-count-by-environment', title: 'Custom Dataverse table count', valueKey: 'number_of_dataverse_tables', yTitle: 'Custom Dataverse tables' },
+    { id: 'solutions-count-by-environment', title: 'Solution count', valueKey: 'included_solutions', yTitle: 'Solutions', namesKind: 'solutions' },
+    { id: 'solutions-flow-count-by-environment', title: 'Flow count', valueKey: 'number_of_flows', yTitle: 'Flows', namesKind: 'flows' },
+    { id: 'solutions-canvas-app-count-by-environment', title: 'Canvas app count', valueKey: 'number_of_canvas_apps', yTitle: 'Canvas apps', namesKind: 'canvasApps' },
+    { id: 'solutions-model-driven-app-count-by-environment', title: 'Model driven app count', valueKey: 'number_of_model_driven_apps', yTitle: 'Model driven apps', namesKind: 'modelDrivenApps' },
+    { id: 'solutions-code-app-count-by-environment', title: 'Code app count', valueKey: 'number_of_code_apps', yTitle: 'Code Apps', namesKind: 'codeApps' },
+    { id: 'solutions-agent-count-by-environment', title: 'Agent count', valueKey: 'number_of_copilot_studio_agents', yTitle: 'Agents', namesKind: 'agents' },
+    { id: 'solutions-ai-model-count-by-environment', title: 'AI model count', valueKey: 'number_of_ai_models', yTitle: 'AI models', namesKind: 'aiModels' },
+    { id: 'solutions-dataflow-count-by-environment', title: 'Dataflow count', valueKey: 'number_of_dataflows', yTitle: 'Dataflows', namesKind: 'dataflows' },
+    { id: 'solutions-dataverse-table-count-by-environment', title: 'Dataverse table count (in solutions)', valueKey: 'number_of_dataverse_tables', yTitle: 'Dataverse tables', namesKind: 'tables' },
   ];
+}
+
+function componentNamesForEnvironment(componentNames, environment, namesKind) {
+  const names = componentNameGroupForEnvironment(componentNames, environment);
+  return Array.isArray(names?.[namesKind]) ? names[namesKind] : null;
+}
+
+function componentNameGroupForEnvironment(componentNames, environment) {
+  const entries = Object.entries(componentNames || {});
+  const aliases = [environment.id, environment.url, environment.label]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  for (const alias of aliases) {
+    if (componentNames?.[alias]) return componentNames[alias];
+    const matched = entries.find(([key]) => key.toLowerCase() === alias.toLowerCase());
+    if (matched) return matched[1];
+  }
+  return null;
 }
 
 function withReportChartSettings(chart) {
@@ -4128,6 +4258,19 @@ function reportChartConfig(chart) {
           enabled: true,
           intersect: true,
           mode: 'nearest',
+          callbacks: chart.tooltipNames || chart.tooltipNamesByDataset ? {
+            afterBody(items) {
+              const names = chart.tooltipNamesByDataset
+                ? chart.tooltipNamesByDataset[items[0]?.datasetIndex]
+                : chart.tooltipNames[items[0]?.dataIndex];
+              if (!Array.isArray(names) || !names.length) {
+                return '';
+              }
+              const shown = names.slice(0, 15);
+              const remaining = names.length - shown.length;
+              return [...shown, ...(remaining > 0 ? [`+${remaining} more`] : [])];
+            },
+          } : undefined,
         },
       },
       scales: isCircular ? undefined : chart.dualAxis ? {
@@ -6094,13 +6237,18 @@ async function openRoleAssignmentModal(principalType, principalId) {
   el.roleAssignmentSearch.value = '';
   el.roleAssignmentModal.hidden = false;
   el.roleAssignmentRoles.innerHTML = empty('Loading roles...');
-  await ensureRolesLoaded();
+  state.assignedRoles = [];
+  await Promise.all([
+    ensureRolesLoaded(),
+    loadAssignedSecurityRoles(principal),
+  ]);
   renderRoleAssignmentList();
   el.roleAssignmentSearch.focus();
 }
 
 function closeRoleAssignmentModal() {
   state.roleAssignmentPrincipal = null;
+  state.assignedRoles = [];
   el.roleAssignmentModal.hidden = true;
   el.roleAssignmentRoles.innerHTML = '';
   el.roleAssignmentSearch.value = '';
@@ -6145,14 +6293,24 @@ function renderRoleAssignmentList() {
   }
   el.roleAssignmentRoles.innerHTML = roles.map((role) => {
     const businessUnitName = role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
+    const roleId = String(role.roleid || '').toLowerCase();
+    const assignedRole = state.assignedRoles.find((assigned) => String(assigned.rootRoleId || '').toLowerCase() === roleId);
     return `
-      <button class="list-item role-assignment-row" type="button" data-role-assignment-id="${escapeAttr(role.roleid)}">
+      <button class="list-item role-assignment-row${assignedRole ? ' assigned' : ''}" type="button" data-role-assignment-action="${assignedRole ? 'remove' : 'assign'}" data-role-assignment-id="${escapeAttr(role.roleid)}"${assignedRole ? ` data-assigned-role-id="${escapeAttr(assignedRole.roleid)}"` : ''}>
         <span class="role-name">${escapeHtml(role.name)}</span>
         ${businessUnitName ? `<span class="role-id">Root business unit: ${escapeHtml(businessUnitName)}</span>` : ''}
-        <span class="role-id">Assign this role</span>
+        <span class="role-id role-assignment-action">${assignedRole ? 'Assigned | Remove role' : 'Assign this role'}</span>
       </button>
     `;
   }).join('');
+}
+
+async function loadAssignedSecurityRoles(principal) {
+  const query = new URLSearchParams({
+    principalType: principal.type,
+    principalId: principal.id,
+  });
+  state.assignedRoles = await api(`/api/role-assignments?${query}`);
 }
 
 async function assignSecurityRole(roleId, button) {
@@ -6170,8 +6328,32 @@ async function assignSecurityRole(roleId, button) {
       },
     });
     toast(`Assigned ${result.roleName || 'role'} to ${result.principalName || 'principal'}.`);
-    closeRoleAssignmentModal();
+    state.assignedRoles.push({
+      ...result,
+      rootRoleId: roleId,
+    });
+    renderRoleAssignmentList();
   }, 'Assigning');
+}
+
+async function removeSecurityRole(roleId, button) {
+  const principal = state.roleAssignmentPrincipal;
+  if (!principal) {
+    throw new Error('Select a user or team first.');
+  }
+  await withBusy(button, async () => {
+    const result = await api('/api/role-assignments', {
+      method: 'DELETE',
+      body: {
+        principalType: principal.type,
+        principalId: principal.id,
+        roleId,
+      },
+    });
+    state.assignedRoles = state.assignedRoles.filter((role) => role.roleid !== result.roleid);
+    toast(`Removed ${result.roleName || 'role'} from ${principal.label}.`);
+    renderRoleAssignmentList();
+  }, 'Removing');
 }
 
 function selectTeam(teamId) {

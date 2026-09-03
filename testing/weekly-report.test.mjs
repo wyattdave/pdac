@@ -23,6 +23,28 @@ const nodeAppScript = readFileSync(new URL('../public/app.js', import.meta.url),
 const nodeStyles = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 const nodeServer = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
+test('solution report charts show stored component names in latest and historical tooltips', () => {
+  for (const script of [appScript, nodeAppScript]) {
+    assert.match(script, /await hydrateReportComponentNames\(/);
+    assert.match(script, /api\('\/api\/report-component-names'/);
+    assert.match(script, /return list\.length !== count/);
+    assert.match(script, /componentNameGroupForEnvironment\(refreshed\.componentTotals/);
+    assert.match(script, /tooltipNamesByDataset: options\.namesKind/);
+    assert.match(script, /componentNamesForEnvironment\(options\.componentNames, environment, options\.namesKind\)/);
+    assert.match(script, /chart\.tooltipNames \|\| chart\.tooltipNamesByDataset/);
+    assert.match(script, /'aiModelCount', '#4f46e5', 'aiModels'/);
+  }
+  assert.match(serverCore, /saveSolutionComponentNameSnapshots\(accountHomeId, rowsByEnvironment, new Date\(\)\.toISOString\(\)\)/);
+  assert.match(nodeServer, /saveSolutionComponentNameSnapshots\(db, accountHomeId, rowsByEnvironment, new Date\(\)\.toISOString\(\)\)/);
+  for (const backend of [serverCore, nodeServer]) {
+    assert.match(backend, /route === 'POST \/api\/report-component-names'/);
+    assert.match(backend, /async function refreshSolutionComponentNames/);
+    assert.match(backend, /function solutionGroupDashboardValues/);
+    assert.match(backend, /if \(isAiModelComponent\(logicalName, typeLabel\)\) return 'aiModels'/);
+    assert.match(backend, /if \(isDataflowComponent\(logicalName, typeLabel\)\) return 'dataflows'/);
+  }
+});
+
 function event(overrides = {}) {
   return {
     environmentId: 'environment-1',
@@ -287,7 +309,7 @@ test('weekly tracking is local-first, hourly, and resumes incrementally from a p
   assert.match(serverCore, /pendingSolutions\.map\(\(solution\) => solution\.solutionid\)/);
   assert.match(serverCore, /await weeklyReplaceEvents\(events\);/);
   assert.match(serverCore, /await saveWeeklyEventsFromSolutionReportGroups\(rowsByEnvironment, accountHomeId\);/);
-  assert.match(serverCore, /weeklyComponents: weeklyComponentsFromSolutionReport\(solutionComponents\)/);
+  assert.match(serverCore, /weeklyComponents: namedComponentsBySolution\.get\(normalizeGuid\(solution\.solutionid\)\) \|\| \[\]/);
   assert.match(nodeServer, /WEEKLY_REPORT_CHECK_INTERVAL_MS = 60 \* 60 \* 1000/);
   assert.doesNotMatch(nodeServer, /WEEKLY_REPORT_FULL_RECONCILE_INTERVAL_MS/);
   assert.match(nodeServer, /const requiresInitialSync = environments\.some/);

@@ -535,6 +535,22 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/role-assignments') {
+    requireOrgUrl();
+    sendJson(res, 200, await listAssignedSecurityRoles({
+      principalType: url.searchParams.get('principalType') || '',
+      principalId: url.searchParams.get('principalId') || '',
+    }));
+    return;
+  }
+
+  if (route === 'DELETE /api/role-assignments') {
+    requireOrgUrl();
+    const body = await readJson(req);
+    sendJson(res, 200, await removeSecurityRole(body));
+    return;
+  }
+
   if (route === 'POST /api/roles') {
     requireOrgUrl();
     const body = await readJson(req);
@@ -814,6 +830,13 @@ async function handleApi(req, res) {
       end: url.searchParams.get('end') || '',
       latestOnly: url.searchParams.get('latestOnly') === 'true',
     }));
+    return;
+  }
+
+  if (route === 'POST /api/report-component-names') {
+    const body = await readJson(req);
+    await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
+    sendJson(res, 200, await refreshSolutionComponentNames(body));
     return;
   }
 
@@ -3397,6 +3420,50 @@ async function assignSecurityRole(body) {
   };
 }
 
+async function listAssignedSecurityRoles(body) {
+  const principalType = normalizePrincipalType(body.principalType || body.type);
+  const principalId = normalizeGuid(body.principalId || body.id);
+  if (!principalId) {
+    throw new HttpError(400, 'Choose a user or team.');
+  }
+  const collection = principalType === 'systemuser' ? 'systemusers' : 'teams';
+  const association = principalType === 'systemuser' ? 'systemuserroles_association' : 'teamroles_association';
+  const data = await dvGet(`${collection}(${principalId})/${association}?$select=roleid,name,_businessunitid_value,_parentrootroleid_value`);
+  return (data.value || []).map((role) => ({
+    roleid: normalizeGuid(role.roleid),
+    rootRoleId: normalizeGuid(role._parentrootroleid_value) || normalizeGuid(role.roleid),
+    name: role.name || '',
+    businessUnitId: normalizeGuid(role._businessunitid_value),
+  }));
+}
+
+async function removeSecurityRole(body) {
+  const principalType = normalizePrincipalType(body.principalType || body.type);
+  const principalId = normalizeGuid(body.principalId || body.id);
+  const roleId = normalizeGuid(body.roleId);
+  if (!principalId) {
+    throw new HttpError(400, 'Choose a user or team.');
+  }
+  if (!roleId) {
+    throw new HttpError(400, 'Choose an assigned security role.');
+  }
+
+  const assignedRoles = await listAssignedSecurityRoles({ principalType, principalId });
+  const assignedRole = assignedRoles.find((role) => role.roleid === roleId);
+  if (!assignedRole) {
+    throw new HttpError(404, 'That security role is not assigned to the selected user or team.');
+  }
+  const collection = principalType === 'systemuser' ? 'systemusers' : 'teams';
+  const association = principalType === 'systemuser' ? 'systemuserroles_association' : 'teamroles_association';
+  await dvRequest('DELETE', `${collection}(${principalId})/${association}(${roleId})/$ref`);
+  return {
+    principalId,
+    principalType,
+    roleid: roleId,
+    roleName: assignedRole.name,
+  };
+}
+
 function normalizePrincipalType(value) {
   const text = String(value || '').trim().toLowerCase();
   if (['user', 'systemuser', 'systemusers'].includes(text)) {
@@ -5778,7 +5845,58 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
       definition.tableName,
       (row) => row.date_ran < reportTrendRetentionCutoffDate(),
     );
+    if (group === 'solutions') {
+      await saveSolutionComponentNameSnapshots(normalizedAccountHomeId, sourceGroups, collectedAt);
+    }
   });
+}
+
+const SOLUTION_COMPONENT_NAMES_TABLE = 'report_solution_component_names';
+
+async function saveSolutionComponentNameSnapshots(accountHomeId, sourceGroups, collectedAt) {
+  const groups = (Array.isArray(sourceGroups) ? sourceGroups : [])
+    .filter((group) => group?.environment && group.componentNames);
+  if (!groups.length) {
+    return;
+  }
+  const environmentIds = new Set(groups.map((group) => String(group.environment.environmentId || '')));
+  await trendReplaceRows(
+    SOLUTION_COMPONENT_NAMES_TABLE,
+    (row) => row.account_home_id === accountHomeId && environmentIds.has(String(row.environment_id || '')),
+    groups.map(({ environment, componentNames }) => ({
+      account_home_id: accountHomeId,
+      environment_id: String(environment.environmentId || ''),
+      environment_display_name: String(environment.displayName || ''),
+      environment_url: String(environment.orgUrl || ''),
+      collected_at: collectedAt,
+      component_names: JSON.stringify(componentNames),
+    })),
+  );
+}
+
+async function readSolutionComponentNames(accountHomeId) {
+  const latest = new Map();
+  for (const row of await trendSelectRows(SOLUTION_COMPONENT_NAMES_TABLE)) {
+    if (row.account_home_id !== accountHomeId) continue;
+    const environmentId = String(row.environment_id || '');
+    const existing = latest.get(environmentId);
+    if (existing && String(existing.collected_at || '') > String(row.collected_at || '')) continue;
+    latest.set(environmentId, row);
+  }
+  const names = {};
+  for (const [environmentId, row] of latest) {
+    try {
+      const parsed = JSON.parse(row.component_names || '');
+      if (parsed && typeof parsed === 'object') {
+        for (const key of [environmentId, row.environment_url, row.environment_display_name]) {
+          if (String(key || '').trim()) names[String(key).trim()] = parsed;
+        }
+      }
+    } catch {
+      // Ignore malformed snapshots; tooltips simply fall back to counts only.
+    }
+  }
+  return names;
 }
 
 function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan }) {
@@ -5821,20 +5939,22 @@ function buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOp
   if (group !== 'solutions' || !solutionOptions) {
     return null;
   }
-  const groups = (Array.isArray(sourceGroups) ? sourceGroups : []).map(({ environment, rows, totalBeforeFilters, dataverseTableCount }) => ({
+  const groups = (Array.isArray(sourceGroups) ? sourceGroups : []).map(({ environment, rows, totalBeforeFilters, dataverseTableCount, componentTotals }) => ({
     environment,
     totalBeforeFilters,
     dataverseTableCount,
+    componentTotals,
     rows: (Array.isArray(rows) ? rows : [])
       .map((row) => ({ row, date: reportSourceRowDate(group, row) })),
   }));
   if (!groups.length) {
     return null;
   }
-  return (snapshotDate) => buildAutomatedSolutionTotalsRows(groups.map(({ environment, totalBeforeFilters, dataverseTableCount, rows }) => ({
+  return (snapshotDate) => buildAutomatedSolutionTotalsRows(groups.map(({ environment, totalBeforeFilters, dataverseTableCount, componentTotals, rows }) => ({
     environment,
     totalBeforeFilters,
     dataverseTableCount,
+    componentTotals,
     rows: rows.filter((item) => item.date && item.date <= snapshotDate).map((item) => item.row),
   })), solutionOptions);
 }
@@ -5953,6 +6073,7 @@ async function listReportTrendSnapshots(filters = {}) {
       endDate: dateRange.endDate,
     },
     retentionDays: REPORT_TREND_RETENTION_DAYS,
+    componentNames: await readSolutionComponentNames(accountHomeId),
     tables,
     rows: tables.flatMap((table) => table.rows.map((row) => ({
       tableName: table.tableName,
@@ -6482,6 +6603,9 @@ async function buildAutomatedReport(group, reportType, body = {}) {
 
   const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
   const rowsByEnvironment = await collectAutomatedSolutionRows(environments, solutionOptions, accountHomeId, reportProgress);
+  if (!saveTrends || reportType === 'raw') {
+    await saveSolutionComponentNameSnapshots(accountHomeId, rowsByEnvironment, new Date().toISOString());
+  }
   if (saveTrends && reportType !== 'raw') {
     await saveWeeklyEventsFromSolutionReportGroups(rowsByEnvironment, accountHomeId);
     await saveAutomatedReportTrendSnapshot({
@@ -6731,7 +6855,8 @@ function weeklyCountsFromSolutionReport(solution = {}) {
 async function collectWeeklySolutionEvents(environment, accountHomeId, options = {}) {
   const cutoffDate = options.cutoffDate || weeklyRetentionCutoff();
   const sinceInstant = options.sinceInstant || new Date(`${cutoffDate}T00:00:00`).toISOString();
-  const solutions = await listWeeklyChangedSolutionsForEnvironment(environment.orgUrl, accountHomeId, sinceInstant);
+  const solutions = (await listWeeklyChangedSolutionsForEnvironment(environment.orgUrl, accountHomeId, sinceInstant))
+    .filter((solution) => !isDefaultEnvironmentSolution(solution));
   if (!solutions.length) {
     return [];
   }
@@ -6848,28 +6973,30 @@ function weeklyComponentKind(component = {}) {
   if (componentType === 80 || logicalName === 'appmodule') return 'modelDrivenApps';
   if (componentType === 29) return 'flows';
   if (componentType === 1) return 'tables';
+  if (isAiModelComponent(logicalName, typeLabel)) return 'aiModels';
+  if (isDataflowComponent(logicalName, typeLabel)) return 'dataflows';
   return '';
 }
 
-function weeklyComponentsFromSolutionReport(components = []) {
+// Distinct, name-resolved component lists per environment used by the chart
+// dashboard tooltips. Keys match WEEKLY_COMPONENT_TYPES kinds plus 'solutions'.
+function buildSolutionComponentNameLists(solutions = [], namedComponents = []) {
+  const lists = {
+    solutions: [...new Set(solutions
+      .map((solution) => String(solution.friendlyname || solution.uniquename || '').trim())
+      .filter(Boolean))].sort((left, right) => left.localeCompare(right)),
+  };
   const seen = new Set();
-  return components.flatMap((component) => {
-    const kind = weeklyComponentKind(component);
-    const objectId = normalizeGuid(component.objectid);
-    const key = `${kind}:${objectId}`;
-    if (!kind || !objectId || seen.has(key)) return [];
+  for (const component of namedComponents) {
+    const key = `${component.kind}:${component.objectId}`;
+    if (!component.kind || seen.has(key)) continue;
     seen.add(key);
-    const definition = WEEKLY_COMPONENT_TYPES.find((item) => item.key === kind);
-    return [{
-      solutionid: normalizeGuid(component.solutionid),
-      kind,
-      label: definition?.label || component.typeLabel || 'Other',
-      objectId,
-      name: component.displayName || component.logicalName || objectId,
-      logicalName: component.logicalName || '',
-      typeLabel: component.typeLabel || definition?.label || '',
-    }];
-  });
+    (lists[component.kind] ||= []).push(String(component.name || component.objectId || '').trim() || component.objectId);
+  }
+  for (const kind of Object.keys(lists)) {
+    if (kind !== 'solutions') lists[kind].sort((left, right) => left.localeCompare(right));
+  }
+  return lists;
 }
 
 async function loadWeeklyComponentNames(orgUrl, components, accountHomeId) {
@@ -6974,10 +7101,7 @@ function sameWeeklyEventDay(left, right) {
 async function collectAutomatedSolutionRows(environments, options, accountHomeId = '', onEnvironment = null) {
   return mapWithConcurrency(environments, AUTOMATED_SOLUTION_ENVIRONMENT_CONCURRENCY, async (environment, index) => {
     onEnvironment?.(environment, index, environments.length);
-    const [allSolutions, customDataverseTables] = await Promise.all([
-      listSolutionsForEnvironment(environment.orgUrl, accountHomeId),
-      targetDvGetAll(environment.orgUrl, dataverseTableMetadataPath('custom'), {}, accountHomeId),
-    ]);
+    const allSolutions = await listSolutionsForEnvironment(environment.orgUrl, accountHomeId);
     const filteredSolutions = allSolutions.filter((solution) => shouldIncludeAutomatedSolution(solution, options));
     const components = await listSolutionComponentsForEnvironment(
       environment.orgUrl,
@@ -7001,6 +7125,9 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
       return { ...component, typeLabel: 'Code App' };
     });
     const componentsBySolution = groupSolutionComponentsBySolution(typedComponents);
+    const namedComponents = await buildWeeklyComponentsForEnvironment(environment.orgUrl, typedComponents, accountHomeId);
+    const namedComponentsBySolution = groupSolutionComponentsBySolution(namedComponents);
+    const componentTotals = solutionReportCountFields(typedComponents);
     const group = {
       environment,
       rows: filteredSolutions.map((solution) => {
@@ -7009,16 +7136,61 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
           ...solution,
           ...solutionReportCountFields(solutionComponents),
           ...reportEnvironmentFields(environment),
-          weeklyComponents: weeklyComponentsFromSolutionReport(solutionComponents),
+          weeklyComponents: namedComponentsBySolution.get(normalizeGuid(solution.solutionid)) || [],
         };
       }),
       totalBeforeFilters: allSolutions.length,
-      dataverseTableCount: customDataverseTables.length,
+      dataverseTableCount: componentTotals['# of Dataverse tables'],
+      componentTotals,
+      componentNames: buildSolutionComponentNameLists(filteredSolutions, namedComponents),
     };
     onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
     return group;
   });
+}
+
+async function refreshSolutionComponentNames(body = {}) {
+  const environments = normalizeAutomatedReportEnvironments(body.environments || []);
+  if (!environments.length) {
+    throw new HttpError(400, 'Select at least one environment to refresh component names.');
+  }
+  const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
+  const groups = await collectAutomatedSolutionRows(
+    environments,
+    normalizeAutomatedSolutionOptions(body.solutionOptions || {}),
+    accountHomeId,
+  );
+  await saveSolutionComponentNameSnapshots(accountHomeId, groups, new Date().toISOString());
+  const componentNamesByEnvironment = {};
+  const componentTotalsByEnvironment = {};
+  for (const group of groups) {
+    const { environment, componentNames } = group;
+    const totals = solutionGroupDashboardValues(group);
+    for (const key of [environment.environmentId, environment.orgUrl, environment.displayName]) {
+      if (!String(key || '').trim()) continue;
+      componentNamesByEnvironment[String(key).trim()] = componentNames;
+      componentTotalsByEnvironment[String(key).trim()] = totals;
+    }
+  }
+  return { componentNames: componentNamesByEnvironment, componentTotals: componentTotalsByEnvironment };
+}
+
+function solutionGroupDashboardValues(group) {
+  const totals = group.componentTotals || {};
+  return {
+    included_solutions: group.rows?.length || 0,
+    number_of_flows: Number(totals['# of flows'] || 0),
+    number_of_code_apps: Number(totals['# of Code Apps'] || 0),
+    number_of_canvas_apps: Number(totals['# of Canvas Apps'] || 0),
+    number_of_model_driven_apps: Number(totals['# of Model Driven Apps'] || 0),
+    number_of_copilot_studio_agents: Number(totals['# of Copilot Studio Agents'] || 0),
+    number_of_dataverse_tables: Number(totals['# of Dataverse tables'] || 0),
+    number_of_ai_models: Number(totals['# of AI models'] || 0),
+    number_of_connection_references: Number(totals['# of connection references'] || 0),
+    number_of_environment_variables: Number(totals['# of environment variables'] || 0),
+    number_of_dataflows: Number(totals['# of dataflows'] || 0),
+  };
 }
 
 async function listCanvasAppTypesForEnvironment(orgUrl, canvasAppIds, accountHomeId = '') {
@@ -7082,7 +7254,8 @@ async function buildReportsSummary(body = {}) {
     const totalRuns = flowRuns.length;
     const successfulRuns = flowRuns.filter(isSuccessfulFlowRun).length;
     const failedRuns = flowRuns.filter(isFailedFlowRun).length;
-    const componentTotals = sumSolutionReportCountFields(solutionRows);
+    const componentTotals = solutionGroupsByEnvironment.get(environment.environmentId)?.componentTotals
+      || sumSolutionReportCountFields(solutionRows);
     return {
       environmentDisplayName: environment.displayName,
       environmentId: environment.environmentId,
@@ -7209,7 +7382,24 @@ function groupSolutionComponentsBySolution(components) {
   return componentsBySolution;
 }
 
+// The environment default solutions contain every component in the environment,
+// so including them massively inflates component counts and double counts
+// components that also live in real solutions.
+function isDefaultEnvironmentSolution(solution = {}) {
+  const uniqueName = String(solution.uniquename || '').trim().toLowerCase();
+  const friendlyName = String(solution.friendlyname || '').trim().toLowerCase();
+  const normalizedFriendlyName = friendlyName.replace(/[^a-z0-9]/g, '');
+  return uniqueName === 'default'
+    || uniqueName === 'crdefault'
+    || normalizedFriendlyName === 'defaultsolution'
+    || normalizedFriendlyName === 'commondataservicedefaultsolution'
+    || normalizedFriendlyName === 'commondataservicesdefaultsolution';
+}
+
 function shouldIncludeAutomatedSolution(solution, options) {
+  if (isDefaultEnvironmentSolution(solution)) {
+    return false;
+  }
   const publisherNames = [
     solution.publisher?.friendlyname,
     solution.publisher?.uniquename,
@@ -7747,9 +7937,11 @@ function isFailedFlowRun(row) {
 }
 
 function buildAutomatedSolutionTotalsRows(groups, options) {
-  return groups.map(({ environment, rows: solutionRows, totalBeforeFilters, dataverseTableCount }) => {
+  return groups.map(({ environment, rows: solutionRows, totalBeforeFilters, dataverseTableCount, componentTotals: distinctComponentTotals }) => {
     const publishers = new Set(solutionRows.map((solution) => solution.publisher?.friendlyname || solution.publisher?.uniquename || '').filter(Boolean));
-    const componentTotals = sumSolutionReportCountFields(solutionRows);
+    const componentTotals = distinctComponentTotals
+      ? { ...distinctComponentTotals }
+      : sumSolutionReportCountFields(solutionRows);
     delete componentTotals['# of Dataverse tables'];
     return {
       'Environment display name': environment.displayName,
@@ -9652,8 +9844,11 @@ class HttpError extends Error {
 
 export {
   buildAutomatedSolutionTotalsRows,
+  buildSolutionComponentNameLists,
   dataverseTableMetadataPath,
   extractConnectionReferences,
   extractEnvironmentVariables,
   extractSolutionComponents,
+  isDefaultEnvironmentSolution,
+  shouldIncludeAutomatedSolution,
 };
