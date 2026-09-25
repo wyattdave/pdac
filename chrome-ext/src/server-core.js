@@ -25,6 +25,7 @@ import {
   trendInsertRows,
   trendDeleteRows,
   trendReplaceRows,
+  trendUpdateRows,
   weeklyReplaceEvents,
   weeklyListEvents,
   weeklyDeleteEventsBefore,
@@ -46,6 +47,7 @@ const SERVICE_RESOURCE = 'https://service.powerapps.com/';
 const POWER_PLATFORM_RESOURCE = 'https://api.powerplatform.com';
 const AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY = 'pdac.automatedReportSchedule';
 const WEEKLY_REPORT_SETTINGS_STORAGE_KEY = 'pdac.weeklyReportSettings';
+const REPORT_TREND_DATE_MODE_STORAGE_KEY = 'pdac.reportTrendUseRecordDate';
 const STARTUP_TASK_NAME = 'PDAC Background Server';
 export const REPORT_TREND_RETENTION_DAYS = 730;
 export const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -833,6 +835,17 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/report-trends/date-mode') {
+    sendJson(res, 200, { useRecordDate: await reportTrendUseRecordDate() });
+    return;
+  }
+
+  if (route === 'PUT /api/report-trends/date-mode') {
+    const body = await readJson(req);
+    sendJson(res, 200, await setReportTrendDateMode(body.useRecordDate === true));
+    return;
+  }
+
   if (route === 'POST /api/report-component-names') {
     const body = await readJson(req);
     await applyAccountHomeId(body.accountHomeId || body.selectedAccountHomeId || '');
@@ -1140,6 +1153,9 @@ async function getTablePermissionsExport(role) {
       row[`${label} Available Scopes`] = privilege ? availableScopes(privilege) : '';
     }
 
+    row['No Permission'] = TABLE_PERMISSION_COLUMNS.every(([, label]) =>
+      row[label] === 'None' || row[label] === 'N/A');
+
     return row;
   });
 
@@ -1150,6 +1166,7 @@ async function getTablePermissionsExport(role) {
     'Name',
     'Record owner',
     'Permission type',
+    'No Permission',
     ...TABLE_PERMISSION_COLUMNS.map(([, label]) => label),
     ...TABLE_PERMISSION_COLUMNS.flatMap(([, label]) => [
       `${label} Privilege Name`,
@@ -5756,6 +5773,32 @@ async function enqueueReportTrendWrite(action) {
   return run;
 }
 
+async function reportTrendUseRecordDate() {
+  const stored = await chrome.storage.local.get(REPORT_TREND_DATE_MODE_STORAGE_KEY);
+  return stored[REPORT_TREND_DATE_MODE_STORAGE_KEY] === true;
+}
+
+async function setReportTrendDateMode(useRecordDate) {
+  return enqueueReportTrendWrite(async () => {
+    const reportTables = new Set(Object.values(REPORT_TOTAL_TABLE_DEFINITIONS).map((definition) => definition.tableName));
+    const updatedRows = await trendUpdateRows(
+      (row) => reportTables.has(row.table),
+      (row) => {
+        const runDate = isDateOnlyString(row.run_date) ? row.run_date : row.date_ran;
+        const recordDate = isDateOnlyString(row.record_date) ? row.record_date : runDate;
+        return {
+          ...row,
+          run_date: runDate,
+          record_date: recordDate,
+          date_ran: useRecordDate ? recordDate : runDate,
+        };
+      },
+    );
+    await chrome.storage.local.set({ [REPORT_TREND_DATE_MODE_STORAGE_KEY]: useRecordDate });
+    return { useRecordDate, updatedRows };
+  });
+}
+
 async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null, sourceGroups = [], solutionOptions = null }) {
   const definition = reportTotalTableDefinition(group);
   if (!definition) {
@@ -5767,6 +5810,13 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
   }
   const collectedAt = new Date().toISOString();
   const dateRan = reportCacheDateKey();
+  const latestRecordDates = new Map();
+  if (group !== 'solutions') {
+    for (const { environment, rows: sourceRows } of sourceGroups) {
+      const latest = (sourceRows || []).map((row) => reportSourceRowDate(group, row)).filter(Boolean).sort().at(-1);
+      if (latest) latestRecordDates.set(reportTrendEnvironmentKey(reportEnvironmentFields(environment)), latest);
+    }
+  }
   const rangeKey = dateRange ? `${dateRange.range || 'custom'}:${dateRange.startDate || ''}:${dateRange.endDate || ''}` : 'snapshot';
   const rangeLabel = dateRange ? dateRangeLabel(dateRange) : 'snapshot';
   const backfillSnapshots = buildAutomatedReportTrendBackfillSnapshots({
@@ -5778,6 +5828,7 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
   const buildSolutionBackfillRows = buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOptions });
   const normalizedAccountHomeId = String(accountHomeId || '').trim();
   await enqueueReportTrendWrite(async () => {
+    const useRecordDate = await reportTrendUseRecordDate();
     const storedRows = await trendSelectRows(definition.tableName);
     const missingDaySnapshots = [...backfillSnapshots];
     if (buildSolutionBackfillRows && isDateOnlyString(dateRan)) {
@@ -5785,8 +5836,8 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
       // day missed since tracking began is identified from the stored
       // snapshot dates and rebuilt from each solution's createdOn date.
       const existingDates = [...new Set(storedRows
-        .filter((row) => row.account_home_id === normalizedAccountHomeId && row.date_ran < dateRan)
-        .map((row) => String(row.date_ran || ''))
+        .filter((row) => row.account_home_id === normalizedAccountHomeId && (row.run_date || row.date_ran) < dateRan)
+        .map((row) => String(row.run_date || row.date_ran || ''))
         .filter(isDateOnlyString))]
         .sort();
       if (existingDates.length) {
@@ -5806,11 +5857,11 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     const existingBackfillRows = firstBackfillDate
       ? storedRows.filter((row) =>
           row.account_home_id === normalizedAccountHomeId
-          && row.date_ran >= firstBackfillDate
-          && row.date_ran < dateRan)
+          && (row.run_date || row.date_ran) >= firstBackfillDate
+          && (row.run_date || row.date_ran) < dateRan)
       : [];
     const existingBackfillKeys = new Set(existingBackfillRows.map((row) =>
-      `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
+      `${row.run_date || row.date_ran}:${reportTrendEnvironmentKey(row)}`));
     const records = [];
     const appendRows = (snapshotDate, snapshotRows, { onlyMissing = false } = {}) => {
       for (const row of snapshotRows) {
@@ -5818,9 +5869,14 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
         if (onlyMissing && existingBackfillKeys.has(snapshotKey)) {
           continue;
         }
+        const recordDate = snapshotDate === dateRan
+          ? latestRecordDates.get(reportTrendEnvironmentKey(row)) || snapshotDate
+          : snapshotDate;
         records.push({
           account_home_id: normalizedAccountHomeId,
-          date_ran: snapshotDate,
+          date_ran: useRecordDate ? recordDate : snapshotDate,
+          run_date: snapshotDate,
+          record_date: recordDate,
           collected_at: collectedAt,
           range_key: rangeKey,
           range_label: rangeLabel,
@@ -5838,12 +5894,12 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     }
     await trendDeleteRows(
       definition.tableName,
-      (row) => row.account_home_id === normalizedAccountHomeId && row.date_ran === dateRan,
+      (row) => row.account_home_id === normalizedAccountHomeId && (row.run_date || row.date_ran) === dateRan,
     );
     await trendInsertRows(definition.tableName, records);
     await trendDeleteRows(
       definition.tableName,
-      (row) => row.date_ran < reportTrendRetentionCutoffDate(),
+      (row) => (row.run_date || row.date_ran) < reportTrendRetentionCutoffDate(),
     );
     if (group === 'solutions') {
       await saveSolutionComponentNameSnapshots(normalizedAccountHomeId, sourceGroups, collectedAt);
@@ -5988,9 +6044,9 @@ function isDateOnlyString(value) {
 }
 
 function reportTrendEnvironmentKey(row = {}) {
-  return String(row['Environment id'] ?? row.environment_id ?? '').trim()
-    || String(row['Environment url'] ?? row.environment_url ?? '').trim()
-    || String(row['Environment display name'] ?? row.environment_display_name ?? '').trim();
+  return String(row['Environment id'] ?? row.environment_id ?? row.environmentId ?? '').trim()
+    || String(row['Environment url'] ?? row.environment_url ?? row.environmentUrl ?? '').trim()
+    || String(row['Environment display name'] ?? row.environment_display_name ?? row.environmentDisplayName ?? '').trim();
 }
 
 function sqlReportTotalValue(value, type) {
@@ -7124,10 +7180,21 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
       }
       return { ...component, typeLabel: 'Code App' };
     });
-    const componentsBySolution = groupSolutionComponentsBySolution(typedComponents);
-    const namedComponents = await buildWeeklyComponentsForEnvironment(environment.orgUrl, typedComponents, accountHomeId);
+    const tableComponents = typedComponents.filter((component) => Number(component.componenttype) === 1);
+    const customTableIds = tableComponents.length
+      ? new Set((await targetDvGetAll(
+          environment.orgUrl,
+          'EntityDefinitions?$select=MetadataId&$filter=IsCustomEntity eq true',
+          {},
+          accountHomeId,
+        )).map((table) => normalizeGuid(table.MetadataId)))
+      : new Set();
+    const includedComponents = typedComponents.filter((component) =>
+      Number(component.componenttype) !== 1 || customTableIds.has(normalizeGuid(component.objectid)));
+    const componentsBySolution = groupSolutionComponentsBySolution(includedComponents);
+    const namedComponents = await buildWeeklyComponentsForEnvironment(environment.orgUrl, includedComponents, accountHomeId);
     const namedComponentsBySolution = groupSolutionComponentsBySolution(namedComponents);
-    const componentTotals = solutionReportCountFields(typedComponents);
+    const componentTotals = solutionReportCountFields(includedComponents);
     const group = {
       environment,
       rows: filteredSolutions.map((solution) => {
@@ -7391,6 +7458,8 @@ function isDefaultEnvironmentSolution(solution = {}) {
   const normalizedFriendlyName = friendlyName.replace(/[^a-z0-9]/g, '');
   return uniqueName === 'default'
     || uniqueName === 'crdefault'
+    || uniqueName === 'active'
+    || normalizedFriendlyName === 'activesolution'
     || normalizedFriendlyName === 'defaultsolution'
     || normalizedFriendlyName === 'commondataservicedefaultsolution'
     || normalizedFriendlyName === 'commondataservicesdefaultsolution';

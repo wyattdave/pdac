@@ -397,6 +397,7 @@
           </div>
           <p class="muted reports-date-note">Flow runs cover the last 7 days. AI Flow and Copilot sessions cover the current calendar month. Solution inventory includes managed and Microsoft-owned solutions.</p>
           <p id="chartsStatus" class="muted" aria-live="polite">Run a background report to populate these charts.</p>
+          <div id="chartsTotals" class="charts-totals" aria-label="Solution inventory totals" hidden></div>
           <div id="chartsGrid" class="reports-chart-grid"></div>
         </section>
       </section>
@@ -487,6 +488,11 @@
                 <button id="deleteSqlRecordsButton" class="danger-button" type="button">Delete all records</button>
               </div>
             </div>
+            <label class="checkbox-label">
+              <input id="trendUseRecordDate" type="checkbox" />
+              Use source record dates for trends where available
+            </label>
+            <p id="trendDateModeStatus" class="muted" aria-live="polite">Older totals without source dates keep their original day.</p>
             <div id="sqlTablesList" class="sql-table-list"></div>
           </section>
         </section>

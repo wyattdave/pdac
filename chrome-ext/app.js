@@ -73,6 +73,8 @@ const el = {
   downloadTrendTemplateButton: document.querySelector('#downloadTrendTemplateButton'),
   importTrendDataButton: document.querySelector('#importTrendDataButton'),
   trendDataImportFile: document.querySelector('#trendDataImportFile'),
+  trendUseRecordDate: document.querySelector('#trendUseRecordDate'),
+  trendDateModeStatus: document.querySelector('#trendDateModeStatus'),
   deleteSqlRecordsButton: document.querySelector('#deleteSqlRecordsButton'),
   sqlTablesList: document.querySelector('#sqlTablesList'),
   sqlDeleteModal: document.querySelector('#sqlDeleteModal'),
@@ -112,6 +114,7 @@ const el = {
   trendStart: document.querySelector('#trendStart'),
   trendEnd: document.querySelector('#trendEnd'),
   chartsStatus: document.querySelector('#chartsStatus'),
+  chartsTotals: document.querySelector('#chartsTotals'),
   chartsGrid: document.querySelector('#chartsGrid'),
   reportsStatus: document.querySelector('#reportsStatus'),
   reportsCharts: document.querySelector('#reportsCharts'),
@@ -458,6 +461,26 @@ el.trendDataImportFile?.addEventListener('change', () => {
     toast(error.message, 'error');
     console.error(error);
   });
+});
+el.trendUseRecordDate?.addEventListener('change', async () => {
+  const useRecordDate = el.trendUseRecordDate.checked;
+  el.trendUseRecordDate.disabled = true;
+  try {
+    const result = await api('/api/report-trends/date-mode', {
+      method: 'PUT',
+      body: { useRecordDate },
+    });
+    el.trendDateModeStatus.textContent = `Updated ${result.updatedRows.toLocaleString()} stored trend rows. Older totals without source dates keep their original day.`;
+    const refreshes = await Promise.allSettled([loadCachedReportsDashboard(), loadSqlTables()]);
+    if (refreshes.some((refresh) => refresh.status === 'rejected')) {
+      el.trendDateModeStatus.textContent = 'Date setting saved. Refresh the trend view to load the updated dates.';
+    }
+  } catch (error) {
+    el.trendUseRecordDate.checked = !useRecordDate;
+    el.trendDateModeStatus.textContent = error.message;
+  } finally {
+    el.trendUseRecordDate.disabled = false;
+  }
 });
 el.sqlTablesList?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-sql-table-export]');
@@ -987,6 +1010,7 @@ renderAutomatedReportStatus();
 updateChartsTabAvailability();
 updateReportsTabAvailability();
 await loadAutomatedReportScheduleSettings();
+await loadTrendDateMode();
 await loadStatus();
 await loadWeeklyReportSettings();
 loadSqlTables().catch((error) => {
@@ -1000,6 +1024,15 @@ async function loadAutomatedReportScheduleSettings() {
   applyAutomatedReportSchedule(schedule);
   el.automatedReportsRunOnLoad.checked = Boolean(schedule.enabled);
   localStorage.setItem(AUTOMATED_REPORTS_RUN_ON_LOAD_KEY, schedule.enabled ? 'true' : 'false');
+}
+
+async function loadTrendDateMode() {
+  try {
+    const result = await api('/api/report-trends/date-mode', { quiet: true });
+    el.trendUseRecordDate.checked = Boolean(result.useRecordDate);
+  } catch (error) {
+    el.trendDateModeStatus.textContent = `Unable to load trend date setting: ${error.message}`;
+  }
 }
 
 function applyAutomatedReportSchedule(schedule = {}) {
@@ -3245,6 +3278,8 @@ function buildLatestSqlChartsDashboard(data = {}) {
       modelDrivenAppCount: values.number_of_model_driven_apps,
       aiModelCount: values.number_of_ai_models,
       copilotStudioAgentCount: values.number_of_copilot_studio_agents,
+      dataverseTableCount: values.number_of_dataverse_tables,
+      dataflowCount: values.number_of_dataflows,
     });
   }
   const collected = [...latest.values()].map((row) => row.collectedAt).filter(Boolean).sort();
@@ -3532,6 +3567,24 @@ function renderChartsDashboard(data = {}) {
     return;
   }
   destroyReportCharts();
+  const totals = [
+    ['Flows', 'flowCount'],
+    ['Canvas apps', 'canvasAppCount'],
+    ['Model driven apps', 'modelDrivenAppCount'],
+    ['Code apps', 'codeAppCount'],
+    ['Agents', 'copilotStudioAgentCount'],
+    ['Custom Dataverse tables', 'dataverseTableCount'],
+    ['AI Builder models', 'aiModelCount'],
+    ['Dataflows', 'dataflowCount'],
+    ['Solutions', 'solutionCount'],
+  ];
+  el.chartsTotals.hidden = !rows.some((row) => row.solutionCount !== undefined);
+  el.chartsTotals.innerHTML = el.chartsTotals.hidden ? '' : totals.map(([label, key]) => `
+    <div class="charts-total">
+      <span>${label}</span>
+      <strong>${rows.reduce((sum, row) => sum + number(row[key]), 0).toLocaleString()}</strong>
+    </div>
+  `).join('');
   const charts = [
     {
       id: 'flow-runs',
@@ -3602,6 +3655,8 @@ function renderChartsDashboard(data = {}) {
 
 function renderChartsPlaceholder() {
   destroyReportCharts();
+  el.chartsTotals.hidden = true;
+  el.chartsTotals.innerHTML = '';
   if (el.chartsGrid) {
     el.chartsGrid.innerHTML = empty('Run a background report to populate these charts.');
   }
@@ -3710,11 +3765,10 @@ function buildAiRollingCreditChart(table, range, options) {
   if (!rows.length) {
     return null;
   }
-  const isMonthRange = String(range?.range || '').toLowerCase() === 'month';
   const environments = chartEnvironmentOptions(rows);
   const selectedEnvironmentIds = selectedReportChartEnvironmentIds(options.id, environments);
   const filteredRows = filterTrendRowsByEnvironment(rows, selectedEnvironmentIds);
-  const dateLabels = trendDateLabelsWithMonthForecast(range, rows);
+  const dateLabels = trendDateLabelsWithForecast(range, rows);
   if (!dateLabels.length) {
     return null;
   }
@@ -3732,15 +3786,11 @@ function buildAiRollingCreditChart(table, range, options) {
     }
     actualData[index] = latestTotal;
   }
-  const forecastEndDate = isMonthRange
-    ? monthEndDateKey(dateLabels[lastActualIndex]) || dateLabels[dateLabels.length - 1]
-    : '';
+  const forecastEndDate = dateLabels.at(-1);
   return withReportChartSettings({
     id: options.id,
     title: options.title,
-    subtitle: isMonthRange
-      ? `Rolling total with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`
-      : 'Rolling total over selected range',
+    subtitle: `Rolling total with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`,
     type: 'line',
     labels: dateLabels.map(formatDateLabel),
     unit: 'Credits',
@@ -3756,13 +3806,13 @@ function buildAiRollingCreditChart(table, range, options) {
         pointHoverRadius: 5,
         borderWidth: 3,
       }),
-      ...(isMonthRange ? [reportDataset('Forecast usage', predictedUsageData(dateLabels, actualData, lastActualIndex), options.color, {
+      reportDataset('Forecast usage', predictedUsageData(dateLabels, actualData, lastActualIndex), options.color, {
         borderDash: [6, 5],
         borderWidth: 2,
         pointRadius: 0,
         pointHoverRadius: 4,
         tension: 0.2,
-      })] : []),
+      }),
     ],
   });
 }
@@ -3779,9 +3829,8 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
   if (!lastActualDate) {
     return prediction;
   }
-  const forecastMonth = `${lastActualDate.getFullYear()}-${String(lastActualDate.getMonth() + 1).padStart(2, '0')}`;
   const todayDate = new Date();
-  if (lastActualDate.getFullYear() !== todayDate.getFullYear() || lastActualDate.getMonth() !== todayDate.getMonth()) {
+  if (dateLabels[lastActualIndex] > formatDateInputValue(todayDate)) {
     return prediction;
   }
   const today = formatDateInputValue(todayDate);
@@ -3789,9 +3838,10 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
   const weekdaySamples = Array.from({ length: 7 }, () => []);
   const allSamples = [];
   let previousTotal = null;
+  let firstUsageDate = null;
 
   for (let index = 0; index <= historyEndIndex; index += 1) {
-    if (actualData[index] === null || actualData[index] === undefined) {
+    if (actualData[index] === null || actualData[index] === undefined || number(actualData[index]) === 0 && firstUsageDate === null) {
       continue;
     }
     const date = parseDateOnlyValue(dateLabels[index]);
@@ -3799,11 +3849,10 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
       continue;
     }
     const total = number(actualData[index]);
+    firstUsageDate ||= date;
     let usage = null;
     if (previousTotal === null) {
-      if (date.getDate() === 1) {
-        usage = total;
-      }
+      usage = total;
     } else if (total >= previousTotal) {
       usage = total - previousTotal;
     } else if (date.getDate() === 1) {
@@ -3818,14 +3867,15 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
 
   const fallbackRate = allSamples.length
     ? average(allSamples)
-    : currentTotal / Math.max(1, lastActualDate.getDate());
+    : currentTotal / Math.max(1, firstUsageDate ? Math.round((lastActualDate - firstUsageDate) / 86400000) + 1 : 1);
   let forecastTotal = currentTotal;
   for (let index = lastActualIndex + 1; index < dateLabels.length; index += 1) {
     const date = parseDateOnlyValue(dateLabels[index]);
-    if (!date || !dateLabels[index].startsWith(forecastMonth)) {
+    if (!date) {
       continue;
     }
     const samples = weekdaySamples[date.getDay()];
+    if (date.getDate() === 1) forecastTotal = 0;
     forecastTotal += samples.length ? average(samples) : fallbackRate;
     prediction[index] = forecastTotal;
   }
@@ -4160,11 +4210,8 @@ function trendDateLabels(range, rows) {
   return [...new Set(rows.map(trendRowDate).filter(Boolean))].sort();
 }
 
-function trendDateLabelsWithMonthForecast(range, rows) {
+function trendDateLabelsWithForecast(range, rows) {
   const dates = trendDateLabels(range, rows);
-  if (String(range?.range || '').toLowerCase() !== 'month') {
-    return dates;
-  }
   const lastActualDateKey = [...new Set(rows.map(trendRowDate).filter(Boolean))].sort().at(-1) || '';
   const lastActualDate = parseDateOnlyValue(lastActualDateKey);
   const today = new Date();
@@ -4181,13 +4228,6 @@ function trendDateLabelsWithMonthForecast(range, rows) {
     dates.push(formatDateInputValue(cursor));
   }
   return dates;
-}
-
-function monthEndDateKey(value) {
-  const date = parseDateOnlyValue(value);
-  return date
-    ? formatDateInputValue(new Date(date.getFullYear(), date.getMonth() + 1, 0))
-    : '';
 }
 
 function parseDateOnlyValue(value) {

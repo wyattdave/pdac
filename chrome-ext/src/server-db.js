@@ -126,6 +126,30 @@ export function trendSelectRows(table) {
     requestToPromise(store.index('byTable').getAll(IDBKeyRange.only(table))));
 }
 
+export function trendUpdateRows(predicateFn, updateFn) {
+  return withStore('trendRows', 'readwrite', (store) => new Promise((resolve, reject) => {
+    let updated = 0;
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(updated);
+        return;
+      }
+      try {
+        if (predicateFn(cursor.value)) {
+          cursor.update(updateFn(cursor.value));
+          updated += 1;
+        }
+        cursor.continue();
+      } catch (error) {
+        reject(error);
+      }
+    };
+  }));
+}
+
 export function trendInsertRows(table, records = []) {
   return withStore('trendRows', 'readwrite', (store) => {
     for (const source of records) {
