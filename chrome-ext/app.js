@@ -3806,7 +3806,7 @@ function buildAiRollingCreditChart(table, range, options) {
         pointHoverRadius: 5,
         borderWidth: 3,
       }),
-      reportDataset('Forecast usage', predictedUsageData(dateLabels, actualData, lastActualIndex), options.color, {
+      reportDataset('Forecast usage', predictedUsageData(dateLabels, actualData, lastActualIndex, daily), options.color, {
         borderDash: [6, 5],
         borderWidth: 2,
         pointRadius: 0,
@@ -3817,7 +3817,7 @@ function buildAiRollingCreditChart(table, range, options) {
   });
 }
 
-function predictedUsageData(dateLabels, actualData, lastActualIndex) {
+function predictedUsageData(dateLabels, actualData, lastActualIndex, daily) {
   const prediction = dateLabels.map(() => null);
   if (lastActualIndex < 0) {
     return prediction;
@@ -3838,10 +3838,10 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
   const weekdaySamples = Array.from({ length: 7 }, () => []);
   const allSamples = [];
   let previousTotal = null;
-  let firstUsageDate = null;
+  let previousIndex = -1;
 
   for (let index = 0; index <= historyEndIndex; index += 1) {
-    if (actualData[index] === null || actualData[index] === undefined || number(actualData[index]) === 0 && firstUsageDate === null) {
+    if (!daily.has(dateLabels[index])) {
       continue;
     }
     const date = parseDateOnlyValue(dateLabels[index]);
@@ -3849,11 +3849,11 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
       continue;
     }
     const total = number(actualData[index]);
-    firstUsageDate ||= date;
     let usage = null;
     if (previousTotal === null) {
-      usage = total;
-    } else if (total >= previousTotal) {
+      if (total === 0) continue;
+      if (index > 0 || date.getDate() === 1) usage = total;
+    } else if (index === previousIndex + 1 && total >= previousTotal) {
       usage = total - previousTotal;
     } else if (date.getDate() === 1) {
       usage = total;
@@ -3863,11 +3863,10 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex) {
       allSamples.push(usage);
     }
     previousTotal = total;
+    previousIndex = index;
   }
 
-  const fallbackRate = allSamples.length
-    ? average(allSamples)
-    : currentTotal / Math.max(1, firstUsageDate ? Math.round((lastActualDate - firstUsageDate) / 86400000) + 1 : 1);
+  const fallbackRate = allSamples.length ? average(allSamples) : 0;
   let forecastTotal = currentTotal;
   for (let index = lastActualIndex + 1; index < dateLabels.length; index += 1) {
     const date = parseDateOnlyValue(dateLabels[index]);

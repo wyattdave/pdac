@@ -30,7 +30,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test testing/dataverse-table-count.test.mjs testing/node-weekly-report.test.mjs testing/solution-package-analysis.test.mjs testing/trend-export-import.test.mjs testing/weekly-report.test.mjs",
+    "test": "node --test testing/dataverse-table-count.test.mjs testing/forecast.test.mjs testing/node-weekly-report.test.mjs testing/solution-package-analysis.test.mjs testing/trend-export-import.test.mjs testing/weekly-report.test.mjs",
     "install-startup": "node scripts/background-manager.mjs install",
     "remove-startup": "node scripts/background-manager.mjs uninstall"
   },
