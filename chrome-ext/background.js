@@ -11,6 +11,7 @@ import {
   WEEKLY_REPORT_CHECK_INTERVAL_MS,
   checkAutomatedReportSchedule,
   checkWeeklyReportTracking,
+  initializeReportTrendDateMode,
 } from './src/server-core.js';
 
 const APP_URL = chrome.runtime.getURL('app.html');
@@ -39,9 +40,14 @@ async function checkBackgroundReports() {
   await checkWeeklyReportTracking();
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
   ensureAlarm();
-  checkBackgroundReports().catch(logScheduleError);
+  try {
+    await initializeReportTrendDateMode(reason);
+    await checkBackgroundReports();
+  } catch (error) {
+    logScheduleError(error);
+  }
 });
 
 chrome.runtime.onStartup.addListener(() => {

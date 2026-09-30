@@ -490,9 +490,10 @@
             </div>
             <label class="checkbox-label">
               <input id="trendUseRecordDate" type="checkbox" />
-              Use source record dates for trends where available
+              Use the last completed day for activity trends
             </label>
-            <p id="trendDateModeStatus" class="muted" aria-live="polite">Older totals without source dates keep their original day.</p>
+            <p class="muted"><strong>Import warning:</strong> Turn this off before importing trend data, import, then turn it on to correct the dates. Unrecoverable activity snapshots use a labeled one-day estimate; solution inventory keeps its snapshot date.</p>
+            <p id="trendDateModeStatus" class="muted" aria-live="polite"></p>
             <div id="sqlTablesList" class="sql-table-list"></div>
           </section>
         </section>

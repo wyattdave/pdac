@@ -25,7 +25,7 @@ import {
   trendInsertRows,
   trendDeleteRows,
   trendReplaceRows,
-  trendUpdateRows,
+  trendRewriteRows,
   weeklyReplaceEvents,
   weeklyListEvents,
   weeklyDeleteEventsBefore,
@@ -48,6 +48,7 @@ const POWER_PLATFORM_RESOURCE = 'https://api.powerplatform.com';
 const AUTOMATED_REPORT_SCHEDULE_STORAGE_KEY = 'pdac.automatedReportSchedule';
 const WEEKLY_REPORT_SETTINGS_STORAGE_KEY = 'pdac.weeklyReportSettings';
 const REPORT_TREND_DATE_MODE_STORAGE_KEY = 'pdac.reportTrendUseRecordDate';
+const REPORT_TREND_DATE_MODE_VERSION_KEY = 'pdac.reportTrendDateModeVersion';
 const STARTUP_TASK_NAME = 'PDAC Background Server';
 export const REPORT_TREND_RETENTION_DAYS = 730;
 export const AUTOMATED_REPORT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -836,7 +837,7 @@ async function handleApi(req, res) {
   }
 
   if (route === 'GET /api/report-trends/date-mode') {
-    sendJson(res, 200, { useRecordDate: await reportTrendUseRecordDate() });
+    sendJson(res, 200, await reportTrendDateModeStatus());
     return;
   }
 
@@ -5079,8 +5080,10 @@ async function listAgentSessions(filters = {}) {
 
 async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
   const reportSchemaVersion = group === 'solutions' ? 4 : 1;
+  const useCompletedDay = group !== 'solutions' && await reportTrendUseRecordDate();
   const cacheKey = reportCacheKey('automated', {
     version: reportSchemaVersion,
+    ...(useCompletedDay ? { dateMode: 'completed-day-v2' } : {}),
     accountHomeId: reportCacheAccountId(body),
     group,
     reportType,
@@ -5778,24 +5781,165 @@ async function reportTrendUseRecordDate() {
   return stored[REPORT_TREND_DATE_MODE_STORAGE_KEY] === true;
 }
 
+async function reportTrendDateModeStatus() {
+  const useRecordDate = await reportTrendUseRecordDate();
+  let estimatedRows = 0;
+  let recoveredRows = 0;
+  for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
+    for (const row of await trendSelectRows(definition.tableName)) {
+      if (row.date_basis === 'estimated') estimatedRows += 1;
+      if (row.date_basis === 'completed-day') recoveredRows += 1;
+    }
+  }
+  return { useRecordDate, estimatedRows, recoveredRows };
+}
+
+export async function initializeReportTrendDateMode(reason) {
+  const stored = await chrome.storage.local.get(REPORT_TREND_DATE_MODE_STORAGE_KEY);
+  if (typeof stored[REPORT_TREND_DATE_MODE_STORAGE_KEY] !== 'boolean') {
+    await chrome.storage.local.set({ [REPORT_TREND_DATE_MODE_STORAGE_KEY]: reason === 'install' });
+  }
+}
+
+function completedTrendRange(range, today = new Date()) {
+  const end = addDays(atStartOfDay(today), -1);
+  if (range.range === 'custom') {
+    return makeAiEventRange('custom', range.start, new Date(Math.min(range.endExclusive.getTime(), atStartOfDay(today).getTime())));
+  }
+  const days = { today: 1, '7d': 7, '28d': 28, '365d': 365 }[range.range];
+  const start = days ? addDays(end, 1 - days) : new Date(end.getFullYear(), end.getMonth(), 1);
+  return makeAiEventRange(range.range, start, addDays(end, 1));
+}
+
+function completedTrendRow(row, definition) {
+  if (row.date_basis) return { ...row };
+  if (row.completed_day_origin && isDateOnlyString(row.record_date)) {
+    return { ...row, date_ran: row.record_date, date_basis: row.completed_day_origin === 'estimated' ? 'estimated' : 'completed-day', legacy_rows: [{ ...row }] };
+  }
+  const runDate = isDateOnlyString(row.run_date) ? row.run_date : row.date_ran;
+  const collected = new Date(row.collected_at);
+  const isBackfill = !Number.isNaN(collected.getTime()) && runDate < reportCacheDateKey(collected);
+  const isInventory = definition.reportKey === 'solutions';
+  const recordDate = isInventory || isBackfill ? runDate : toDateOnlyString(addDays(parseDateOnly(runDate, 'snapshot'), -1));
+  return {
+    ...row,
+    run_date: runDate,
+    record_date: recordDate,
+    date_ran: recordDate,
+    date_basis: isInventory ? 'inventory' : 'estimated',
+    legacy_rows: [{ ...row }],
+  };
+}
+
+function restoreLegacyTrendRows(rows) {
+  return rows.flatMap((row) => {
+    if (row.legacy_rows?.length) return row.legacy_rows;
+    const restored = { ...row, date_ran: row.run_date || row.date_ran };
+    if (row.date_basis === 'completed-day' || row.date_basis === 'estimated') restored.completed_day_origin = row.date_basis;
+    delete restored.date_basis;
+    delete restored.legacy_rows;
+    return [restored];
+  });
+}
+
+async function recoverCompletedTrendRows(rows, definition, today = new Date()) {
+  const collectors = {
+    'ai-events': collectAutomatedAiEventRows,
+    'agent-sessions': collectAutomatedAgentSessionRows,
+    'flow-runs': collectAutomatedFlowRunRows,
+  };
+  const builders = {
+    'ai-events': buildAutomatedAiEventTotalsRows,
+    'agent-sessions': buildAutomatedAgentSessionTotalsRows,
+    'flow-runs': buildAutomatedFlowRunTotalsRows,
+  };
+  const collector = collectors[definition.reportKey];
+  if (!collector) return;
+  const cutoff = addDays(atStartOfDay(today), -90);
+  const endExclusive = atStartOfDay(today);
+  const groups = new Map();
+  for (const row of rows) {
+    if (row.date_basis !== 'estimated') continue;
+    const key = `${row.account_home_id}:${reportTrendEnvironmentKey(row)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  for (const environmentRows of groups.values()) {
+    const first = environmentRows[0];
+    if (!first.account_home_id || !first.environment_url) continue;
+    const environment = {
+      environmentId: first.environment_id,
+      environmentName: first.environment_id,
+      displayName: first.environment_display_name,
+      orgUrl: first.environment_url,
+    };
+    try {
+      const sourceGroups = await collector([environment], makeAiEventRange('custom', cutoff, addDays(endExclusive, 1)), first.account_home_id);
+      const sourceRows = (sourceGroups[0]?.rows || []).map((row) => ({ row, date: reportSourceRowDate(definition.reportKey, row, true) }));
+      for (const row of environmentRows) {
+        const date = parseDateOnly(row.date_ran, 'snapshot');
+        if (date < cutoff || date >= endExclusive) continue;
+        const [preset, storedStart] = String(row.range_key || '').split(':');
+        const windowDays = { today: 1, '7d': 7, '28d': 28, '365d': 365 }[preset];
+        const start = preset === 'month' ? new Date(date.getFullYear(), date.getMonth(), 1)
+          : windowDays ? addDays(date, 1 - windowDays)
+            : isDateOnlyString(storedStart) ? parseDateOnly(storedStart, 'start') : null;
+        if (!start || start < cutoff) continue;
+        const events = sourceRows.filter((item) => item.date >= toDateOnlyString(start) && item.date <= row.date_ran).map((item) => item.row);
+        const countKey = { 'ai-events': 'count_of_events', 'agent-sessions': 'total_sessions', 'flow-runs': 'total_flow_runs' }[definition.reportKey];
+        if (!events.length && Number(row[countKey] || 0) > 0) continue;
+        const totals = builders[definition.reportKey]([{ environment, rows: events }])[0];
+        const originalStart = isDateOnlyString(storedStart) ? storedStart : toDateOnlyString(start);
+        const availableCount = sourceRows.filter((item) => item.date >= originalStart
+          && item.date <= (row.run_date || row.date_ran)).length;
+        if (availableCount < Number(row[countKey] || 0)) continue;
+        for (const [header, key, type] of definition.columns) row[key] = sqlReportTotalValue(totals[header], type);
+        row.date_basis = 'completed-day';
+      }
+    } catch (error) {
+      console.warn(`Trend recovery for ${environment.displayName || environment.environmentId} kept estimates: ${errorMessage(error)}`);
+    }
+  }
+}
+
 async function setReportTrendDateMode(useRecordDate) {
   return enqueueReportTrendWrite(async () => {
+    const settings = await chrome.storage.local.get([REPORT_TREND_DATE_MODE_STORAGE_KEY, REPORT_TREND_DATE_MODE_VERSION_KEY]);
+    if (settings[REPORT_TREND_DATE_MODE_STORAGE_KEY] === useRecordDate && settings[REPORT_TREND_DATE_MODE_VERSION_KEY] === 2) {
+      return { ...(await reportTrendDateModeStatus()), updatedRows: 0 };
+    }
     const reportTables = new Set(Object.values(REPORT_TOTAL_TABLE_DEFINITIONS).map((definition) => definition.tableName));
-    const updatedRows = await trendUpdateRows(
+    const prepared = new Map();
+    if (useRecordDate) {
+      for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
+        const rows = (await trendSelectRows(definition.tableName)).map((row) => completedTrendRow(row, definition));
+        await recoverCompletedTrendRows(rows, definition);
+        for (const row of rows) prepared.set(row.id, row);
+      }
+    }
+    let originalRows;
+    const updatedRows = await trendRewriteRows(
       (row) => reportTables.has(row.table),
-      (row) => {
-        const runDate = isDateOnlyString(row.run_date) ? row.run_date : row.date_ran;
-        const recordDate = isDateOnlyString(row.record_date) ? row.record_date : runDate;
-        return {
-          ...row,
-          run_date: runDate,
-          record_date: recordDate,
-          date_ran: useRecordDate ? recordDate : runDate,
-        };
+      (rows) => {
+        originalRows = rows;
+        return useRecordDate ? rows.map((row) => prepared.get(row.id) || row) : restoreLegacyTrendRows(rows);
       },
     );
-    await chrome.storage.local.set({ [REPORT_TREND_DATE_MODE_STORAGE_KEY]: useRecordDate });
-    return { useRecordDate, updatedRows };
+    try {
+      await chrome.storage.local.set({
+        [REPORT_TREND_DATE_MODE_STORAGE_KEY]: useRecordDate,
+        [REPORT_TREND_DATE_MODE_VERSION_KEY]: 2,
+      });
+    } catch (error) {
+      await trendRewriteRows((row) => reportTables.has(row.table), () => originalRows);
+      throw error;
+    }
+    return {
+      useRecordDate,
+      updatedRows,
+      estimatedRows: [...prepared.values()].filter((row) => row.date_basis === 'estimated').length,
+      recoveredRows: [...prepared.values()].filter((row) => row.date_basis === 'completed-day').length,
+    };
   });
 }
 
@@ -5830,6 +5974,45 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
   await enqueueReportTrendWrite(async () => {
     const useRecordDate = await reportTrendUseRecordDate();
     const storedRows = await trendSelectRows(definition.tableName);
+    if (useRecordDate && group !== 'solutions') {
+      const completedSnapshots = buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan, useLocalDate: true });
+      const completedRecords = completedSnapshots.flatMap((snapshot) => snapshot.rows.map((row) => ({
+        account_home_id: normalizedAccountHomeId,
+        date_ran: snapshot.dateRan,
+        run_date: toDateOnlyString(addDays(parseDateOnly(snapshot.dateRan, 'snapshot'), 1)),
+        record_date: snapshot.dateRan,
+        date_basis: 'completed-day',
+        collected_at: collectedAt,
+        range_key: rangeKey,
+        range_label: rangeLabel,
+        legacy_rows: storedRows.filter((stored) => stored.date_ran === snapshot.dateRan
+          && stored.account_home_id === normalizedAccountHomeId
+          && reportTrendEnvironmentKey(stored) === reportTrendEnvironmentKey(row))
+          .flatMap((stored) => stored.legacy_rows || (stored.date_basis ? [] : [{ ...stored }])),
+        ...Object.fromEntries(definition.columns.map(([header, key, type]) => [
+          key,
+          sqlReportTotalValue(row[header], type),
+        ])),
+      })));
+      const countKey = { 'ai-events': 'count_of_events', 'agent-sessions': 'total_sessions', 'flow-runs': 'total_flow_runs' }[group];
+      for (const record of completedRecords) {
+        const previous = storedRows.filter((row) => row.account_home_id === normalizedAccountHomeId
+          && row.date_ran === record.date_ran
+          && reportTrendEnvironmentKey(row) === reportTrendEnvironmentKey(record)
+          && String(row.range_key || '').split(':')[1] === dateRange.startDate)
+          .sort((left, right) => String(right.collected_at || '').localeCompare(String(left.collected_at || '')))[0];
+        if (previous && Number(previous[countKey] || 0) > Number(record[countKey] || 0)) {
+          for (const [, key] of definition.columns) record[key] = previous[key];
+          record.date_basis = 'estimated';
+        }
+      }
+      const snapshotKeys = new Set(completedRecords.map((row) => `${row.date_ran}:${reportTrendEnvironmentKey(row)}`));
+      await trendReplaceRows(definition.tableName, (row) =>
+        row.account_home_id === normalizedAccountHomeId
+        && snapshotKeys.has(`${row.date_ran}:${reportTrendEnvironmentKey(row)}`), completedRecords);
+      await trendDeleteRows(definition.tableName, (row) => row.date_ran < reportTrendRetentionCutoffDate());
+      return;
+    }
     const missingDaySnapshots = [...backfillSnapshots];
     if (buildSolutionBackfillRows && isDateOnlyString(dateRan)) {
       // Solutions are a point-in-time inventory with no date range, so any
@@ -5955,7 +6138,7 @@ async function readSolutionComponentNames(accountHomeId) {
   return names;
 }
 
-function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan }) {
+function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan, useLocalDate = false }) {
   const totalsBuilder = {
     'ai-events': buildAutomatedAiEventTotalsRows,
     'agent-sessions': buildAutomatedAgentSessionTotalsRows,
@@ -5972,7 +6155,7 @@ function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateR
   const timestampedGroups = groups.map(({ environment, rows }) => ({
     environment,
     rows: (Array.isArray(rows) ? rows : [])
-      .map((row) => ({ row, date: reportSourceRowDate(group, row) }))
+      .map((row) => ({ row, date: reportSourceRowDate(group, row, useLocalDate) }))
       .filter((item) => item.date && item.date >= startDate && item.date <= dateRan),
   }));
   const snapshots = [];
@@ -6015,7 +6198,7 @@ function buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOp
   })), solutionOptions);
 }
 
-function reportSourceRowDate(group, row = {}) {
+function reportSourceRowDate(group, row = {}, useLocalDate = false) {
   const value = group === 'ai-events'
     ? row.createdOnRaw || row.createdOn
     : group === 'agent-sessions'
@@ -6024,6 +6207,10 @@ function reportSourceRowDate(group, row = {}) {
         ? row.createdon
         : row.startTimeRaw || row.startTimeDisplay;
   const text = String(value || '').trim();
+  if (useLocalDate && text.length > 10) {
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? '' : reportCacheDateKey(parsed);
+  }
   const dateOnly = text.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || '';
   if (dateOnly) {
     return isDateOnlyString(dateOnly) ? dateOnly : '';
@@ -6100,6 +6287,7 @@ async function listReportTrendSnapshots(filters = {}) {
     const rows = selectedRows.map((row) => ({
       id: row.id,
       dateRan: row.date_ran,
+      dateBasis: row.date_basis || 'collection-day',
       collectedAt: row.collected_at,
       rangeKey: row.range_key,
       rangeLabel: row.range_label,
@@ -6581,7 +6769,12 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
-  const dateRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
+  const useCompletedDay = group !== 'solutions' && await reportTrendUseRecordDate();
+  const requestedRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
+  const dateRange = useCompletedDay ? completedTrendRange(requestedRange) : requestedRange;
+  if (useCompletedDay && dateRange.start >= dateRange.endExclusive) {
+    throw new HttpError(400, 'The selected range has no completed days. Choose a date before today.');
+  }
   const reportProgress = createAutomatedReportProgressReporter(body);
   const saveTrends = Boolean(body.saveToDatabase);
   if (group === 'ai-events') {
@@ -6633,7 +6826,8 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   if (group === 'flow-runs') {
-    const flowRunDateRange = getFlowRunDateRange({ range: '7d' });
+    const requestedFlowRange = getFlowRunDateRange({ range: '7d' });
+    const flowRunDateRange = useCompletedDay ? completedTrendRange(requestedFlowRange) : requestedFlowRange;
     const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, flowRunDateRange, accountHomeId, reportProgress);
     if (saveTrends && reportType !== 'raw') {
       await saveAutomatedReportTrendSnapshot({
@@ -6647,14 +6841,14 @@ async function buildAutomatedReport(group, reportType, body = {}) {
     if (reportType === 'both') {
       return {
         files: [
-          await buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment),
-          await buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment),
+          await buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment, flowRunDateRange),
+          await buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment, flowRunDateRange),
         ],
       };
     }
     return reportType === 'totals'
-      ? buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment)
-      : buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment);
+      ? buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment, flowRunDateRange)
+      : buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment, flowRunDateRange);
   }
 
   const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
@@ -7943,10 +8137,10 @@ function buildAutomatedFlowRunTotalsRows(groups) {
   });
 }
 
-async function buildAutomatedFlowRunTotalsWorkbook(groups) {
+async function buildAutomatedFlowRunTotalsWorkbook(groups, dateRange = getFlowRunDateRange({ range: '7d' })) {
   const rows = buildAutomatedFlowRunTotalsRows(groups);
   return {
-    filename: `flow-runs-totals-by-environment-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
+    filename: `flow-runs-totals-by-environment-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
     bytes: await exportSimpleWorkbook('Flow Run Totals', [
       ['Environment display name', 30],
       ['Environment id', 38],
@@ -7960,7 +8154,7 @@ async function buildAutomatedFlowRunTotalsWorkbook(groups) {
   };
 }
 
-async function buildAutomatedFailedFlowRunsWorkbook(groups) {
+async function buildAutomatedFailedFlowRunsWorkbook(groups, dateRange = getFlowRunDateRange({ range: '7d' })) {
   const rows = groups.flatMap(({ rows: flowRuns }) => flowRuns
     .filter(isFailedFlowRun)
     .map((row) => ({
@@ -7978,7 +8172,7 @@ async function buildAutomatedFailedFlowRunsWorkbook(groups) {
       'Flow run URL': row.openUrl || '',
     })));
   return {
-    filename: `flow-runs-failed-raw-stacked-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
+    filename: `flow-runs-failed-raw-stacked-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
     bytes: await exportSimpleWorkbook('Failed Flow Runs', [
       ['Environment display name', 30],
       ['Environment id', 38],

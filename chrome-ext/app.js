@@ -465,12 +465,17 @@ el.trendDataImportFile?.addEventListener('change', () => {
 el.trendUseRecordDate?.addEventListener('change', async () => {
   const useRecordDate = el.trendUseRecordDate.checked;
   el.trendUseRecordDate.disabled = true;
+  el.trendDateModeStatus.textContent = useRecordDate
+    ? 'Rebuilding recent activity dates from the API and preserving originals. This may take a few minutes...'
+    : 'Restoring original snapshot dates and values...';
   try {
     const result = await api('/api/report-trends/date-mode', {
       method: 'PUT',
       body: { useRecordDate },
     });
-    el.trendDateModeStatus.textContent = `Updated ${result.updatedRows.toLocaleString()} stored trend rows. Older totals without source dates keep their original day.`;
+    el.trendDateModeStatus.textContent = useRecordDate
+      ? `Updated ${result.updatedRows.toLocaleString()} rows: ${result.recoveredRows.toLocaleString()} rebuilt, ${result.estimatedRows.toLocaleString()} estimated. API recovery covers up to 90 days; older unavailable data is estimated. Original snapshots are preserved for switching off.`
+      : 'Original snapshots restored. New activity reports use the collection day again.';
     const refreshes = await Promise.allSettled([loadCachedReportsDashboard(), loadSqlTables()]);
     if (refreshes.some((refresh) => refresh.status === 'rejected')) {
       el.trendDateModeStatus.textContent = 'Date setting saved. Refresh the trend view to load the updated dates.';
@@ -1030,6 +1035,9 @@ async function loadTrendDateMode() {
   try {
     const result = await api('/api/report-trends/date-mode', { quiet: true });
     el.trendUseRecordDate.checked = Boolean(result.useRecordDate);
+    el.trendDateModeStatus.textContent = result.useRecordDate
+      ? `Last completed day enabled. ${(result.estimatedRows || 0).toLocaleString()} estimated rows; ${(result.recoveredRows || 0).toLocaleString()} rebuilt rows. Original snapshots are preserved for switching off.`
+      : 'Collection-day snapshots enabled. Existing behavior is unchanged.';
   } catch (error) {
     el.trendDateModeStatus.textContent = `Unable to load trend date setting: ${error.message}`;
   }

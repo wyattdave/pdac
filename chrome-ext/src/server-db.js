@@ -150,6 +150,20 @@ export function trendUpdateRows(predicateFn, updateFn) {
   }));
 }
 
+export function trendRewriteRows(predicateFn, rewriteFn) {
+  return withStore('trendRows', 'readwrite', async (store) => {
+    const rows = (await requestToPromise(store.getAll())).filter(predicateFn);
+    const records = rewriteFn(rows);
+    for (const row of rows) store.delete(row.id);
+    for (const source of records) {
+      const record = { ...source };
+      if (record.id === undefined) delete record.id;
+      store.put(record);
+    }
+    return records.length;
+  });
+}
+
 export function trendInsertRows(table, records = []) {
   return withStore('trendRows', 'readwrite', (store) => {
     for (const source of records) {
