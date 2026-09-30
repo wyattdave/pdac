@@ -113,6 +113,7 @@ const el = {
   trendRange: document.querySelector('#trendRange'),
   trendStart: document.querySelector('#trendStart'),
   trendEnd: document.querySelector('#trendEnd'),
+  trendCreditPerDay: document.querySelector('#trendCreditPerDay'),
   chartsStatus: document.querySelector('#chartsStatus'),
   chartsTotals: document.querySelector('#chartsTotals'),
   chartsGrid: document.querySelector('#chartsGrid'),
@@ -697,6 +698,7 @@ el.trendEnd?.addEventListener('change', () => loadCachedReportsDashboard().catch
   toast(error.message, 'error');
   console.error(error);
 }));
+el.trendCreditPerDay?.addEventListener('change', rerenderReportsDashboard);
 el.reportsCharts?.addEventListener('click', handleReportChartClick);
 el.reportsCharts?.addEventListener('change', handleReportChartChange);
 el.chartsGrid?.addEventListener('click', handleReportChartClick);
@@ -3794,11 +3796,24 @@ function buildAiRollingCreditChart(table, range, options) {
     }
     actualData[index] = latestTotal;
   }
+  const perDay = el.trendCreditPerDay?.checked || false;
+  const dailyActualData = perDay ? dateLabels.map((date, index) => {
+    if (!daily.has(date)) return null;
+    const total = daily.get(date);
+    const previous = daily.get(dateLabels[index - 1]);
+    return previous === undefined ? (date.endsWith('-01') ? total : null) : (total >= previous ? total - previous : total);
+  }) : actualData;
+  const forecastData = predictedUsageData(dateLabels, actualData, lastActualIndex, daily);
+  const dailyForecastData = perDay ? forecastData.map((total, index) => {
+    if (index === lastActualIndex) return dailyActualData[index];
+    return index > lastActualIndex && total !== null && forecastData[index - 1] !== null
+      ? Math.max(0, total - forecastData[index - 1]) : null;
+  }) : forecastData;
   const forecastEndDate = dateLabels.at(-1);
   return withReportChartSettings({
     id: options.id,
     title: options.title,
-    subtitle: `Rolling total with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`,
+    subtitle: `${perDay ? 'Daily usage' : 'Rolling total'} with weekday-aware forecast to ${formatDateLabel(forecastEndDate)}`,
     type: 'line',
     labels: dateLabels.map(formatDateLabel),
     unit: 'Credits',
@@ -3807,14 +3822,14 @@ function buildAiRollingCreditChart(table, range, options) {
     environments,
     selectedEnvironmentIds,
     datasets: [
-      reportDataset('Actual rolling total', actualData, options.color, {
+      reportDataset(perDay ? 'Actual per day' : 'Actual rolling total', dailyActualData, options.color, {
         tension: 0.25,
-        spanGaps: true,
+        spanGaps: !perDay,
         pointRadius: 4,
         pointHoverRadius: 5,
         borderWidth: 3,
       }),
-      reportDataset('Forecast usage', predictedUsageData(dateLabels, actualData, lastActualIndex, daily), options.color, {
+      reportDataset(perDay ? 'Forecast per day' : 'Forecast usage', dailyForecastData, options.color, {
         borderDash: [6, 5],
         borderWidth: 2,
         pointRadius: 0,

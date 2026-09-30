@@ -234,8 +234,24 @@ footer a:hover {
   align-items: end;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(220px, 1fr) minmax(160px, 0.5fr) minmax(160px, 0.5fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, 0.5fr) minmax(160px, 0.5fr) auto;
   margin-bottom: 12px;
+}
+
+.trend-credit-toggle {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.trend-credit-toggle input {
+  accent-color: var(--primary);
+  min-height: 0;
+  padding: 0;
+  width: 18px;
+  height: 18px;
 }
 
 .report-chart-card {

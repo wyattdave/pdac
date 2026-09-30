@@ -37,6 +37,33 @@ function forecastFor(appPath, labels, observed, today = '2026-09-29T12:00:00') {
   return Array.from(predict(labels, actualData, lastActualIndex, daily));
 }
 
+function creditChartFor(appPath, labels, observed, forecast, perDay) {
+  const script = readFileSync(new URL(appPath, import.meta.url), 'utf8');
+  const chartSource = script.slice(
+    script.indexOf('function buildAiRollingCreditChart('),
+    script.indexOf('function predictedUsageData(', script.indexOf('function buildAiRollingCreditChart(')),
+  );
+  const context = {
+    el: { trendCreditPerDay: { checked: perDay } },
+    chartEnvironmentOptions: () => [],
+    selectedReportChartEnvironmentIds: () => new Set(),
+    filterTrendRowsByEnvironment: (rows) => rows,
+    trendDateLabelsWithMonthForecast: () => labels,
+    trendDateLabelsWithForecast: () => labels,
+    sumRowsByDate: () => new Map(observed),
+    predictedUsageData: () => forecast,
+    monthEndDateKey: () => labels.at(-1),
+    formatDateLabel: (date) => date,
+    reportDataset: (label, data) => ({ label, data }),
+    withReportChartSettings: (chart) => chart,
+    number: Number,
+  };
+  const buildChart = runInNewContext(`${chartSource}\nbuildAiRollingCreditChart`, context);
+  return buildChart({ rows: observed.map(([dateRan]) => ({ dateRan })) }, { range: 'month' }, {
+    id: 'ai-builder-credits-rolling', title: 'AI Builder credits', valueKey: 'credits', color: '#2563eb',
+  });
+}
+
 for (const appPath of ['../chrome-ext/app.js', '../public/app.js']) {
   test(`${appPath}: flat rolling totals do not predict a jump`, () => {
     const labels = [...dateLabels.slice(-7), '2026-09-30'];
@@ -71,5 +98,25 @@ for (const appPath of ['../chrome-ext/app.js', '../public/app.js']) {
     const forecast = forecastFor(appPath, dateLabels, observed, '2026-09-26T12:00:00');
     assert.equal(forecast[11], observed.at(-1)[1] + 2);
     assert.equal(forecast[12], observed.at(-1)[1] + 10);
+  });
+
+  test(`${appPath}: credit view switches actuals and forecast to daily usage`, () => {
+    const labels = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05'];
+    const observed = [[labels[0], 10], [labels[1], 14], [labels[2], 14]];
+    const forecast = [null, null, 14, 19, 22];
+    const rolling = creditChartFor(appPath, labels, observed, forecast, false);
+    const daily = creditChartFor(appPath, labels, observed, forecast, true);
+    assert.deepEqual(Array.from(rolling.datasets[0].data), [10, 14, 14, null, null]);
+    assert.deepEqual(Array.from(rolling.datasets[1].data), forecast);
+    assert.deepEqual(Array.from(daily.datasets[0].data), [10, 4, 0, null, null]);
+    assert.deepEqual(Array.from(daily.datasets[1].data), [null, null, 0, 5, 3]);
+    assert.equal(daily.datasets[1].label, 'Forecast per day');
+  });
+
+  test(`${appPath}: missing snapshots and reset totals do not create negative daily credits`, () => {
+    const labels = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05'];
+    const observed = [[labels[0], 10], [labels[2], 16], [labels[3], 3], [labels[4], 7]];
+    const daily = creditChartFor(appPath, labels, observed, [null, null, null, null, 7], true);
+    assert.deepEqual(Array.from(daily.datasets[0].data), [10, null, null, 3, 4]);
   });
 }
