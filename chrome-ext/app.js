@@ -466,18 +466,14 @@ el.trendDataImportFile?.addEventListener('change', () => {
 el.trendUseRecordDate?.addEventListener('change', async () => {
   const useRecordDate = el.trendUseRecordDate.checked;
   el.trendUseRecordDate.disabled = true;
-  el.trendDateModeStatus.textContent = useRecordDate
-    ? 'Rebuilding recent activity dates from the API and preserving originals. This may take a few minutes...'
-    : 'Restoring original snapshot dates and values...';
+  el.trendDateModeStatus.textContent = 'Filling missing data dates and updating the report date selection...';
   try {
     const result = await api('/api/report-trends/date-mode', {
       method: 'PUT',
       body: { useRecordDate },
     });
-    el.trendDateModeStatus.textContent = useRecordDate
-      ? `Updated ${result.updatedRows.toLocaleString()} rows: ${result.recoveredRows.toLocaleString()} rebuilt, ${result.estimatedRows.toLocaleString()} estimated. API recovery covers up to 90 days; older unavailable data is estimated. Original snapshots are preserved for switching off.`
-      : 'Original snapshots restored. New activity reports use the collection day again.';
-    const refreshes = await Promise.allSettled([loadCachedReportsDashboard(), loadSqlTables()]);
+    el.trendDateModeStatus.textContent = `${useRecordDate ? 'Data date' : 'Run date'} selected. Totals are unchanged; missing data dates use the day before the run date.`;
+    const refreshes = await Promise.allSettled([loadCachedReportDashboards(), loadSqlTables()]);
     if (refreshes.some((refresh) => refresh.status === 'rejected')) {
       el.trendDateModeStatus.textContent = 'Date setting saved. Refresh the trend view to load the updated dates.';
     }
@@ -1038,8 +1034,8 @@ async function loadTrendDateMode() {
     const result = await api('/api/report-trends/date-mode', { quiet: true });
     el.trendUseRecordDate.checked = Boolean(result.useRecordDate);
     el.trendDateModeStatus.textContent = result.useRecordDate
-      ? `Last completed day enabled. ${(result.estimatedRows || 0).toLocaleString()} estimated rows; ${(result.recoveredRows || 0).toLocaleString()} rebuilt rows. Original snapshots are preserved for switching off.`
-      : 'Collection-day snapshots enabled. Existing behavior is unchanged.';
+      ? 'Reports use data dates. Missing data dates use the day before the run date.'
+      : 'Reports use run dates. Stored data dates and totals are unchanged.';
   } catch (error) {
     el.trendDateModeStatus.textContent = `Unable to load trend date setting: ${error.message}`;
   }
@@ -3118,6 +3114,8 @@ function automatedReportAutoDownloadDateKey(groupKey) {
 async function loadCachedReportsDashboard() {
   const accountHomeId = resolveRequestAccountId();
   if (!accountHomeId) return;
+  const requestVersion = (state.automatedReports.trendLoadVersion || 0) + 1;
+  state.automatedReports.trendLoadVersion = requestVersion;
   try {
     el.reportsStatus.textContent = 'Loading stored trends...';
     const params = new URLSearchParams({
@@ -3129,7 +3127,7 @@ async function loadCachedReportsDashboard() {
       params.set('end', el.trendEnd?.value || '');
     }
     const data = await api(`/api/report-trends?${params.toString()}`, { quiet: true });
-    if (resolveRequestAccountId() !== accountHomeId) return;
+    if (resolveRequestAccountId() !== accountHomeId || state.automatedReports.trendLoadVersion !== requestVersion) return;
     if (!Array.isArray(data.rows) || !data.rows.length) {
       state.automatedReports.dashboardData = data;
       updateReportsTabAvailability();
@@ -3142,6 +3140,7 @@ async function loadCachedReportsDashboard() {
     const range = data.range?.startDate && data.range?.endDate ? `${data.range.startDate} to ${data.range.endDate}` : 'selected range';
     el.reportsStatus.textContent = `Loaded stored trends for ${range}.`;
   } catch (error) {
+    if (state.automatedReports.trendLoadVersion !== requestVersion) return;
     console.warn('Unable to load stored trends.', error);
     updateReportsTabAvailability();
   }
@@ -3150,6 +3149,8 @@ async function loadCachedReportsDashboard() {
 async function loadCachedChartsDashboard() {
   const accountHomeId = resolveRequestAccountId();
   if (!accountHomeId) return;
+  const requestVersion = (state.automatedReports.chartLoadVersion || 0) + 1;
+  state.automatedReports.chartLoadVersion = requestVersion;
   try {
     el.chartsStatus.textContent = 'Preparing charts from local trend data...';
     const params = new URLSearchParams({ accountHomeId, range: '730d', latestOnly: 'true' });
@@ -3157,7 +3158,7 @@ async function loadCachedChartsDashboard() {
       await api(`/api/report-trends?${params.toString()}`, { quiet: true }),
       accountHomeId,
     );
-    if (resolveRequestAccountId() !== accountHomeId) return;
+    if (resolveRequestAccountId() !== accountHomeId || state.automatedReports.chartLoadVersion !== requestVersion) return;
     const data = buildLatestSqlChartsDashboard(stored);
     if (!Array.isArray(data.rows) || !data.rows.length) {
       updateChartsTabAvailability();
@@ -3169,6 +3170,7 @@ async function loadCachedChartsDashboard() {
     const generated = data.generatedAt ? new Date(data.generatedAt).toLocaleString() : 'the latest snapshot';
     el.chartsStatus.textContent = `Loaded the latest stored trend snapshot (${generated}).`;
   } catch (error) {
+    if (state.automatedReports.chartLoadVersion !== requestVersion) return;
     console.warn('Unable to load the local trend chart dashboard.', error);
     updateChartsTabAvailability();
   }
@@ -3783,31 +3785,35 @@ function buildAiRollingCreditChart(table, range, options) {
     return null;
   }
   const daily = sumRowsByDate(filteredRows, options.valueKey);
+  const usage = buildTrendUsage(
+    filteredRows,
+    filterTrendRowsByEnvironment(table?.baselineRows || [], selectedEnvironmentIds),
+    options.valueKey,
+  );
   const actualIndexes = dateLabels
-    .map((date, index) => daily.has(date) ? index : -1)
+    .map((date, index) => daily.has(date) && usage.rolling.get(date) !== null ? index : -1)
     .filter((index) => index >= 0);
   const firstActualIndex = actualIndexes[0] ?? -1;
   const lastActualIndex = actualIndexes.at(-1) ?? -1;
   const actualData = dateLabels.map(() => null);
   let latestTotal = null;
   for (let index = firstActualIndex; index >= 0 && index <= lastActualIndex; index += 1) {
+    if (dateLabels[index].endsWith('-01')) latestTotal = null;
     if (daily.has(dateLabels[index])) {
-      latestTotal = daily.get(dateLabels[index]);
+      latestTotal = usage.rolling.get(dateLabels[index]) ?? null;
     }
     actualData[index] = latestTotal;
   }
   const perDay = el.trendCreditPerDay?.checked || false;
-  const dailyActualData = perDay ? dateLabels.map((date, index) => {
-    if (!daily.has(date)) return null;
-    const total = daily.get(date);
-    const previous = daily.get(dateLabels[index - 1]);
-    return previous === undefined ? (date.endsWith('-01') ? total : null) : (total >= previous ? total - previous : total);
+  const dailyActualData = perDay ? dateLabels.map((date) => {
+    const total = usage.daily.get(date);
+    return total > 0 ? total : null;
   }) : actualData;
-  const forecastData = predictedUsageData(dateLabels, actualData, lastActualIndex, daily);
+  const forecastData = predictedUsageData(dateLabels, actualData, lastActualIndex, usage.daily);
   const dailyForecastData = perDay ? forecastData.map((total, index) => {
     if (index === lastActualIndex) return dailyActualData[index];
     return index > lastActualIndex && total !== null && forecastData[index - 1] !== null
-      ? Math.max(0, total - forecastData[index - 1]) : null;
+      ? Math.max(0, dateLabels[index].endsWith('-01') ? total : total - forecastData[index - 1]) : null;
   }) : forecastData;
   const forecastEndDate = dateLabels.at(-1);
   return withReportChartSettings({
@@ -3840,6 +3846,60 @@ function buildAiRollingCreditChart(table, range, options) {
   });
 }
 
+function buildTrendUsage(rows, baselineRows, valueKey) {
+  const daily = new Map();
+  const perEnvironment = new Map();
+  const rolling = new Map();
+  const incompleteDates = new Set();
+  const previousRows = new Map();
+  const rollingTotals = new Map();
+  const snapshots = [...baselineRows, ...rows].sort((left, right) => trendRowDate(left).localeCompare(trendRowDate(right)));
+  for (const row of snapshots) {
+    const date = trendRowDate(row);
+    const sourceDate = String(row.dataDate || row.dateRan || date).slice(0, 10);
+    const environmentId = String(row.values?.environment_id || row.values?.environment_display_name || 'unknown');
+    const periodStart = String(row.rangeKey || '').split(':')[1] || '';
+    const period = row.rangeKey ? row.rangeKey.split(':').slice(0, 2).join(':') : sourceDate.slice(0, 7);
+    const total = number(row.values?.[valueKey]);
+    const previous = previousRows.get(environmentId);
+    const previousDate = parseDateOnlyValue(previous?.date);
+    const consecutive = previousDate && formatDateInputValue(addTrendDays(previousDate, 1)) === date;
+    let usage = null;
+    if (consecutive && period === previous.period && total >= previous.total) {
+      usage = total - previous.total;
+    } else if (sourceDate === periodStart || (!periodStart && sourceDate.endsWith('-01'))) {
+      usage = total;
+    }
+    if (usage === null) incompleteDates.add(date);
+    else {
+      daily.set(date, (daily.get(date) || 0) + usage);
+      perEnvironment.set(`${environmentId}:${date}`, usage);
+    }
+
+    const month = date.slice(0, 7);
+    const previousRolling = rollingTotals.get(environmentId);
+    let rollingTotal = null;
+    if (previousRolling?.month === month && previousRolling.total !== null) {
+      if (period === previous?.period && total >= previous.total) {
+        rollingTotal = previousRolling.total + total - previous.total;
+      } else if (usage !== null) {
+        rollingTotal = previousRolling.total + usage;
+      }
+    } else if (usage !== null && (date.endsWith('-01') || previousRolling?.month === month)) {
+      rollingTotal = usage;
+    } else if (sourceDate.slice(0, 7) === month) {
+      rollingTotal = total;
+    } else {
+      rollingTotal = usage;
+    }
+    rollingTotals.set(environmentId, { month, total: rollingTotal });
+    previousRows.set(environmentId, { date, period, total });
+    rolling.set(date, rollingTotal === null || rolling.get(date) === null ? null : (rolling.get(date) || 0) + rollingTotal);
+  }
+  for (const date of incompleteDates) daily.delete(date);
+  return { daily, rolling, perEnvironment };
+}
+
 function predictedUsageData(dateLabels, actualData, lastActualIndex, daily) {
   const prediction = dateLabels.map(() => null);
   if (lastActualIndex < 0) {
@@ -3860,8 +3920,6 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex, daily) {
   const historyEndIndex = dateLabels[lastActualIndex] === today ? lastActualIndex - 1 : lastActualIndex;
   const weekdaySamples = Array.from({ length: 7 }, () => []);
   const allSamples = [];
-  let previousTotal = null;
-  let previousIndex = -1;
 
   for (let index = 0; index <= historyEndIndex; index += 1) {
     if (!daily.has(dateLabels[index])) {
@@ -3871,22 +3929,9 @@ function predictedUsageData(dateLabels, actualData, lastActualIndex, daily) {
     if (!date) {
       continue;
     }
-    const total = number(actualData[index]);
-    let usage = null;
-    if (previousTotal === null) {
-      if (total === 0) continue;
-      if (index > 0 || date.getDate() === 1) usage = total;
-    } else if (index === previousIndex + 1 && total >= previousTotal) {
-      usage = total - previousTotal;
-    } else if (date.getDate() === 1) {
-      usage = total;
-    }
-    if (usage !== null) {
-      weekdaySamples[date.getDay()].push(usage);
-      allSamples.push(usage);
-    }
-    previousTotal = total;
-    previousIndex = index;
+    const usage = daily.get(dateLabels[index]);
+    weekdaySamples[date.getDay()].push(usage);
+    allSamples.push(usage);
   }
 
   const fallbackRate = allSamples.length ? average(allSamples) : 0;
@@ -3922,7 +3967,11 @@ function buildStackedEnvironmentBarChart(table, range, options) {
     return null;
   }
   const totals = sumRowsByDateAndEnvironment(filteredRows, options.valueKey);
-  const values = options.perDay ? perDayEnvironmentValues(totals, dateLabels, selectedEnvironments) : totals;
+  const values = options.perDay ? buildTrendUsage(
+    filteredRows,
+    filterTrendRowsByEnvironment(table?.baselineRows || [], selectedEnvironmentIds),
+    options.valueKey,
+  ).perEnvironment : totals;
   const palette = reportPalette(Math.max(selectedEnvironments.length, 1));
   return withReportChartSettings({
     id: options.id,
@@ -3946,23 +3995,6 @@ function buildStackedEnvironmentBarChart(table, range, options) {
       { stack: 'environment' },
     )),
   });
-}
-
-function perDayEnvironmentValues(totals, dateLabels, environments) {
-  const daily = new Map();
-  for (const environment of environments) {
-    let previous = null;
-    for (const date of dateLabels) {
-      const key = `${environment.id}:${date}`;
-      if (!totals.has(key)) {
-        continue;
-      }
-      const total = number(totals.get(key));
-      daily.set(key, previous === null || total < previous ? total : total - previous);
-      previous = total;
-    }
-  }
-  return daily;
 }
 
 function buildFlowRunStatusChart(table, range) {
@@ -4216,7 +4248,7 @@ function sumRowsByDateAndEnvironment(rows, valueKey) {
 }
 
 function trendRowDate(row) {
-  return String(row.dateRan || row.collectedAt || '').slice(0, 10);
+  return String(row.reportDate || row.dateRan || row.collectedAt || '').slice(0, 10);
 }
 
 function trendDateLabels(range, rows) {

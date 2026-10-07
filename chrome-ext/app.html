@@ -494,9 +494,9 @@
             </div>
             <label class="checkbox-label">
               <input id="trendUseRecordDate" type="checkbox" />
-              Use the last completed day for activity trends
+              Use data date instead of run date
             </label>
-            <p class="muted"><strong>Import warning:</strong> Turn this off before importing trend data, import, then turn it on to correct the dates. Unrecoverable activity snapshots use a labeled one-day estimate; solution inventory keeps its snapshot date.</p>
+            <p class="muted"><strong>Import warning:</strong> The trend data now uses the data date. All future runs will use the created date, previous/blank data dates use the day before date_ran. Switching dates does not change totals.</p>
             <p id="trendDateModeStatus" class="muted" aria-live="polite"></p>
             <div id="sqlTablesList" class="sql-table-list"></div>
           </section>
