@@ -145,9 +145,31 @@ The Settings tab can export, clear, and import local trend data. The combined ex
 6. Select a team, then add loaded enabled users as members.
 7. Select **Assign role** from a loaded user or team row, then search for and choose the security role in the popup.
 
+In the Chrome extension, **Current roles** opens a read-only list of directly assigned roles and their business units, including for disabled users. The assignment popup groups current roles above available roles. These lists do not include user roles inherited through team membership.
+
 Adding a user uses the supported Power Platform admin force-sync pattern. The user must already exist in Microsoft Entra ID and must meet the environment requirements such as license, sign-in status, and environment security group membership.
 
 Role assignment uses the Dataverse user-role and team-role associations. When you choose a root role, PDAC assigns the matching inherited role copy for the selected user's or team's business unit.
+
+### Chrome extension chart records
+
+Double-click a bar in **Charts** or **Trends** to open a searchable, paginated record list for solutions, solution components, or agent sessions. Flow-run and AI-event charts are excluded. Solution records include version, publisher, management type, and IDs; component records include names, types, containing solutions, and IDs. Sessions show the agent, start time, and conversation ID without loading transcripts.
+
+Chart tooltips show the section/environment name, not record lists. Charts with record drilldown also show **Double-click to see records**.
+
+New Solutions reports retain daily record inventories alongside the existing totals. Older trends may only have names or totals; the popup explicitly labels any fallback to the latest inventory. Session lists are retrieved from Dataverse for the selected period, so deleted or expired sessions may no longer be available.
+
+### Chrome extension solution access
+
+Select a solution in **Solutions**, then choose **Share components** or **Change component owner**. Enter a user's email or an exact team name. Sharing defaults to `ReadAccess,WriteAccess,AppendAccess,AppendToAccess,ShareAccess`; ownership changes require an enabled user or an owner-capable team. These actions apply to the whole solution's compatible components, not to individually selected components or the solution record itself.
+
+The implementation follows Power-DevBox-Share: environment-variable definitions, connection references, custom connectors, workflows, prompts/AI models and Copilot Studio agents are supported. Agent discovery includes topics, collections and linked authoring dependencies (potentially outside the solution), deduplicates records and excludes transcripts/runtime data. Environment-variable values inherit definition permissions. Organization-owned records cannot be individually shared or reassigned; sharing checks the recipient's table Read privileges instead. Other component types are reported as unsupported.
+
+All discovery finishes before changes start. The result reports successful updates, failures, unsupported entries, inherited/role-controlled records and any unprocessed records. Sharing verifies effective Dataverse permissions. Operations are not atomic and do not roll back earlier changes. Recipients still need environment membership, security roles and licensing; Power Automate co-owner/run access, connections, credentials, channels and external-source permissions remain separate. Validate with disposable components before using in production.
+
+On **Imports**, the target environment is a searchable combobox: filter by name, ID or URL, then click a match or use the arrow keys and Enter. Escape dismisses the list. Changing the selected target invalidates prepared mappings.
+
+Run extension regressions with `node --test chrome-ext/testing/*.test.mjs`.
 
 ## Connections
 

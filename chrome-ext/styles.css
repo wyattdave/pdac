@@ -639,6 +639,33 @@ select {
   border-color: var(--soft-line);
 }
 
+.import-environment-combo .combo-panel {
+  width: 100%;
+}
+
+.import-environment-combo [role="option"] {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.import-environment-combo [role="option"].active,
+.import-environment-combo [aria-selected="true"] {
+  background: var(--soft);
+  border-color: var(--soft-line);
+}
+
+.solution-access-modal {
+  max-width: 820px;
+}
+
+.solution-access-results {
+  max-height: 280px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+
 .combo-panel .checkbox-list {
   border: 0;
   max-height: 260px;
@@ -1733,6 +1760,40 @@ select:disabled {
 .role-assignment-list {
   max-height: min(520px, calc(100vh - 230px));
   overflow: auto;
+}
+
+.principal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.role-group-heading {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 12px 0 4px;
+}
+
+.modal.chart-records-modal {
+  max-width: 1200px;
+  width: min(1200px, 94vw);
+}
+
+.chart-records-body {
+  max-height: 65vh;
+  overflow: auto;
+}
+
+.chart-records-body th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+.chart-records-body td {
+  overflow-wrap: anywhere;
+  white-space: normal;
+  max-width: 360px;
 }
 
 .role-assignment-row {

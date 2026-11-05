@@ -8,6 +8,16 @@ const dateLabels = Array.from({ length: 15 }, (_, index) => {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 });
 
+function extensionDateHelpers(script) {
+  return [
+    script.slice(script.indexOf('function trendRowDate('), script.indexOf('function trendDateLabels(')),
+    script.slice(script.indexOf('function parseDateOnlyValue('), script.indexOf('function formatDateLabel(')),
+    script.slice(script.indexOf('function formatDateInputValue('), script.indexOf('function toggleCreateRoleForm(')),
+  ].join('\n');
+}
+
+const trendRows = (observed) => observed.map(([dateRan, credits]) => ({ dateRan, values: { credits } }));
+
 function forecastFor(appPath, labels, observed, today = '2026-09-29T12:00:00') {
   const script = readFileSync(new URL(appPath, import.meta.url), 'utf8');
   const forecastSource = script.slice(
@@ -33,6 +43,15 @@ function forecastFor(appPath, labels, observed, today = '2026-09-29T12:00:00') {
     parseDateOnlyValue: (value) => new FixedDate(...value.split('-').map((part, index) => Number(part) - (index === 1 ? 1 : 0))),
     formatDateInputValue: (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`,
   };
+  // The extension now derives daily usage before forecasting; the Node UI
+  // still accepts cumulative snapshots. Exercise each actual input contract.
+  if (appPath.includes('chrome-ext')) {
+    const usageSource = script.slice(script.indexOf('function buildTrendUsage('), script.indexOf('function predictedUsageData('));
+    const usage = runInNewContext(`${extensionDateHelpers(script)}\n${usageSource}\nbuildTrendUsage`, context);
+    const dailyUsage = usage(trendRows(observed), [], 'credits').daily;
+    const predict = runInNewContext(`${forecastSource}\npredictedUsageData`, context);
+    return Array.from(predict(labels, actualData, lastActualIndex, dailyUsage));
+  }
   const predict = runInNewContext(`${forecastSource}\npredictedUsageData`, context);
   return Array.from(predict(labels, actualData, lastActualIndex, daily));
 }
@@ -58,8 +77,9 @@ function creditChartFor(appPath, labels, observed, forecast, perDay) {
     withReportChartSettings: (chart) => chart,
     number: Number,
   };
-  const buildChart = runInNewContext(`${chartSource}\nbuildAiRollingCreditChart`, context);
-  return buildChart({ rows: observed.map(([dateRan]) => ({ dateRan })) }, { range: 'month' }, {
+  const helpers = appPath.includes('chrome-ext') ? extensionDateHelpers(script) : '';
+  const buildChart = runInNewContext(`${helpers}\n${chartSource}\nbuildAiRollingCreditChart`, context);
+  return buildChart({ rows: trendRows(observed) }, { range: 'month' }, {
     id: 'ai-builder-credits-rolling', title: 'AI Builder credits', valueKey: 'credits', color: '#2563eb',
   });
 }
@@ -77,7 +97,9 @@ for (const appPath of ['../chrome-ext/app.js', '../public/app.js']) {
     const forecast = forecastFor(appPath, labels, [
       [labels[1], 0], [labels[3], 15], [labels[4], 20],
     ]);
-    assert.deepEqual(forecast.slice(-3), [20, 30, 40]);
+    // Without a consecutive baseline, the extension does not treat the
+    // first mid-month total as daily usage. Only the observed delta is known.
+    assert.deepEqual(forecast.slice(-3), appPath.includes('chrome-ext') ? [20, 25, 30] : [20, 30, 40]);
   });
 
   test(`${appPath}: observed weekday usage overrides the overall daily rate`, () => {
@@ -108,8 +130,9 @@ for (const appPath of ['../chrome-ext/app.js', '../public/app.js']) {
     const daily = creditChartFor(appPath, labels, observed, forecast, true);
     assert.deepEqual(Array.from(rolling.datasets[0].data), [10, 14, 14, null, null]);
     assert.deepEqual(Array.from(rolling.datasets[1].data), forecast);
-    assert.deepEqual(Array.from(daily.datasets[0].data), [10, 4, 0, null, null]);
-    assert.deepEqual(Array.from(daily.datasets[1].data), [null, null, 0, 5, 3]);
+    const zeroUsage = appPath.includes('chrome-ext') ? null : 0;
+    assert.deepEqual(Array.from(daily.datasets[0].data), [10, 4, zeroUsage, null, null]);
+    assert.deepEqual(Array.from(daily.datasets[1].data), [null, null, zeroUsage, 5, 3]);
     assert.equal(daily.datasets[1].label, 'Forecast per day');
   });
 
@@ -117,6 +140,8 @@ for (const appPath of ['../chrome-ext/app.js', '../public/app.js']) {
     const labels = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05'];
     const observed = [[labels[0], 10], [labels[2], 16], [labels[3], 3], [labels[4], 7]];
     const daily = creditChartFor(appPath, labels, observed, [null, null, null, null, 7], true);
-    assert.deepEqual(Array.from(daily.datasets[0].data), [10, null, null, 3, 4]);
+    // An unexplained same-period decrease is unknown, not a proven reset.
+    const resetUsage = appPath.includes('chrome-ext') ? null : 3;
+    assert.deepEqual(Array.from(daily.datasets[0].data), [10, null, null, resetUsage, 4]);
   });
 }

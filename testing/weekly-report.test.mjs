@@ -23,7 +23,7 @@ const nodeAppScript = readFileSync(new URL('../public/app.js', import.meta.url),
 const nodeStyles = readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
 const nodeServer = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
-test('solution report charts show stored component names in latest and historical tooltips', () => {
+test('solution reports retain component inventories; extension tooltips use record drilldown guidance', () => {
   for (const script of [appScript, nodeAppScript]) {
     assert.match(script, /await hydrateReportComponentNames\(/);
     assert.match(script, /api\('\/api\/report-component-names'/);
@@ -31,9 +31,14 @@ test('solution report charts show stored component names in latest and historica
     assert.match(script, /componentNameGroupForEnvironment\(refreshed\.componentTotals/);
     assert.match(script, /tooltipNamesByDataset: options\.namesKind/);
     assert.match(script, /componentNamesForEnvironment\(options\.componentNames, environment, options\.namesKind\)/);
-    assert.match(script, /chart\.tooltipNames \|\| chart\.tooltipNamesByDataset/);
     assert.match(script, /'aiModelCount', '#4f46e5', 'aiModels'/);
   }
+  assert.match(nodeAppScript, /chart\.tooltipNames \|\| chart\.tooltipNamesByDataset/);
+  const extensionTooltip = appScript.slice(appScript.indexOf('function reportChartConfig('), appScript.indexOf('function number('));
+  assert.match(extensionTooltip, /recordTargets\?\.\[item\.dataIndex\]\?\.environment\?\.displayName/);
+  assert.match(extensionTooltip, /recordEnvironments\?\.\[item\.datasetIndex\]\?\.label/);
+  assert.match(extensionTooltip, /afterBody: \(\) => chart\.recordKind \? 'Double-click to see records' : ''/);
+  assert.doesNotMatch(extensionTooltip, /tooltipNames|names\.slice/);
   assert.match(serverCore, /saveSolutionComponentNameSnapshots\(accountHomeId, rowsByEnvironment, new Date\(\)\.toISOString\(\)\)/);
   assert.match(nodeServer, /saveSolutionComponentNameSnapshots\(db, accountHomeId, rowsByEnvironment, new Date\(\)\.toISOString\(\)\)/);
   for (const backend of [serverCore, nodeServer]) {

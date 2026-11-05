@@ -12,6 +12,7 @@
 
 import { Buffer, createHash, randomUUID } from './node-shims.js';
 import { AuthRequiredError, signInInteractive } from './auth.js';
+import { SolutionAccess } from './solution-access.js';
 import { clearTokenCache, getAccessTokenForAccountId } from './tokens.js';
 import {
   getAccounts as storeGetAccounts,
@@ -854,6 +855,13 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'POST /api/report-chart-records') {
+    const body = await readJson(req);
+    await applyAccountHomeId(body.accountHomeId || '');
+    sendJson(res, 200, await listReportChartRecords(body));
+    return;
+  }
+
   if (route === 'GET /api/sql-tables') {
     sendJson(res, 200, await listSqlTables());
     return;
@@ -958,6 +966,23 @@ async function handleApi(req, res) {
   if (req.method === 'GET' && componentsMatch) {
     requireOrgUrl();
     sendJson(res, 200, await listSolutionComponents(componentsMatch[1]));
+    return;
+  }
+
+  const solutionAccessMatch = url.pathname.match(/^\/api\/solutions\/([0-9a-fA-F-]+)\/access$/);
+  if (req.method === 'POST' && solutionAccessMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    const orgUrl = selected.orgUrl;
+    const accountHomeId = selected.accountHomeId;
+    if (normalizeOrgUrl(body.orgUrl) !== normalizeOrgUrl(orgUrl) || body.accountHomeId !== accountHomeId) {
+      throw new HttpError(409, 'The account or environment changed. Reopen the solution access dialog.');
+    }
+    const access = new SolutionAccess(orgUrl, async (target, method, payload) => {
+      const response = await dvRequestUrl(method, target, payload, {}, orgUrl, accountHomeId);
+      return response.data;
+    });
+    sendJson(res, 200, await access.run({ ...body, solutionId: solutionAccessMatch[1] }));
     return;
   }
 
@@ -3446,12 +3471,13 @@ async function listAssignedSecurityRoles(body) {
   }
   const collection = principalType === 'systemuser' ? 'systemusers' : 'teams';
   const association = principalType === 'systemuser' ? 'systemuserroles_association' : 'teamroles_association';
-  const data = await dvGet(`${collection}(${principalId})/${association}?$select=roleid,name,_businessunitid_value,_parentrootroleid_value`);
-  return (data.value || []).map((role) => ({
+  const data = await dvGetAll(`${collection}(${principalId})/${association}?$select=roleid,name,_businessunitid_value,_parentrootroleid_value&$expand=businessunitid($select=name)`);
+  return data.map((role) => ({
     roleid: normalizeGuid(role.roleid),
     rootRoleId: normalizeGuid(role._parentrootroleid_value) || normalizeGuid(role.roleid),
     name: role.name || '',
     businessUnitId: normalizeGuid(role._businessunitid_value),
+    businessUnitName: role.businessunitid?.name || '',
   }));
 }
 
@@ -5978,18 +6004,57 @@ async function saveSolutionComponentNameSnapshots(accountHomeId, sourceGroups, c
     return;
   }
   const environmentIds = new Set(groups.map((group) => String(group.environment.environmentId || '')));
+  const dateRan = reportCacheDateKey(new Date(collectedAt));
   await trendReplaceRows(
     SOLUTION_COMPONENT_NAMES_TABLE,
-    (row) => row.account_home_id === accountHomeId && environmentIds.has(String(row.environment_id || '')),
-    groups.map(({ environment, componentNames }) => ({
+    (row) => row.account_home_id === accountHomeId && environmentIds.has(String(row.environment_id || ''))
+      && (row.date_ran || String(row.collected_at || '').slice(0, 10)) === dateRan,
+    groups.map(({ environment, componentNames, componentRecords }) => ({
       account_home_id: accountHomeId,
       environment_id: String(environment.environmentId || ''),
       environment_display_name: String(environment.displayName || ''),
       environment_url: String(environment.orgUrl || ''),
       collected_at: collectedAt,
+      date_ran: dateRan,
       component_names: JSON.stringify(componentNames),
+      component_records: JSON.stringify(componentRecords || null),
     })),
   );
+  await trendDeleteRows(SOLUTION_COMPONENT_NAMES_TABLE, (row) => String(row.date_ran || row.collected_at || '').slice(0, 10) < reportTrendRetentionCutoffDate());
+}
+
+async function listReportChartRecords(body = {}) {
+  const kinds = ['solutions', 'flows', 'canvasApps', 'codeApps', 'modelDrivenApps', 'agents', 'tables', 'aiModels', 'dataflows', 'sessions'];
+  if (!kinds.includes(body.kind)) throw new HttpError(400, 'This chart does not support record drilldown.');
+  const accountHomeId = String(body.accountHomeId || selected.accountHomeId || '').trim();
+  const environment = normalizeAutomatedReportEnvironments([body.environment || {}])[0];
+  if (!environment) throw new HttpError(400, 'The chart environment is missing.');
+  if (body.kind === 'sessions') {
+    const dateRange = getAgentSessionDateRange({ range: 'custom', start: body.start, end: body.end });
+    const groups = await collectAutomatedAgentSessionRows([environment], dateRange, accountHomeId);
+    return {
+      rows: groups[0]?.rows || [],
+      note: `Sessions from ${dateRange.startDate} to ${dateRange.endDate}. Retrieved from Dataverse now; deleted or expired sessions may no longer be available. Transcripts are not loaded.`,
+    };
+  }
+  const snapshots = (await trendSelectRows(SOLUTION_COMPONENT_NAMES_TABLE))
+    .filter((row) => row.account_home_id === accountHomeId && (
+      String(row.environment_id || '').toLowerCase() === String(environment.environmentId || '').toLowerCase()
+      || String(row.environment_url || '').toLowerCase() === String(environment.orgUrl || '').toLowerCase()))
+    .sort((a, b) => String(b.collected_at || '').localeCompare(String(a.collected_at || '')));
+  const snapshot = snapshots.find((row) => row.collected_at === body.collectedAt)
+    || snapshots.find((row) => (row.date_ran || String(row.collected_at || '').slice(0, 10)) === body.dateRan)
+    || snapshots[0];
+  if (!snapshot) return { rows: [], note: 'No saved record inventory is available. Run a Solutions report with trend saving enabled to collect it.' };
+  const records = JSON.parse(snapshot.component_records || 'null');
+  const names = JSON.parse(snapshot.component_names || '{}');
+  const rows = records?.[body.kind] || (names[body.kind] || []).map((name) => ({ name }));
+  const snapshotDate = snapshot.date_ran || String(snapshot.collected_at || '').slice(0, 10);
+  const exact = snapshot.collected_at === body.collectedAt || snapshotDate === body.dateRan;
+  return {
+    rows,
+    note: `${exact ? 'Saved inventory' : 'Historical record details are unavailable; showing the latest saved inventory'} (${snapshot.collected_at}).${records ? '' : ' This older inventory contains names only. Run a new Solutions report to collect record details.'}`,
+  };
 }
 
 async function readSolutionComponentNames(accountHomeId) {
@@ -7161,6 +7226,36 @@ function buildSolutionComponentNameLists(solutions = [], namedComponents = []) {
   return lists;
 }
 
+function buildSolutionComponentRecordLists(solutions = [], namedComponents = []) {
+  const solutionNames = new Map(solutions.map((row) => [normalizeGuid(row.solutionid), row.friendlyname || row.uniquename || row.solutionid]));
+  const records = {
+    solutions: solutions.map((row) => ({
+      name: row.friendlyname || row.uniquename || row.solutionid,
+      uniqueName: row.uniquename || '',
+      id: row.solutionid,
+      version: row.version || '',
+      publisher: row.publisher?.friendlyname || row.publisher?.uniquename || '',
+      managed: row.ismanaged ? 'Managed' : 'Unmanaged',
+      modifiedOn: row.modifiedon || '',
+    })),
+  };
+  const seen = new Map();
+  for (const component of namedComponents) {
+    const key = `${component.kind}:${component.objectId}`;
+    if (!component.kind) continue;
+    if (!seen.has(key)) {
+      const record = { name: component.name || component.objectId, id: component.objectId, type: component.typeLabel || component.label || '', solutions: [] };
+      seen.set(key, record);
+      (records[component.kind] ||= []).push(record);
+    }
+    const record = seen.get(key);
+    const solution = solutionNames.get(normalizeGuid(component.solutionid));
+    if (solution && !record.solutions.includes(solution)) record.solutions.push(solution);
+  }
+  for (const rows of Object.values(records)) rows.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return records;
+}
+
 async function loadWeeklyComponentNames(orgUrl, components, accountHomeId) {
   const groups = {
     agents: { collection: 'bots', idField: 'botid', select: 'botid,name,schemaname' },
@@ -7316,6 +7411,7 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
       dataverseTableCount: componentTotals['# of Dataverse tables'],
       componentTotals,
       componentNames: buildSolutionComponentNameLists(filteredSolutions, namedComponents),
+      componentRecords: buildSolutionComponentRecordLists(filteredSolutions, namedComponents),
     };
     onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);

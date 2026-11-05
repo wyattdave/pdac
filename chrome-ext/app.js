@@ -8,6 +8,10 @@ import {
   startOfCalendarWeek,
 } from './src/weekly-report.js';
 
+let chartRecordView = { version: 0, rows: [], kind: '', page: 0, returnFocus: null };
+let solutionAccessView = null;
+let importEnvironmentActiveIndex = -1;
+
 const el = {
   themeButton: document.querySelector('#themeButton'),
   accountSelect: document.querySelector('#accountSelect'),
@@ -164,6 +168,9 @@ const el = {
   loadComponentsButton: document.querySelector('#loadComponentsButton'),
   exportSolutionButton: document.querySelector('#exportSolutionButton'),
   deploySolutionButton: document.querySelector('#deploySolutionButton'),
+  shareSolutionButton: document.querySelector('#shareSolutionButton'),
+  changeSolutionOwnerButton: document.querySelector('#changeSolutionOwnerButton'),
+  solutionAccessModal: document.querySelector('#solutionAccessModal'),
   solutionTableActions: document.querySelector('#solutionTableActions'),
   createSolutionDiagramButton: document.querySelector('#createSolutionDiagramButton'),
   createSolutionTableButton: document.querySelector('#createSolutionTableButton'),
@@ -265,6 +272,9 @@ const el = {
   solutionZipText: document.querySelector('#solutionZipText'),
   importPackageSummary: document.querySelector('#importPackageSummary'),
   importEnvironmentSelect: document.querySelector('#importEnvironmentSelect'),
+  importEnvironmentSearch: document.querySelector('#importEnvironmentSearch'),
+  importEnvironmentDropdown: document.querySelector('#importEnvironmentDropdown'),
+  importEnvironmentOptions: document.querySelector('#importEnvironmentOptions'),
   prepareImportButton: document.querySelector('#prepareImportButton'),
   refreshImportTargetButton: document.querySelector('#refreshImportTargetButton'),
   importStatus: document.querySelector('#importStatus'),
@@ -573,9 +583,9 @@ el.usersList.addEventListener('click', (event) => {
     });
     return;
   }
-  const button = event.target.closest('[data-principal-action="assign-role"]');
+  const button = event.target.closest('[data-principal-action]');
   if (button) {
-    openRoleAssignmentModal(button.dataset.principalType || '', button.dataset.principalId || '').catch((error) => {
+    openRoleAssignmentModal(button.dataset.principalType || '', button.dataset.principalId || '', button.dataset.principalAction === 'current-roles').catch((error) => {
       toast(error.message, 'error');
       console.error(error);
     });
@@ -590,9 +600,9 @@ el.teamsList.addEventListener('click', (event) => {
     });
     return;
   }
-  const assignButton = event.target.closest('[data-principal-action="assign-role"]');
+  const assignButton = event.target.closest('[data-principal-action]');
   if (assignButton) {
-    openRoleAssignmentModal(assignButton.dataset.principalType || '', assignButton.dataset.principalId || '').catch((error) => {
+    openRoleAssignmentModal(assignButton.dataset.principalType || '', assignButton.dataset.principalId || '', assignButton.dataset.principalAction === 'current-roles').catch((error) => {
       toast(error.message, 'error');
       console.error(error);
     });
@@ -698,6 +708,25 @@ el.trendCreditPerDay?.addEventListener('change', rerenderReportsDashboard);
 el.reportsCharts?.addEventListener('click', handleReportChartClick);
 el.reportsCharts?.addEventListener('change', handleReportChartChange);
 el.chartsGrid?.addEventListener('click', handleReportChartClick);
+el.chartsGrid?.addEventListener('dblclick', handleChartRecordsDoubleClick);
+el.reportsCharts?.addEventListener('dblclick', handleChartRecordsDoubleClick);
+document.querySelector('#chartRecordsClose').addEventListener('click', closeChartRecordsModal);
+document.querySelector('#chartRecordsSearch').addEventListener('input', () => {
+  chartRecordView.page = 0;
+  renderChartRecords();
+});
+document.querySelector('#chartRecordsBody').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-chart-record-page]');
+  if (!button) return;
+  chartRecordView.page += Number(button.dataset.chartRecordPage);
+  renderChartRecords();
+});
+document.querySelector('#chartRecordsModal').addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) closeChartRecordsModal();
+});
+el.roleAssignmentModal.addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) closeRoleAssignmentModal();
+});
 document.addEventListener('input', (event) => {
   const search = event.target.closest('[data-automated-environment-search]');
   if (search) {
@@ -905,16 +934,35 @@ el.publisherDropdownButton.addEventListener('click', () => {
   el.publisherDropdown.hidden = !el.publisherDropdown.hidden;
 });
 document.addEventListener('click', (event) => {
+  if (!event.target.closest('.import-environment-combo')) closeImportEnvironmentPicker();
   if (!event.target.closest('.combo')) {
     el.environmentDropdown.hidden = true;
     el.publisherDropdown.hidden = true;
   }
 });
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Tab') {
+    const modal = !document.querySelector('#chartRecordsModal').hidden ? document.querySelector('#chartRecordsModal')
+      : !el.solutionAccessModal.hidden ? el.solutionAccessModal
+      : !el.roleAssignmentModal.hidden ? el.roleAssignmentModal : null;
+    if (modal) {
+      const controls = [...modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')].filter((control) => control.getClientRects().length);
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+  }
   if (event.key !== 'Escape') {
     return;
   }
-  if (!el.agentSessionDetailModal.hidden) {
+  if (!document.querySelector('#chartRecordsModal').hidden) {
+    closeChartRecordsModal();
+  } else if (!el.solutionAccessModal.hidden) {
+    closeSolutionAccessModal();
+  } else if (!el.roleAssignmentModal.hidden) {
+    closeRoleAssignmentModal();
+  } else if (!el.agentSessionDetailModal.hidden) {
     closeAgentSessionDetailModal();
   } else if (!el.aiEventDetailModal.hidden) {
     closeAiEventDetailModal();
@@ -954,6 +1002,18 @@ el.componentModalBody.addEventListener('click', (event) => {
 });
 el.exportSolutionButton.addEventListener('click', () => withBusy(el.exportSolutionButton, exportSolutionZip));
 el.deploySolutionButton.addEventListener('click', () => withBusy(el.deploySolutionButton, deploySolution, 'Deploying'));
+el.shareSolutionButton.addEventListener('click', () => openSolutionAccessModal('share'));
+el.changeSolutionOwnerButton.addEventListener('click', () => openSolutionAccessModal('owner'));
+document.querySelector('#solutionAccessClose').addEventListener('click', closeSolutionAccessModal);
+document.querySelector('#solutionAccessForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitSolutionAccess();
+});
+document.querySelector('#solutionAccessKind').addEventListener('change', () => {
+  const team = document.querySelector('#solutionAccessKind').value === 'team';
+  document.querySelector('#solutionAccessRecipientLabel').textContent = team ? 'Exact team name' : 'User email';
+  document.querySelector('#solutionAccessRecipient').placeholder = team ? 'Team name' : 'user@example.com';
+});
 el.solutionZipFile.addEventListener('change', async () => {
   const originalText = el.solutionZipText.textContent;
   el.solutionZipText.textContent = el.solutionZipFile.files?.[0]?.name || 'Choose solution ZIP';
@@ -973,6 +1033,20 @@ el.solutionZipFile.addEventListener('change', async () => {
 el.importEnvironmentSelect.addEventListener('change', () => {
   state.importTargetPrepared = null;
   renderImportTarget();
+});
+el.importEnvironmentSearch.addEventListener('focus', () => openImportEnvironmentPicker());
+el.importEnvironmentSearch.addEventListener('click', () => {
+  if (el.importEnvironmentDropdown.hidden) openImportEnvironmentPicker();
+});
+el.importEnvironmentSearch.addEventListener('input', () => openImportEnvironmentPicker(false));
+el.importEnvironmentSearch.addEventListener('keydown', handleImportEnvironmentKeydown);
+el.importEnvironmentOptions.addEventListener('mousedown', (event) => event.preventDefault());
+el.importEnvironmentOptions.addEventListener('click', (event) => {
+  const option = event.target.closest('[data-import-environment]');
+  if (option) selectImportEnvironment(option.dataset.importEnvironment);
+});
+document.querySelector('.import-environment-combo').addEventListener('focusout', (event) => {
+  if (!event.currentTarget.contains(event.relatedTarget)) closeImportEnvironmentPicker();
 });
 el.prepareImportButton.addEventListener('click', () => withBusy(el.prepareImportButton, prepareImportTarget, 'Preparing import'));
 el.refreshImportTargetButton.addEventListener('click', () => withBusy(el.refreshImportTargetButton, prepareImportTarget, 'Refreshing target'));
@@ -2349,6 +2423,7 @@ function clearBusinessUnits() {
 }
 
 function clearEnvironmentData() {
+  closeChartRecordsModal();
   clearBusinessUnits();
   clearTimeout(userSearchTimer);
   clearTimeout(teamSearchTimer);
@@ -3279,6 +3354,7 @@ function buildLatestSqlChartsDashboard(data = {}) {
   for (const [key, row] of latest) {
     const values = row.values || {};
     const target = ensureRow(values);
+    (target.snapshotRows ||= {})[key.split(':')[0]] = row;
     if (key.startsWith('report_flow_run_totals:')) target.flowRuns = { successful: values.successful_flow_runs, failed: values.failed_flow_runs };
     if (key.startsWith('report_ai_flow_event_totals:')) target.aiFlow = { aiBuilderCredits: values.sum_ai_builder_credits_used, copilotStudioCredits: values.sum_copilot_studio_credits_used };
     if (key.startsWith('report_agent_session_totals:')) target.copilotSessions = values.total_sessions;
@@ -3630,7 +3706,7 @@ function renderChartsDashboard(data = {}) {
       labels: modelMix.map((row) => row.model),
       datasets: [reportDataset('Events', modelMix.map((row) => number(row.eventCount)), reportPalette(modelMix.length))],
     }] : []),
-    reportMetricChart('copilot-sessions', 'Copilot sessions by environment', 'Current calendar month', rows, 'copilotSessions', '#7c3aed'),
+    reportMetricChart('copilot-sessions', 'Copilot sessions by environment', 'Current calendar month', rows, 'copilotSessions', '#7c3aed', 'sessions'),
     reportMetricChart('solution-count', 'Solution count by environment', 'Includes managed and Microsoft-owned solutions', rows, 'solutionCount', '#0f766e', 'solutions'),
     reportMetricChart('flow-count', 'Flow count by environment', 'Solution components', rows, 'flowCount', '#0284c7', 'flows'),
     reportMetricChart('code-app-count', 'Code app count by environment', 'Solution components', rows, 'codeAppCount', '#be123c', 'codeApps'),
@@ -3638,6 +3714,8 @@ function renderChartsDashboard(data = {}) {
     reportMetricChart('model-driven-app-count', 'Model-driven app count by environment', 'Solution components', rows, 'modelDrivenAppCount', '#d97706', 'modelDrivenApps'),
     reportMetricChart('ai-model-count', 'AI model count by environment', 'Solution components', rows, 'aiModelCount', '#4f46e5', 'aiModels'),
     reportMetricChart('copilot-agent-count', 'Copilot Studio agent count by environment', 'Solution components', rows, 'copilotStudioAgentCount', '#8b5cf6', 'agents'),
+    reportMetricChart('dataverse-table-count', 'Custom Dataverse table count by environment', 'Solution components', rows, 'dataverseTableCount', '#0f766e', 'tables'),
+    reportMetricChart('dataflow-count', 'Dataflow count by environment', 'Solution components', rows, 'dataflowCount', '#0891b2', 'dataflows'),
   ];
   el.chartsGrid.innerHTML = charts.map((chart) => `
     <section class="report-chart-card">
@@ -3650,7 +3728,7 @@ function renderChartsDashboard(data = {}) {
           <button class="secondary report-chart-toggle" type="button" data-report-chart-fullscreen="${escapeAttr(chart.id)}" title="Open chart in full screen">Full screen</button>
         </div>
       </div>
-      <div class="report-chart-canvas"><canvas id="summaryChart-${escapeAttr(chart.id)}"></canvas></div>
+      <div class="report-chart-canvas"><canvas id="summaryChart-${escapeAttr(chart.id)}"${chart.recordKind ? ' title="Double-click a bar to view records"' : ''}></canvas></div>
     </section>
   `).join('');
 
@@ -3682,6 +3760,11 @@ function reportMetricChart(id, title, subtitle, rows, field, color, namesKind = 
     type: 'bar',
     labels: rows.map(reportEnvironmentLabel),
     datasets: [reportDataset(title, rows.map((row) => number(row[field])), color)],
+    recordKind: namesKind,
+    recordTargets: rows.map((row) => ({
+      environment: { environmentId: row.environmentId, displayName: reportEnvironmentLabel(row), orgUrl: row.environmentUrl },
+      snapshot: row.snapshotRows?.[namesKind === 'sessions' ? 'report_agent_session_totals' : 'report_solution_totals'],
+    })),
     tooltipNames: namesKind
       ? rows.map((row) => (Array.isArray(row.componentNames?.[namesKind]) ? row.componentNames[namesKind] : null))
       : null,
@@ -3719,7 +3802,7 @@ function renderReportsDashboard(data = {}) {
           </button>
         </div>
       </div>
-      ${chart.hidden ? '' : `<div class="report-chart-canvas"><canvas data-report-chart-canvas="${escapeAttr(chart.id)}"></canvas></div>`}
+      ${chart.hidden ? '' : `<div class="report-chart-canvas"><canvas data-report-chart-canvas="${escapeAttr(chart.id)}"${chart.recordKind ? ' title="Double-click a bar to view records"' : ''}></canvas></div>`}
     </section>
   `).join('');
 
@@ -3761,6 +3844,7 @@ function buildTrendCharts(tables, range = {}, componentNames = {}) {
       valueKey: 'total_sessions',
       yTitle: 'Sessions',
       perDay: true,
+      namesKind: 'sessions',
     }),
     buildFlowRunStatusChart(tableMap.get('report_flow_run_totals'), range),
     ...solutionTrendDefinitions().map((definition) => buildStackedEnvironmentBarChart(
@@ -3985,6 +4069,10 @@ function buildStackedEnvironmentBarChart(table, range, options) {
     yTitle: options.yTitle || 'Count',
     environments,
     selectedEnvironmentIds,
+    recordKind: options.namesKind || '',
+    recordDates: dateLabels,
+    recordRows: filteredRows,
+    recordEnvironments: selectedEnvironments,
     tooltipNamesByDataset: options.namesKind
       ? selectedEnvironments.map((environment) => componentNamesForEnvironment(options.componentNames, environment, options.namesKind))
       : null,
@@ -4338,10 +4426,120 @@ function reportDataset(label, data, backgroundColor, options = {}) {
   };
 }
 
+function chartRecordTarget(definition, hit) {
+  if (!definition?.recordKind) return null;
+  if (definition.recordTargets) return definition.recordTargets[hit.index] || null;
+  const environment = definition.recordEnvironments?.[hit.datasetIndex];
+  const date = definition.recordDates?.[hit.index];
+  if (!environment || !date) return null;
+  const snapshot = definition.recordRows?.find((row) => trendRowDate(row) === date
+    && (String(row.values?.environment_id || '').trim() || String(row.values?.environment_display_name || '').trim() || 'unknown') === environment.id);
+  if (!snapshot) return null;
+  return {
+    environment: { environmentId: environment.id, displayName: environment.label, orgUrl: snapshot.values?.environment_url || '' },
+    snapshot,
+    daily: definition.recordKind === 'sessions',
+  };
+}
+
+async function handleChartRecordsDoubleClick(event) {
+  const canvas = event.target.closest('canvas');
+  if (!canvas) return;
+  const instance = globalThis.Chart?.getChart(canvas);
+  const definition = instance?.$recordDefinition;
+  if (!definition?.recordKind) return;
+  const hit = instance.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false)[0];
+  if (!hit) return;
+  const target = chartRecordTarget(definition, hit);
+  if (!target) return;
+  target.chartValue = definition.datasets[hit.datasetIndex]?.data[hit.index];
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    await openChartRecordsModal(definition, target, canvas);
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function openChartRecordsModal(definition, target, canvas) {
+  const version = ++chartRecordView.version;
+  const accountHomeId = resolveRequestAccountId();
+  chartRecordView = { version, rows: [], kind: definition.recordKind, page: 0, returnFocus: canvas };
+  const modal = document.querySelector('#chartRecordsModal');
+  const meta = document.querySelector('#chartRecordsMeta');
+  const snapshot = target.snapshot || {};
+  document.querySelector('#chartRecordsTitle').textContent = definition.title;
+  const context = `${target.environment.displayName || target.environment.environmentId}${snapshot.reportDate ? ` | Chart date: ${snapshot.reportDate}` : ''}${target.chartValue !== undefined ? ` | Chart total: ${number(target.chartValue).toLocaleString()}` : ''}`;
+  meta.textContent = `${context} | Loading records...`;
+  document.querySelector('#chartRecordsSearch').value = '';
+  document.querySelector('#chartRecordsCount').textContent = '';
+  document.querySelector('#chartRecordsBody').innerHTML = empty('Loading records...');
+  modal.hidden = false;
+  document.querySelector('#chartRecordsClose').focus();
+  const rangeParts = String(snapshot.rangeKey || '').split(':');
+  const end = snapshot.dataDate || snapshot.reportDate || snapshot.dateRan || '';
+  const start = target.daily ? end : rangeParts[1] || `${end.slice(0, 7)}-01`;
+  try {
+    const result = await api('/api/report-chart-records', {
+      method: 'POST', quiet: true,
+      body: { accountHomeId, kind: definition.recordKind, environment: target.environment, dateRan: snapshot.dateRan || '', collectedAt: snapshot.collectedAt || '', start, end },
+    });
+    if (chartRecordView.version !== version || resolveRequestAccountId() !== accountHomeId) return;
+    chartRecordView.rows = result.rows || [];
+    meta.textContent = `${context} | ${result.note || ''}`;
+    renderChartRecords();
+  } catch (error) {
+    if (chartRecordView.version !== version) return;
+    meta.textContent = context;
+    document.querySelector('#chartRecordsBody').innerHTML = empty(`Records could not be loaded. ${error.message}`);
+  }
+}
+
+function chartRecordColumns(kind) {
+  if (kind === 'sessions') return [['Agent', 'agentName'], ['Started', 'conversationStartTime'], ['Conversation ID', 'conversationId']];
+  if (kind === 'solutions') return [['Solution', 'name'], ['Unique name', 'uniqueName'], ['Version', 'version'], ['Publisher', 'publisher'], ['Management', 'managed'], ['Modified', 'modifiedOn'], ['Solution ID', 'id']];
+  const names = { flows: 'Flow', canvasApps: 'Canvas app', codeApps: 'Code app', modelDrivenApps: 'Model-driven app', agents: 'Agent', tables: 'Table', aiModels: 'AI model', dataflows: 'Dataflow' };
+  return [[names[kind] || 'Name', 'name'], ['Type', 'type'], ['Solutions', 'solutions'], ['Record ID', 'id']];
+}
+
+function chartRecordCell(row, key) {
+  const value = row[key];
+  if (key === 'modifiedOn' || key === 'conversationStartTime') return value ? formatTrendTimestamp(value) : '';
+  return Array.isArray(value) ? value.join(', ') : String(value ?? '');
+}
+
+function renderChartRecords() {
+  const query = document.querySelector('#chartRecordsSearch').value.trim().toLowerCase();
+  const columns = chartRecordColumns(chartRecordView.kind);
+  const rows = chartRecordView.rows.filter((row) => !query || columns.some(([, key]) => chartRecordCell(row, key).toLowerCase().includes(query)));
+  const pageSize = 100;
+  const start = chartRecordView.page * pageSize;
+  const shown = rows.slice(start, start + pageSize);
+  document.querySelector('#chartRecordsCount').textContent = `${rows.length.toLocaleString()} matching records of ${chartRecordView.rows.length.toLocaleString()}${rows.length > pageSize ? ` | Showing ${start + 1}–${start + shown.length}` : ''}`;
+  document.querySelector('#chartRecordsBody').innerHTML = rows.length ? `
+    <table><thead><tr>${columns.map(([label]) => `<th scope="col">${escapeHtml(label)}</th>`).join('')}</tr></thead>
+    <tbody>${shown.map((row) => `<tr>${columns.map(([, key]) => `<td>${escapeHtml(chartRecordCell(row, key) || '—')}</td>`).join('')}</tr>`).join('')}</tbody></table>
+    ${rows.length > pageSize ? `<div class="actions"><button class="secondary" type="button" data-chart-record-page="-1"${start ? '' : ' disabled'}>Previous</button><button class="secondary" type="button" data-chart-record-page="1"${start + pageSize < rows.length ? '' : ' disabled'}>Next</button></div>` : ''}
+  ` : empty(query ? 'No records match your search.' : 'No records are available for this chart element.');
+}
+
+function closeChartRecordsModal() {
+  const returnFocus = chartRecordView.returnFocus;
+  chartRecordView.version += 1;
+  chartRecordView.rows = [];
+  document.querySelector('#chartRecordsModal').hidden = true;
+  document.querySelector('#chartRecordsBody').innerHTML = '';
+  if (returnFocus?.isConnected) {
+    returnFocus.tabIndex = 0;
+    returnFocus.focus();
+  }
+}
+
 function reportChartConfig(chart) {
   const isCircular = chart.type === 'doughnut' || chart.type === 'pie';
   return {
     type: chart.type,
+    plugins: [{ id: 'recordDrilldown', afterInit(instance) { instance.$recordDefinition = chart; } }],
     data: { labels: chart.labels.length ? chart.labels : ['No data'], datasets: chart.datasets },
     options: {
       responsive: true,
@@ -4352,19 +4550,16 @@ function reportChartConfig(chart) {
           enabled: true,
           intersect: true,
           mode: 'nearest',
-          callbacks: chart.tooltipNames || chart.tooltipNamesByDataset ? {
-            afterBody(items) {
-              const names = chart.tooltipNamesByDataset
-                ? chart.tooltipNamesByDataset[items[0]?.datasetIndex]
-                : chart.tooltipNames[items[0]?.dataIndex];
-              if (!Array.isArray(names) || !names.length) {
-                return '';
-              }
-              const shown = names.slice(0, 15);
-              const remaining = names.length - shown.length;
-              return [...shown, ...(remaining > 0 ? [`+${remaining} more`] : [])];
+          callbacks: {
+            title(items) {
+              const item = items[0];
+              if (!item) return '';
+              return chart.recordTargets?.[item.dataIndex]?.environment?.displayName
+                || chart.recordEnvironments?.[item.datasetIndex]?.label
+                || (chart.stacked ? item.dataset.label : item.label) || '';
             },
-          } : undefined,
+            afterBody: () => chart.recordKind ? 'Double-click to see records' : '',
+          },
         },
       },
       scales: isCircular ? undefined : chart.dualAxis ? {
@@ -5912,13 +6107,16 @@ function renderUsers() {
   `
     : '';
   el.usersList.innerHTML = `${state.users.map((user) => `
-    <button class="list-item principal-row user-row" type="button" data-principal-action="assign-role" data-principal-type="systemuser" data-principal-id="${escapeAttr(user.systemuserid)}"${user.isdisabled ? ' disabled' : ''}>
+    <div class="list-item user-row">
       <span class="role-name">${escapeHtml(user.fullname || user.internalemailaddress || user.domainname || user.systemuserid)}</span>
       <span class="role-id">${escapeHtml(user.internalemailaddress || user.domainname || '')}</span>
       <span class="role-id">${user.isdisabled ? 'Disabled' : 'Enabled'} | ${escapeHtml(user.businessUnitName || 'No business unit')}</span>
       <span class="role-id">${escapeHtml(user.azureactivedirectoryobjectid || '')}</span>
-      <span class="role-id row-action-text">${user.isdisabled ? 'Disabled users cannot receive roles' : 'Assign role'}</span>
-    </button>
+      <div class="principal-actions">
+        <button class="role-id row-action-text row-action-link" type="button" data-principal-action="current-roles" data-principal-type="systemuser" data-principal-id="${escapeAttr(user.systemuserid)}">Current roles</button>
+        <button class="role-id row-action-text row-action-link" type="button" data-principal-action="assign-role" data-principal-type="systemuser" data-principal-id="${escapeAttr(user.systemuserid)}"${user.isdisabled ? ' disabled' : ''}>${user.isdisabled ? 'Disabled users cannot receive roles' : 'Assign role'}</button>
+      </div>
+    </div>
   `).join('')}${nextPage}`;
   renderTeamMembersPanel();
 }
@@ -5946,7 +6144,10 @@ function renderTeams() {
         <span class="role-id">${escapeHtml(team.businessUnitName || 'No business unit')}</span>
         <span class="role-id">${escapeHtml(team.azureactivedirectoryobjectid || '')}</span>
       </button>
-      <button class="role-id row-action-text row-action-link" type="button" data-principal-action="assign-role" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}"${canAssignRoles ? '' : ' disabled'}>${canAssignRoles ? 'Assign role' : 'Access team'}</button>
+      <div class="principal-actions">
+        <button class="role-id row-action-text row-action-link" type="button" data-principal-action="current-roles" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}">Current roles</button>
+        <button class="role-id row-action-text row-action-link" type="button" data-principal-action="assign-role" data-principal-type="team" data-principal-id="${escapeAttr(team.teamid)}"${canAssignRoles ? '' : ' disabled'}>${canAssignRoles ? 'Assign role' : 'Access team'}</button>
+      </div>
     </div>
   `;
   }).join('')}${nextPage}`;
@@ -6317,14 +6518,18 @@ async function confirmDeleteSqlRecords() {
   }, 'Deleting');
 }
 
-async function openRoleAssignmentModal(principalType, principalId) {
-  const principal = getAssignmentPrincipal(principalType, principalId);
+async function openRoleAssignmentModal(principalType, principalId, currentOnly = false) {
+  const principal = getAssignmentPrincipal(principalType, principalId, currentOnly);
   if (!principal) {
     toast('Select a loaded user or team first.', 'error');
     return;
   }
   state.roleAssignmentPrincipal = principal;
-  el.roleAssignmentTitle.textContent = `Assign Role to ${principal.type === 'team' ? 'Team' : 'User'}`;
+  state.roleAssignmentReturnFocus = document.activeElement;
+  state.roleAssignmentCurrentOnly = currentOnly;
+  state.roleAssignmentLoading = true;
+  state.roleAssignmentLoadError = '';
+  el.roleAssignmentTitle.textContent = `${currentOnly ? 'Current Roles for' : 'Assign Role to'} ${principal.type === 'team' ? 'Team' : 'User'}`;
   el.roleAssignmentMeta.textContent = principal.detail
     ? `${principal.label} | ${principal.detail}`
     : principal.label;
@@ -6332,26 +6537,43 @@ async function openRoleAssignmentModal(principalType, principalId) {
   el.roleAssignmentModal.hidden = false;
   el.roleAssignmentRoles.innerHTML = empty('Loading roles...');
   state.assignedRoles = [];
-  await Promise.all([
-    ensureRolesLoaded(),
-    loadAssignedSecurityRoles(principal),
-  ]);
+  try {
+    await Promise.all([
+      currentOnly ? Promise.resolve() : ensureRolesLoaded(),
+      loadAssignedSecurityRoles(principal),
+    ]);
+  } catch (error) {
+    if (state.roleAssignmentPrincipal === principal) {
+      state.roleAssignmentLoadError = `Roles could not be loaded. ${error.message}`;
+      el.roleAssignmentRoles.innerHTML = empty(state.roleAssignmentLoadError);
+    }
+    throw error;
+  } finally {
+    if (state.roleAssignmentPrincipal === principal) state.roleAssignmentLoading = false;
+  }
+  if (state.roleAssignmentPrincipal !== principal) return;
   renderRoleAssignmentList();
   el.roleAssignmentSearch.focus();
 }
 
 function closeRoleAssignmentModal() {
+  const returnFocus = state.roleAssignmentReturnFocus;
+  const wasOpen = !el.roleAssignmentModal.hidden;
   state.roleAssignmentPrincipal = null;
   state.assignedRoles = [];
+  state.roleAssignmentLoadError = '';
+  state.roleAssignmentLoading = false;
+  state.roleAssignmentCurrentOnly = false;
   el.roleAssignmentModal.hidden = true;
   el.roleAssignmentRoles.innerHTML = '';
   el.roleAssignmentSearch.value = '';
+  if (wasOpen && returnFocus?.isConnected) returnFocus.focus();
 }
 
-function getAssignmentPrincipal(type, id) {
+function getAssignmentPrincipal(type, id, allowReadOnly = false) {
   if (type === 'team') {
     const team = state.teams.find((item) => item.teamid === id);
-    if (!team || Number(team.teamtype) === 1) {
+    if (!team || (!allowReadOnly && Number(team.teamtype) === 1)) {
       return null;
     }
     return team ? {
@@ -6363,7 +6585,7 @@ function getAssignmentPrincipal(type, id) {
   }
 
   const user = state.users.find((item) => item.systemuserid === id);
-  if (!user || user.isdisabled) {
+  if (!user || (!allowReadOnly && user.isdisabled)) {
     return null;
   }
   return {
@@ -6375,28 +6597,44 @@ function getAssignmentPrincipal(type, id) {
 }
 
 function renderRoleAssignmentList() {
-  const query = el.roleAssignmentSearch.value.trim().toLowerCase();
-  const roles = state.roles.filter((role) => {
-    const businessUnitName = role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
-    const text = `${role.name || ''} ${businessUnitName}`.toLowerCase();
-    return !query || text.includes(query);
-  });
-  if (!roles.length) {
-    el.roleAssignmentRoles.innerHTML = empty(state.roles.length ? 'No roles match the filter.' : 'Load roles first.');
+  if (state.roleAssignmentLoading || state.roleAssignmentLoadError) {
+    el.roleAssignmentRoles.innerHTML = empty(state.roleAssignmentLoadError || 'Loading roles...');
     return;
   }
-  el.roleAssignmentRoles.innerHTML = roles.map((role) => {
+  const query = el.roleAssignmentSearch.value.trim().toLowerCase();
+  const matches = (role) => {
+    const businessUnitName = role.businessUnitName || role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
+    const text = `${role.name || ''} ${businessUnitName}`.toLowerCase();
+    return !query || text.includes(query);
+  };
+  const assigned = state.assignedRoles.filter(matches).sort((a, b) => a.name.localeCompare(b.name));
+  const available = state.roles.filter((role) => matches(role) && !state.assignedRoles.some((item) => String(item.rootRoleId).toLowerCase() === String(role.roleid).toLowerCase()));
+  const currentOnly = state.roleAssignmentCurrentOnly;
+  const currentRows = assigned.map((role) => `
+    <${currentOnly ? 'div' : 'button'} class="list-item role-assignment-row assigned"${currentOnly ? '' : ` type="button" data-role-assignment-action="remove" data-assigned-role-id="${escapeAttr(role.roleid)}"`}>
+      <span class="role-name">${escapeHtml(role.name)}</span>
+      <span class="role-id">Business unit: ${escapeHtml(role.businessUnitName || role.businessUnitId || 'Unknown')}</span>
+      <span class="role-id role-assignment-action">${currentOnly ? 'Directly assigned' : 'Assigned | Remove role'}</span>
+    </${currentOnly ? 'div' : 'button'}>
+  `).join('');
+  const availableRows = currentOnly ? '' : available.map((role) => {
     const businessUnitName = role.businessunitid?.name || role['_businessunitid_value@OData.Community.Display.V1.FormattedValue'] || role._businessunitid_value || '';
-    const roleId = String(role.roleid || '').toLowerCase();
-    const assignedRole = state.assignedRoles.find((assigned) => String(assigned.rootRoleId || '').toLowerCase() === roleId);
     return `
-      <button class="list-item role-assignment-row${assignedRole ? ' assigned' : ''}" type="button" data-role-assignment-action="${assignedRole ? 'remove' : 'assign'}" data-role-assignment-id="${escapeAttr(role.roleid)}"${assignedRole ? ` data-assigned-role-id="${escapeAttr(assignedRole.roleid)}"` : ''}>
+      <button class="list-item role-assignment-row" type="button" data-role-assignment-action="assign" data-role-assignment-id="${escapeAttr(role.roleid)}">
         <span class="role-name">${escapeHtml(role.name)}</span>
         ${businessUnitName ? `<span class="role-id">Root business unit: ${escapeHtml(businessUnitName)}</span>` : ''}
-        <span class="role-id role-assignment-action">${assignedRole ? 'Assigned | Remove role' : 'Assign this role'}</span>
+        <span class="role-id role-assignment-action">Assign this role</span>
       </button>
     `;
   }).join('');
+  el.roleAssignmentRoles.innerHTML = `
+    <h3 class="role-group-heading">Current roles (${assigned.length})</h3>
+    ${currentRows || empty(query ? 'No current roles match the filter.' : 'No directly assigned roles.')}
+    ${currentOnly ? '<p class="muted">Direct assignments only; roles inherited through team membership are not included.</p>' : `
+      <h3 class="role-group-heading">Available roles (${available.length})</h3>
+      ${availableRows || empty('No available roles match the filter.')}
+    `}
+  `;
 }
 
 async function loadAssignedSecurityRoles(principal) {
@@ -6404,7 +6642,8 @@ async function loadAssignedSecurityRoles(principal) {
     principalType: principal.type,
     principalId: principal.id,
   });
-  state.assignedRoles = await api(`/api/role-assignments?${query}`);
+  const roles = await api(`/api/role-assignments?${query}`);
+  if (state.roleAssignmentPrincipal === principal) state.assignedRoles = roles;
 }
 
 async function assignSecurityRole(roleId, button) {
@@ -6422,8 +6661,11 @@ async function assignSecurityRole(roleId, button) {
       },
     });
     toast(`Assigned ${result.roleName || 'role'} to ${result.principalName || 'principal'}.`);
+    if (state.roleAssignmentPrincipal !== principal) return;
     state.assignedRoles.push({
       ...result,
+      name: result.roleName || '',
+      businessUnitId: result.assignedRoleBusinessUnitId || '',
       rootRoleId: roleId,
     });
     renderRoleAssignmentList();
@@ -6444,8 +6686,9 @@ async function removeSecurityRole(roleId, button) {
         roleId,
       },
     });
-    state.assignedRoles = state.assignedRoles.filter((role) => role.roleid !== result.roleid);
     toast(`Removed ${result.roleName || 'role'} from ${principal.label}.`);
+    if (state.roleAssignmentPrincipal !== principal) return;
+    state.assignedRoles = state.assignedRoles.filter((role) => role.roleid !== result.roleid);
     renderRoleAssignmentList();
   }, 'Removing');
 }
@@ -6877,6 +7120,8 @@ function selectSolution(solutionId) {
   el.loadComponentsButton.disabled = !solution;
   el.exportSolutionButton.disabled = !solution;
   el.deploySolutionButton.disabled = !solution;
+  el.shareSolutionButton.disabled = !solution;
+  el.changeSolutionOwnerButton.disabled = !solution;
   el.solutionVersionInput.disabled = !solution;
   el.solutionVersionInput.value = solution?.version || '';
   el.exportManaged.checked = Boolean(solution?.ismanaged);
@@ -7768,6 +8013,70 @@ async function shareSelectedComponent(target) {
   }, 'Sharing');
 }
 
+function openSolutionAccessModal(action) {
+  const solution = getSelectedSolution();
+  if (!solution || !state.selectedEnvironment.orgUrl) return;
+  solutionAccessView = {
+    solutionId: solution.solutionid, action, orgUrl: state.selectedEnvironment.orgUrl,
+    accountHomeId: resolveRequestAccountId(), busy: false,
+    returnFocus: action === 'owner' ? el.changeSolutionOwnerButton : el.shareSolutionButton,
+  };
+  document.querySelector('#solutionAccessTitle').textContent = action === 'owner' ? 'Change solution component owner' : 'Share solution components';
+  document.querySelector('#solutionAccessMeta').textContent = `${solution.friendlyname || solution.uniquename} | ${solution.uniquename} | ${solutionAccessView.orgUrl}`;
+  document.querySelector('#solutionAccessPermissionsLabel').hidden = action === 'owner';
+  document.querySelector('#solutionAccessPermissions').disabled = action === 'owner';
+  document.querySelector('#solutionAccessSubmit').textContent = action === 'owner' ? 'Change owner of all compatible components' : 'Share all compatible components';
+  document.querySelector('#solutionAccessRecipient').value = '';
+  document.querySelector('#solutionAccessStatus').textContent = '';
+  document.querySelector('#solutionAccessResults').textContent = '';
+  el.solutionAccessModal.hidden = false;
+  document.querySelector('#solutionAccessRecipient').focus();
+}
+
+function closeSolutionAccessModal() {
+  if (solutionAccessView?.busy) return;
+  el.solutionAccessModal.hidden = true;
+  solutionAccessView?.returnFocus?.focus();
+  solutionAccessView = null;
+}
+
+async function submitSolutionAccess() {
+  const view = solutionAccessView;
+  if (!view || view.busy) return;
+  const status = document.querySelector('#solutionAccessStatus');
+  const results = document.querySelector('#solutionAccessResults');
+  if (view.accountHomeId !== resolveRequestAccountId() || view.orgUrl !== state.selectedEnvironment.orgUrl || view.solutionId !== state.selectedSolutionId) {
+    status.textContent = 'The account, environment or solution changed. Close and reopen this dialog.';
+    return;
+  }
+  const body = {
+    action: view.action, orgUrl: view.orgUrl, accountHomeId: view.accountHomeId,
+    recipientKind: document.querySelector('#solutionAccessKind').value,
+    recipient: document.querySelector('#solutionAccessRecipient').value.trim(),
+    permissions: document.querySelector('#solutionAccessPermissions').value.trim(),
+  };
+  view.busy = true;
+  const controls = [...document.querySelector('#solutionAccessForm').querySelectorAll('input, select, button'), document.querySelector('#solutionAccessClose')];
+  const disabled = controls.map((control) => control.disabled);
+  controls.forEach((control) => { control.disabled = true; });
+  status.textContent = 'Working: discovering solution components and agent dependencies, then applying changes. Keep this page open.';
+  results.textContent = '';
+  try {
+    const result = await api(`/api/solutions/${encodeURIComponent(view.solutionId)}/access`, { method: 'POST', body, quiet: true });
+    const summary = result.summary;
+    const incomplete = summary.failed || summary.notProcessed;
+    status.textContent = `${incomplete ? 'Incomplete' : 'Finished'}: ${summary.updated} updated, ${summary.failed} failed, ${summary.unsupported} unsupported, ${summary.roleControlled} role-controlled, ${summary.inherited} inherited, ${summary.notProcessed} not processed.`;
+    results.textContent = (result.messages || []).join('\n');
+  } catch (error) {
+    status.textContent = 'Operation could not complete. No automatic rollback is performed; review access before retrying.';
+    results.textContent = error.message;
+  } finally {
+    view.busy = false;
+    controls.forEach((control, index) => { control.disabled = disabled[index]; });
+    document.querySelector('#solutionAccessClose').focus();
+  }
+}
+
 async function exportSolutionZip() {
   const solutionId = requireSelectedSolution();
   const environmentDisplayName = getEnvironmentByName(state.selectedEnvironment.environmentName)?.displayName || '';
@@ -7888,7 +8197,7 @@ async function loadImportEnvironments() {
 function renderImportEnvironments() {
   const selected = el.importEnvironmentSelect.value;
   const environments = getVisibleEnvironments();
-  const nextSelected = selected || (environments.length === 1 ? environments[0].name : '');
+  const nextSelected = environments.some((environment) => environment.name === selected) ? selected : (environments.length === 1 ? environments[0].name : '');
   el.importEnvironmentSelect.innerHTML = [
     `<option value="">${environments.length ? 'Select target environment' : 'No visible environments loaded'}</option>`,
     ...environments.map((environment) => `
@@ -7897,7 +8206,73 @@ function renderImportEnvironments() {
       </option>
     `),
   ].join('');
+  if (selected !== nextSelected) {
+    state.importTargetPrepared = null;
+    renderImportTarget();
+  }
+  el.importEnvironmentSearch.disabled = !environments.length;
+  el.importEnvironmentSearch.placeholder = environments.length ? 'Search target environments' : 'No visible environments loaded';
+  closeImportEnvironmentPicker();
   updateImportButtons();
+}
+
+function openImportEnvironmentPicker(resetQuery = true) {
+  if (el.importEnvironmentSearch.disabled) return;
+  if (resetQuery) el.importEnvironmentSearch.value = '';
+  const selected = el.importEnvironmentSelect.value;
+  const environments = filterEnvironments(getVisibleEnvironments(), el.importEnvironmentSearch.value);
+  el.importEnvironmentOptions.innerHTML = environments.map((environment, index) => `
+    <div id="import-environment-option-${index}" class="environment-picker-option" role="option" aria-selected="${environment.name === selected}" data-import-environment="${escapeAttr(environment.name)}">
+      <span class="role-name">${escapeHtml(environment.displayName || environment.name)}</span>
+      <span class="role-id">${escapeHtml(environment.name)} | ${escapeHtml(environment.orgUrl || '')}</span>
+    </div>
+  `).join('') || empty('No environments match your search.');
+  importEnvironmentActiveIndex = -1;
+  el.importEnvironmentSearch.removeAttribute('aria-activedescendant');
+  el.importEnvironmentDropdown.hidden = false;
+  el.importEnvironmentSearch.setAttribute('aria-expanded', 'true');
+}
+
+function closeImportEnvironmentPicker() {
+  el.importEnvironmentDropdown.hidden = true;
+  el.importEnvironmentSearch.setAttribute('aria-expanded', 'false');
+  el.importEnvironmentSearch.removeAttribute('aria-activedescendant');
+  const selected = getVisibleEnvironments().find((environment) => environment.name === el.importEnvironmentSelect.value);
+  el.importEnvironmentSearch.value = selected?.displayName || selected?.name || '';
+}
+
+function selectImportEnvironment(name) {
+  if (!getVisibleEnvironments().some((environment) => environment.name === name)) return;
+  const changed = el.importEnvironmentSelect.value !== name;
+  el.importEnvironmentSelect.value = name;
+  if (changed) el.importEnvironmentSelect.dispatchEvent(new Event('change'));
+  closeImportEnvironmentPicker();
+}
+
+function handleImportEnvironmentKeydown(event) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeImportEnvironmentPicker();
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) return;
+  event.preventDefault();
+  if (el.importEnvironmentDropdown.hidden && event.key === 'Enter') return;
+  if (el.importEnvironmentDropdown.hidden) openImportEnvironmentPicker();
+  const options = [...el.importEnvironmentOptions.querySelectorAll('[role="option"]')];
+  if (!options.length) return;
+  if (event.key === 'Enter') {
+    selectImportEnvironment(options[Math.max(0, importEnvironmentActiveIndex)].dataset.importEnvironment);
+    return;
+  }
+  importEnvironmentActiveIndex = importEnvironmentActiveIndex < 0
+    ? (event.key === 'ArrowDown' ? 0 : options.length - 1)
+    : (importEnvironmentActiveIndex + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+  options.forEach((option, index) => option.classList.toggle('active', index === importEnvironmentActiveIndex));
+  const active = options[importEnvironmentActiveIndex];
+  el.importEnvironmentSearch.setAttribute('aria-activedescendant', active.id);
+  active.scrollIntoView({ block: 'nearest' });
 }
 
 async function prepareImportTarget(showToast = true) {
@@ -7907,10 +8282,16 @@ async function prepareImportTarget(showToast = true) {
     return;
   }
 
-  state.importTargetPrepared = await api(`/api/import-packages/${encodeURIComponent(state.importPackage.id)}/target`, {
+  const packageId = state.importPackage.id;
+  const prepared = await api(`/api/import-packages/${encodeURIComponent(packageId)}/target`, {
     method: 'POST',
     body: target,
   });
+  const currentTarget = getImportTargetEnvironment();
+  if (state.importPackage?.id !== packageId || currentTarget?.environmentName !== target.environmentName || currentTarget?.orgUrl !== target.orgUrl) {
+    return;
+  }
+  state.importTargetPrepared = prepared;
   renderImportTarget();
   if (showToast) {
     toast('Target environment prepared.');
