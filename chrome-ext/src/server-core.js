@@ -6727,6 +6727,10 @@ function getReportTrendDateRange(filters = {}) {
     const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     return { range, startDate: toDateOnlyString(monthStart), endDate: toDateOnlyString(monthEnd) };
   }
+  if (['previous-month', '2x-previous-month', '3-calendar-months'].includes(range)) {
+    const { startDate, endDate } = getAiEventDateRange({ range });
+    return { range, startDate, endDate };
+  }
   if (range === '730d' || range === '2y') {
     return { range: '730d', startDate: toDateOnlyString(addDays(today, -729)), endDate: toDateOnlyString(today) };
   }
@@ -8988,6 +8992,14 @@ function getAiEventDateRange(filters = {}) {
   }
   if (range === '365d') {
     return makeAiEventRange(range, addDays(today, -364), addDays(today, 1));
+  }
+
+  if (['previous-month', '2x-previous-month', '3-calendar-months'].includes(range)) {
+    const startOffset = range === 'previous-month' ? -1 : -2;
+    const endOffset = range === '3-calendar-months' ? 1 : startOffset + 1;
+    return makeAiEventRange(range,
+      new Date(now.getFullYear(), now.getMonth() + startOffset, 1),
+      new Date(now.getFullYear(), now.getMonth() + endOffset, 1));
   }
 
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
