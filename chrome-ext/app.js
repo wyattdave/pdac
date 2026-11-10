@@ -1434,9 +1434,7 @@ function handleWeeklyHistoryRangeChange() {
 }
 
 function syncWeeklyHistoryRangeVisibility() {
-  const custom = el.weeklyReportHistoryRange.value === 'custom';
-  el.weeklyReportHistoryStart.disabled = !custom;
-  el.weeklyReportHistoryEnd.disabled = !custom;
+  syncReportDateRangeInputs('weeklyReportHistory', { history: true });
 }
 
 function renderWeeklyReport(options = {}) {
@@ -2764,12 +2762,8 @@ function handleAutomatedReportSettingsChange() {
 }
 
 function syncAutomatedReportDateRanges() {
-  const aiCustom = el.automatedAiEventsRange.value === 'custom';
-  el.automatedAiEventsStart.disabled = !aiCustom;
-  el.automatedAiEventsEnd.disabled = !aiCustom;
-  const sessionsCustom = el.automatedAgentSessionsRange.value === 'custom';
-  el.automatedAgentSessionsStart.disabled = !sessionsCustom;
-  el.automatedAgentSessionsEnd.disabled = !sessionsCustom;
+  syncReportDateRangeInputs('automatedAiEvents', { completed: true });
+  syncReportDateRangeInputs('automatedAgentSessions', { completed: true });
 }
 
 function renderAutomatedReportControls() {
@@ -4610,20 +4604,45 @@ function reportPalette(count) {
   return Array.from({ length: count }, (_, index) => colors[index % colors.length]);
 }
 
-function syncTrendRangeVisibility() {
-  const isCustom = el.trendRange?.value === 'custom';
-  if (el.trendStart) {
-    el.trendStart.disabled = !isCustom;
-  }
-  if (el.trendEnd) {
-    el.trendEnd.disabled = !isCustom;
+function syncReportDateRangeInputs(prefix, { history = false, completed = false } = {}) {
+  const selector = el[`${prefix}Range`];
+  const startInput = el[`${prefix}Start`];
+  const endInput = el[`${prefix}End`];
+  if (!selector || !startInput || !endInput) return;
+  const range = selector.value;
+  const custom = range === 'custom';
+  startInput.disabled = !custom;
+  endInput.disabled = !custom;
+  if (custom) return;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(today);
+  if (completed) end.setDate(end.getDate() - 1);
+  const days = { today: 1, '7d': 7, '28d': 28, '365d': 365, '730d': 730 }[range];
+  if (history || ['previous-month', '2x-previous-month', '3-calendar-months'].includes(range)) {
+    const dates = historyDateRange(range, '', '', today);
+    startInput.value = dates.start;
+    endInput.value = completed && dates.end > formatDateInputValue(end) ? formatDateInputValue(end) : dates.end;
+  } else {
+    const start = new Date(end);
+    if (days) {
+      start.setDate(start.getDate() - days + 1);
+    } else {
+      start.setDate(1);
+      if (!completed) end.setMonth(end.getMonth() + 1, 0);
+    }
+    startInput.value = formatDateInputValue(start);
+    endInput.value = formatDateInputValue(end);
   }
 }
 
+function syncTrendRangeVisibility() {
+  syncReportDateRangeInputs('trend');
+}
+
 function syncAgentSessionCustomRangeVisibility() {
-  const isCustom = el.agentSessionsRange.value === 'custom';
-  el.agentSessionsStart.disabled = !isCustom;
-  el.agentSessionsEnd.disabled = !isCustom;
+  syncReportDateRangeInputs('agentSessions');
 }
 
 function handleAgentSessionRangeChange() {
@@ -4635,9 +4654,7 @@ function handleAgentSessionCustomRangeChange() {
 }
 
 function syncAiEventCustomRangeVisibility() {
-  const isCustom = el.aiEventsRange.value === 'custom';
-  el.aiEventsStart.disabled = !isCustom;
-  el.aiEventsEnd.disabled = !isCustom;
+  syncReportDateRangeInputs('aiEvents');
 }
 
 function handleAiEventRangeChange() {
@@ -5015,9 +5032,7 @@ function formatCredits(value) {
 }
 
 function syncFlowRunCustomRangeVisibility() {
-  const isCustom = el.flowRunsRange.value === 'custom';
-  el.flowRunsStart.disabled = !isCustom;
-  el.flowRunsEnd.disabled = !isCustom;
+  syncReportDateRangeInputs('flowRuns');
 }
 
 function handleFlowRunRangeChange() {

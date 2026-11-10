@@ -5845,8 +5845,14 @@ function completedTrendRange(range, today = new Date()) {
     return makeAiEventRange('custom', range.start, new Date(Math.min(range.endExclusive.getTime(), atStartOfDay(today).getTime())));
   }
   const days = { today: 1, '7d': 7, '28d': 28, '365d': 365 }[range.range];
-  const start = days ? addDays(end, 1 - days) : new Date(end.getFullYear(), end.getMonth(), 1);
-  return makeAiEventRange(range.range, start, addDays(end, 1));
+  if (days) {
+    return makeAiEventRange(range.range, addDays(end, 1 - days), addDays(end, 1));
+  }
+  if (range.range === 'month') {
+    return makeAiEventRange(range.range, new Date(end.getFullYear(), end.getMonth(), 1), addDays(end, 1));
+  }
+  return makeAiEventRange(range.range, range.start,
+    new Date(Math.min(range.endExclusive.getTime(), atStartOfDay(today).getTime())));
 }
 
 async function setReportTrendDateMode(useRecordDate) {
