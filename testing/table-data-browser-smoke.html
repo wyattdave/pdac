@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>PDAC · Mock data-browser smoke tests</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/table-data.css"></head>
+<body>
+<main><h1>Data-browser smoke tests</h1><p>No live APIs or tenant data are used.</p><pre id="results" role="status">Running…</pre><button id="open">Open mock environment variable values</button></main>
+<script type="module">
+import { createTableDataBrowser, columnPreferenceKey } from '/table-data.js';
+import { createTableDataService } from '/table-data-api.js';
+
+const context = { orgUrl: 'https://browser-smoke.crm.dynamics.com', accountHomeId: 'mock-account' };
+const makeId = (index) => `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`;
+const fields = {
+  environmentvariablevalue: [['environmentvariablevalueid', 'Uniqueidentifier'], ['schemaname', 'String'], ['value', 'Memo'], ['modifiedon', 'DateTime']],
+  workflow: [['workflowid', 'Uniqueidentifier'], ['name', 'String'], ['category', 'Picklist'], ['type', 'Picklist'], ['statecode', 'State']],
+};
+const data = {
+  environmentvariablevalue: Array.from({ length: 205 }, (_, i) => ({ environmentvariablevalueid: makeId(i + 1), schemaname: `contoso_setting_${i + 1}`, value: i ? `Value ${i + 1}` : '<img src=x onerror="window.xss=true">', modifiedon: '2026-11-12T10:00:00Z', '@odata.etag': 'W/"123"' })),
+  workflow: [{ workflowid: makeId(500), name: 'Expense approval', category: 5, type: 1, statecode: 0, '@odata.etag': 'W/"123"' }, { workflowid: makeId(501), name: 'Classic workflow', category: 0, type: 1, statecode: 1, '@odata.etag': 'W/"123"' }],
+};
+const apiCalls = [];
+const dvCalls = [];
+let holdNextPage;
+const service = createTableDataService({ ...context, request: async (method, path, body, headers) => {
+  dvCalls.push({ method, path, body, headers });
+  const name = path.includes('environmentvariablevalue') ? 'environmentvariablevalue' : 'workflow';
+  const primaryId = `${name}id`;
+  if (path.includes('/Attributes?')) return { value: fields[name].map(([LogicalName, AttributeType]) => ({ LogicalName, AttributeType, IsValidForRead: true })) };
+  if (path.startsWith('EntityDefinitions')) return { LogicalName: name, EntitySetName: `${name}s`, PrimaryIdAttribute: primaryId, PrimaryNameAttribute: name === 'workflow' ? 'name' : 'schemaname', IsOptimisticConcurrencyEnabled: true };
+  const url = new URL(path, `${context.orgUrl}/api/data/v9.2/`);
+  const id = /\(([0-9a-f-]+)\)/.exec(url.pathname)?.[1];
+  if (id) {
+    const row = data[name].find((item) => item[primaryId] === id);
+    if (method === 'PATCH') { Object.assign(row, body); return {}; }
+    return { ...row };
+  }
+  if (holdNextPage && url.searchParams.get('$skiptoken')) {
+    const release = holdNextPage;
+    holdNextPage = null;
+    await release.promise;
+  }
+  const offset = Number(url.searchParams.get('$skiptoken') || 0);
+  let matches = [...data[name]];
+  const filter = url.searchParams.get('$filter');
+  if (filter?.includes("schemaname eq 'contoso_setting_2'")) matches = matches.filter((row) => row.schemaname === 'contoso_setting_2');
+  if (url.searchParams.get('$orderby').startsWith('schemaname desc')) matches.reverse();
+  const select = url.searchParams.get('$select').split(',');
+  const value = matches.slice(offset, offset + 100).map((row) => Object.fromEntries([...select, '@odata.etag'].map((key) => [key, row[key]])));
+  if (offset + 100 < matches.length) url.searchParams.set('$skiptoken', String(offset + 100));
+  return { value, '@odata.nextLink': offset + 100 < matches.length ? url.href : '' };
+} });
+
+const api = async (path, options = {}) => {
+  apiCalls.push({ path, ...options });
+  const [, name, action] = /^\/api\/tables\/([^/]+)\/data\/(.+)$/.exec(path);
+  if (action === 'schema') return service.schema(name);
+  if (action === 'query') return service.query(name, options.body);
+  if (options.method === 'PATCH') return service.update(name, action, options.body);
+  return service.record(name, action);
+};
+const viewer = createTableDataBrowser({ api, getContext: () => context, toast: () => {} });
+const $ = (selector) => document.querySelector(selector);
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+function idle() {
+  if ($('[data-grid]').getAttribute('aria-busy') === 'false') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { observer.disconnect(); reject(new Error('UI did not become idle')); }, 5000);
+    const observer = new MutationObserver(() => {
+      if ($('[data-grid]').getAttribute('aria-busy') === 'false') { clearTimeout(timeout); observer.disconnect(); resolve(); }
+    });
+    observer.observe($('[data-grid]'), { attributes: true });
+  });
+}
+async function click(selector) { $(selector).click(); await idle(); }
+function toggle(name) {
+  const checkbox = $(`[data-columns] input[value="${name}"]`);
+  checkbox.checked = !checkbox.checked;
+  checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+}
+const passed = [];
+const pass = (text) => { passed.push(text); $('#results').textContent = passed.join('\n'); };
+localStorage.removeItem(columnPreferenceKey(context, 'environmentvariablevalue'));
+try {
+  await viewer.open({ logicalName: 'environmentvariablevalue' });
+  assert($('[data-grid] tbody').children.length === 100, 'First page must contain 100 records');
+  assert(!window.xss && !$('[data-grid] img'), 'Values must be escaped');
+  pass('PASS · First page loads 100 records; HTML values are escaped');
+
+  let count = apiCalls.length;
+  toggle('value');
+  assert(apiCalls.length === count, 'Hiding must be local');
+  assert(![...document.querySelectorAll('[data-grid] th small')].some((node) => node.textContent === 'value'), 'Hidden header must disappear');
+  toggle('value');
+  assert(apiCalls.length === count && $('[data-grid]').textContent.includes('<img src=x'), 'Restoring a fetched column is local');
+  toggle('value');
+  await viewer.open({ logicalName: 'environmentvariablevalue' });
+  assert(!$('[data-columns] input[value="value"]').checked, 'Preference must be restored');
+  assert(!new URL(dvCalls.at(-1).path, context.orgUrl).searchParams.get('$select').split(',').includes('value'), 'Next load must omit hidden columns from select');
+  pass('PASS · Hide/show makes zero API calls; reopening restores and narrows selection');
+
+  toggle('value');
+  assert($('[data-grid]').textContent.includes('Not loaded'), 'Unfetched shown columns must be clearly identified');
+  await click('[data-apply]');
+  await click('[data-nav="next"]');
+  assert($('[data-page]').textContent.includes('Page 2'), 'Next must navigate to page 2');
+  await click('[data-nav="previous"]');
+  assert($('[data-page]').textContent.includes('Page 1'), 'Previous must navigate to page 1');
+  await click('[data-nav="last"]');
+  assert($('[data-page]').textContent.includes('Page 3') && $('[data-grid] tbody').children.length === 5, 'Last must reach final partial page');
+  await click('[data-nav="first"]');
+  assert($('[data-page]').textContent.includes('Page 1'), 'First must return to first page');
+  pass('PASS · Newly shown columns load on Apply; First/Previous/Next/Last work');
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await click('[data-nav="first"]');
+    let release;
+    holdNextPage = { promise: new Promise((resolve) => { release = resolve; }) };
+    $('[data-nav="last"]').click();
+    $('[data-cancel]').click();
+    release();
+    await idle();
+    assert($('[data-page]').textContent.includes('Page 2') && $('[data-status]').textContent.includes('Stopped'), 'Last must stop after in-flight request on every attempt');
+  }
+  pass('PASS · Last-page traversal is cancellable');
+
+  await click('[data-nav="first"]');
+  await click('[data-sort-column="schemaname"]');
+  await click('[data-sort-column="schemaname"]');
+  assert(new URL(dvCalls.at(-1).path, context.orgUrl).searchParams.get('$orderby').startsWith('schemaname desc'), 'Header sorting must query API');
+  await click('[data-clear-filters]');
+  await click('[data-add-filter]');
+  $('[data-filter-column]').value = 'schemaname';
+  $('[data-filter-value]').value = 'contoso_setting_2';
+  await click('[data-apply]');
+  assert($('[data-grid] tbody').children.length === 1 && new URL(dvCalls.at(-1).path, context.orgUrl).searchParams.get('$filter').includes("schemaname eq 'contoso_setting_2'"), 'Filter must query the whole dataset');
+  pass('PASS · Sort and filters use Dataverse query options, not page-local operations');
+
+  await click('[data-edit="0"]');
+  $('[data-value]').value = 'Edited from mock smoke test';
+  $('[data-editor]').requestSubmit();
+  await idle();
+  assert(data.environmentvariablevalue[1].value === 'Edited from mock smoke test', 'Value edit must be saved');
+  const editCall = dvCalls.findLast((call) => call.method === 'PATCH');
+  assert(Object.keys(editCall.body).join() === 'value' && editCall.headers['If-Match'] === 'W/"123"', 'Write must be narrow and versioned');
+  pass('PASS · Environment variable edits save only the value with a version check');
+
+  await viewer.open({ logicalName: 'workflow' });
+  assert(document.querySelectorAll('[data-flow]').length === 1 && $('[data-grid]').textContent.includes('Read-only process'), 'Only cloud flow definitions can be toggled');
+  await click('[data-flow="0"]');
+  $('[data-editor]').requestSubmit();
+  await idle();
+  assert(data.workflow[0].statecode === 1 && data.workflow[0].statuscode === 2, 'Turn on must update paired state/status');
+  pass('PASS · Flow confirmation toggles only cloud flow definitions');
+  viewer.close();
+  window.smokeResult = { passed: passed.length, failures: [] };
+} catch (error) {
+  $('#results').textContent += `\nFAIL · ${error.stack}`;
+  window.smokeResult = { passed: passed.length, failures: [error.message] };
+  console.error(error);
+}
+$('#open').addEventListener('click', () => viewer.open({ logicalName: 'environmentvariablevalue' }));
+</script>
+</body>
+</html>

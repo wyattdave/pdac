@@ -13,6 +13,7 @@
 import { Buffer, createHash, randomUUID } from './node-shims.js';
 import { AuthRequiredError, signInInteractive } from './auth.js';
 import { SolutionAccess } from './solution-access.js';
+import { createTableDataService, TableDataError } from './table-data-api.js';
 import { clearTokenCache, getAccessTokenForAccountId } from './tokens.js';
 import {
   getAccounts as storeGetAccounts,
@@ -942,6 +943,48 @@ async function handleApi(req, res) {
       columnScope: url.searchParams.get('columns') || 'custom',
     }));
     return;
+  }
+
+  const tableDataMatch = url.pathname.match(/^\/api\/tables\/([^/]+)\/data(?:\/(schema|query|[0-9a-fA-F-]+))?$/);
+  if (tableDataMatch) {
+    requireOrgUrl();
+    const orgUrl = selected.orgUrl;
+    const accountHomeId = selected.accountHomeId;
+    const service = createTableDataService({
+      orgUrl, accountHomeId,
+      request: async (method, path, body, headers = {}) => {
+        const response = await dvRequestUrl(method, `${orgUrl}/api/data/v9.2/${path}`, body, headers, orgUrl, accountHomeId);
+        return response.data;
+      },
+    });
+    const name = decodeURIComponent(tableDataMatch[1]);
+    const action = tableDataMatch[2];
+    if (req.method === 'GET' && action === 'schema') {
+      sendJson(res, 200, await service.schema(name));
+      return;
+    }
+    if (req.method === 'POST' || req.method === 'PATCH') {
+      const body = await readJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw new HttpError(400, 'A table data request body is required.');
+      }
+      if (body.orgUrl !== orgUrl || body.accountHomeId !== accountHomeId) {
+        throw new HttpError(409, 'The account or environment changed. Reopen the data browser.');
+      }
+      if (req.method === 'POST' && action === 'query') {
+        sendJson(res, 200, await service.query(name, body));
+        return;
+      }
+      if (req.method === 'PATCH' && action && action !== 'schema' && action !== 'query') {
+        sendJson(res, 200, await service.update(name, action, body));
+        return;
+      }
+    }
+    if (req.method === 'GET' && action && action !== 'schema' && action !== 'query') {
+      sendJson(res, 200, await service.record(name, action));
+      return;
+    }
+    throw new HttpError(405, 'Unsupported table data operation.');
   }
 
   const tableDetailMatch = url.pathname.match(/^\/api\/tables\/([^/]+)$/);
@@ -10121,7 +10164,7 @@ function cleanErrorMessage(message) {
 }
 
 function getStatus(error) {
-  return error instanceof HttpError ? error.status : 500;
+  return error instanceof HttpError || error instanceof TableDataError ? error.status : 500;
 }
 
 class HttpError extends Error {

@@ -279,7 +279,8 @@ test('late mapping preparation cannot apply mappings to a different target or pa
 });
 
 test('solution access route rejects stale environments and pins subsequent requests to the original account/environment', async () => {
-  const source = readFileSync(new URL('../src/server-core.js', import.meta.url), 'utf8');
+  for (const backend of ['../src/server-core.js', '../../server.mjs']) {
+  const source = readFileSync(new URL(backend, import.meta.url), 'utf8');
   const route = block(source, '  const solutionAccessMatch =', '  const solutionTableDocumentXlsxMatch =');
   for (const stale of [true, false]) {
     const calls = [];
@@ -310,6 +311,7 @@ test('solution access route rejects stale environments and pins subsequent reque
       assert.equal(calls.length, 2);
       assert.ok(calls.every((call) => call[4] === org && call[5] === 'original'));
     }
+  }
   }
 });
 

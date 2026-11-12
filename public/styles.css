@@ -204,6 +204,32 @@ footer a:hover {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.charts-totals:not([hidden]) {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 12px 0 18px;
+}
+
+.charts-total {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.charts-total span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.charts-total strong {
+  font-size: 22px;
+}
+
 .trend-controls {
   align-items: end;
   display: grid;
@@ -611,6 +637,33 @@ select {
 .environment-picker-option.selected {
   background: var(--soft);
   border-color: var(--soft-line);
+}
+
+.import-environment-combo .combo-panel {
+  width: 100%;
+}
+
+.import-environment-combo [role="option"] {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.import-environment-combo [role="option"].active,
+.import-environment-combo [aria-selected="true"] {
+  background: var(--soft);
+  border-color: var(--soft-line);
+}
+
+.solution-access-modal {
+  max-width: 820px;
+}
+
+.solution-access-results {
+  max-height: 280px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 13px;
 }
 
 .combo-panel .checkbox-list {
@@ -1709,6 +1762,40 @@ select:disabled {
   overflow: auto;
 }
 
+.principal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.role-group-heading {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 12px 0 4px;
+}
+
+.modal.chart-records-modal {
+  max-width: 1200px;
+  width: min(1200px, 94vw);
+}
+
+.chart-records-body {
+  max-height: 65vh;
+  overflow: auto;
+}
+
+.chart-records-body th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+.chart-records-body td {
+  overflow-wrap: anywhere;
+  white-space: normal;
+  max-width: 360px;
+}
+
 .role-assignment-row {
   min-height: 74px;
 }
@@ -2765,6 +2852,10 @@ select:disabled {
 }
 
 @media (max-width: 820px) {
+  .charts-totals:not([hidden]) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   header,
   .row,
   .actions,

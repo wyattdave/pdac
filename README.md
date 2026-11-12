@@ -106,7 +106,7 @@ The Reports tab provides two independent controls:
 - **Run daily reports in the background** generates each selected Excel report once per day and restores the completed files as download links.
 - **Enable trend data to be saved** writes report totals to local trend storage: IndexedDB in the Chrome extension and SQLite in the Node server.
 
-Monthly event and session reports use their timestamped rows to reconstruct any missing month-to-date snapshots without replacing snapshots already stored. Trend charts default to the current calendar month, and usage forecasts apply the observed pattern for each day of the week through month end. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
+Event, session, and flow-run reports use completed calendar days, excluding today's partial activity. They reconstruct cumulative daily snapshots from timestamped source rows and refresh matching account/environment/data-date snapshots without adding duplicates. Trend charts default to the current calendar month, and usage forecasts apply the observed pattern for each day of the week through month end. In Settings, **Use data date instead of run date** changes the chart date basis without changing totals; older rows without a source date use the day before the run date. For a report with **Auto download when ready** enabled, the browser downloads that day's cached files once, on the first UI load for that account and report.
 
 In the Reports tab, enable **Run daily reports in the background**, select environments, and optionally enable **Enable trend data to be saved**. The app checks immediately at startup and after a settings change, then every five minutes. Each due report is tracked independently, so successful reports are not repeated while a failed report is retried. A report is marked complete only after its Excel files are generated and, when enabled, its trend snapshot is committed. The Node web page does not need to be open while its server is running; the extension uses its background service worker.
 
@@ -145,13 +145,13 @@ The Settings tab can export, clear, and import local trend data. The combined ex
 6. Select a team, then add loaded enabled users as members.
 7. Select **Assign role** from a loaded user or team row, then search for and choose the security role in the popup.
 
-In the Chrome extension, **Current roles** opens a read-only list of directly assigned roles and their business units, including for disabled users. The assignment popup groups current roles above available roles. These lists do not include user roles inherited through team membership.
+In both versions, **Current roles** opens a read-only list of directly assigned roles and their business units, including for disabled users. The assignment popup groups current roles above available roles. These lists do not include user roles inherited through team membership.
 
 Adding a user uses the supported Power Platform admin force-sync pattern. The user must already exist in Microsoft Entra ID and must meet the environment requirements such as license, sign-in status, and environment security group membership.
 
 Role assignment uses the Dataverse user-role and team-role associations. When you choose a root role, PDAC assigns the matching inherited role copy for the selected user's or team's business unit.
 
-### Chrome extension chart records
+### Chart records (Node and extension)
 
 Double-click a bar in **Charts** or **Trends** to open a searchable, paginated record list for solutions, solution components, or agent sessions. Flow-run and AI-event charts are excluded. Solution records include version, publisher, management type, and IDs; component records include names, types, containing solutions, and IDs. Sessions show the agent, start time, and conversation ID without loading transcripts.
 
@@ -159,7 +159,7 @@ Chart tooltips show the section/environment name, not record lists. Charts with 
 
 New Solutions reports retain daily record inventories alongside the existing totals. Older trends may only have names or totals; the popup explicitly labels any fallback to the latest inventory. Session lists are retrieved from Dataverse for the selected period, so deleted or expired sessions may no longer be available.
 
-### Chrome extension solution access
+### Solution access (Node and extension)
 
 Select a solution in **Solutions**, then choose **Share components** or **Change component owner**. Enter a user's email or an exact team name. Sharing defaults to `ReadAccess,WriteAccess,AppendAccess,AppendToAccess,ShareAccess`; ownership changes require an enabled user or an owner-capable team. These actions apply to the whole solution's compatible components, not to individually selected components or the solution record itself.
 
@@ -169,7 +169,7 @@ All discovery finishes before changes start. The result reports successful updat
 
 On **Imports**, the target environment is a searchable combobox: filter by name, ID or URL, then click a match or use the arrow keys and Enter. Escape dismisses the list. Changing the selected target invalidates prepared mappings.
 
-Run extension regressions with `node --test chrome-ext/testing/*.test.mjs`.
+Run all Node and extension regressions with `npm test`. See [Platform parity](docs/platform-parity.md) for the feature audit, platform-specific differences, and synchronization workflow.
 
 ## Connections
 
@@ -225,6 +225,14 @@ The export action calls the Dataverse `ExportSolution` unbound action.
 5. Click **Create diagram** to open a full-screen Mermaid ER diagram for the selected table and directly related tables through lookup relationships.
 6. Use the diagram toolbar to zoom, download SVG or PNG, copy Mermaid, or close the popup.
 7. Click **Create table** to open a table-design document, then export it to Excel.
+
+Click **Open data** on a selected table to browse records in pages of 100. **First**, **Previous**, **Next**, and **Last** navigate the results. Dataverse uses continuation links, so **Last** follows successive 100-row API pages; **Stop at this page** stops after the current request. Only the current page's rows are kept in the viewer.
+
+**Filter & sort at the API** supports multiple AND filters and a sort column/direction; click **Apply query** or a column heading to query Dataverse, not just the visible page. Choice filters use their numeric values, lookup filters use GUIDs, and dates use ISO format. All readable scalar columns are available independently of the metadata view's Custom/All column setting.
+
+**Show / hide columns** changes visibility locally without making API calls. Column names (not record values) are saved in this browser per table and environment and restored when reopening a table. The next open or **Apply query** requests only those columns, plus the record ID and required flow-control fields. Newly shown columns that were not loaded display a prompt to apply the query. Paging and refreshing keep the active API selection until the query is reapplied.
+
+In **Environment Variable Value** (`environmentvariablevalue`), use **Edit value** to update an existing value, including an empty string or null. In **Process / Workflow** (`workflow`), cloud flow definitions have **Turn on / Turn off** actions with confirmation; other process records remain read-only. Writes use your selected account's Dataverse permissions and atomic record-version checks where supported. For tables without optimistic concurrency, the editor warns that PDAC can only recheck the record before saving, not detect updates during the save. A successful write reloads the first page because the changed row may move under the active filter/sort.
 
 Diagrams and table-design documents show custom columns plus the primary name/name column, `createdby`, and `createdon`. The `createdby` relationship to `systemuser` or `team` is intentionally not drawn.
 

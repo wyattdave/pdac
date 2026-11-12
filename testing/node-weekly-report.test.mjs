@@ -68,6 +68,17 @@ test('Node server exposes weekly reporting and creates both durable SQLite table
     assert.equal(moduleResponse.status, 200);
     assert.match(await moduleResponse.text(), /export function buildStandaloneWeeklyReportHtml/);
 
+    // The local host serves the same portable data-browser assets as the extension.
+    const dataModule = await fetch(`${baseUrl}/table-data.js`);
+    assert.equal(dataModule.status, 200);
+    assert.match(dataModule.headers.get('content-type'), /javascript/);
+    assert.match(await dataModule.text(), /export function createTableDataBrowser/);
+    const dataStyles = await fetch(`${baseUrl}/table-data.css`);
+    assert.equal(dataStyles.status, 200);
+    assert.match(dataStyles.headers.get('content-type'), /css/);
+    assert.match(await dataStyles.text(), /\.table-data-modal/);
+    assert.equal((await fetch(`${baseUrl}/table-data-api.js`)).status, 404, 'backend helper is not a public asset');
+
     const db = new DatabaseSync(path.join(dataDirectory, 'report-trends.sqlite'));
     try {
       const tables = db.prepare(`

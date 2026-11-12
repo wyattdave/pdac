@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import test from 'node:test';
+import baseTest from 'node:test';
 import vm from 'node:vm';
-import { historyDateRange } from '../src/weekly-report.js';
+import { historyDateRange as extensionHistoryDateRange } from '../src/weekly-report.js';
+import { historyDateRange as nodeHistoryDateRange } from '../../public/weekly-report.js';
 
-const source = readFileSync(new URL('../src/server-core.js', import.meta.url), 'utf8');
-const html = readFileSync(new URL('../app.html', import.meta.url), 'utf8');
-const appSource = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+for (const platform of ['extension', 'node']) {
+const test = (name, action) => baseTest(`${platform}: ${name}`, action);
+const source = readFileSync(new URL(platform === 'node' ? '../../server.mjs' : '../src/server-core.js', import.meta.url), 'utf8');
+const html = readFileSync(new URL(platform === 'node' ? '../../public/index.html' : '../app.html', import.meta.url), 'utf8');
+const appSource = readFileSync(new URL(platform === 'node' ? '../../public/app.js' : '../app.js', import.meta.url), 'utf8');
+const historyDateRange = platform === 'node' ? nodeHistoryDateRange : extensionHistoryDateRange;
 const presets = ['previous-month', '2x-previous-month', '3-calendar-months'];
 
 function fixture(year, month, day) {
@@ -65,7 +69,7 @@ for (const { today, dates } of cases) {
   });
 }
 
-test('every extension date-range selector offers each new preset exactly once', () => {
+test('every date-range selector offers each new preset exactly once', () => {
   const selectors = [...html.matchAll(/<select id="([^"]*Range)">([\s\S]*?)<\/select>/g)];
   assert.equal(selectors.length, 7);
   for (const [, id, options] of selectors) {
@@ -218,3 +222,4 @@ test('existing current-month, rolling-day and weekly history presets are unchang
   assert.equal(history.start, '2026-08-06');
   assert.equal(history.end, '2026-11-06');
 });
+}

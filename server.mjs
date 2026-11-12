@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
+import { createTableDataService, TableDataError } from './chrome-ext/src/table-data-api.js';
+import { SolutionAccess } from './chrome-ext/src/solution-access.js';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFile, cp, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
@@ -926,6 +928,24 @@ async function handleApi(req, res) {
     return;
   }
 
+  if (route === 'GET /api/report-trends/date-mode') {
+    sendJson(res, 200, await reportTrendDateModeStatus());
+    return;
+  }
+
+  if (route === 'PUT /api/report-trends/date-mode') {
+    const body = await readJson(req);
+    sendJson(res, 200, await setReportTrendDateMode(body.useRecordDate === true));
+    return;
+  }
+
+  if (route === 'POST /api/report-chart-records') {
+    const body = await readJson(req);
+    await applyAccountHomeId(body.accountHomeId || '');
+    sendJson(res, 200, await listReportChartRecords(body));
+    return;
+  }
+
   if (route === 'GET /api/sql-tables') {
     sendJson(res, 200, await listSqlTables());
     return;
@@ -1008,6 +1028,48 @@ async function handleApi(req, res) {
     return;
   }
 
+  const tableDataMatch = url.pathname.match(/^\/api\/tables\/([^/]+)\/data(?:\/(schema|query|[0-9a-fA-F-]+))?$/);
+  if (tableDataMatch) {
+    requireOrgUrl();
+    const orgUrl = selected.orgUrl;
+    const accountHomeId = selected.accountHomeId;
+    const service = createTableDataService({
+      orgUrl, accountHomeId,
+      request: async (method, path, body, headers = {}) => {
+        const response = await dvRequestUrl(method, `${orgUrl}/api/data/v9.2/${path}`, body, headers, orgUrl, accountHomeId);
+        return response.data;
+      },
+    });
+    const name = decodeURIComponent(tableDataMatch[1]);
+    const action = tableDataMatch[2];
+    if (req.method === 'GET' && action === 'schema') {
+      sendJson(res, 200, await service.schema(name));
+      return;
+    }
+    if (req.method === 'POST' || req.method === 'PATCH') {
+      const body = await readJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw new HttpError(400, 'A table data request body is required.');
+      }
+      if (body.orgUrl !== orgUrl || body.accountHomeId !== accountHomeId) {
+        throw new HttpError(409, 'The account or environment changed. Reopen the data browser.');
+      }
+      if (req.method === 'POST' && action === 'query') {
+        sendJson(res, 200, await service.query(name, body));
+        return;
+      }
+      if (req.method === 'PATCH' && action && action !== 'schema' && action !== 'query') {
+        sendJson(res, 200, await service.update(name, action, body));
+        return;
+      }
+    }
+    if (req.method === 'GET' && action && action !== 'schema' && action !== 'query') {
+      sendJson(res, 200, await service.record(name, action));
+      return;
+    }
+    throw new HttpError(405, 'Unsupported table data operation.');
+  }
+
   const tableDetailMatch = url.pathname.match(/^\/api\/tables\/([^/]+)$/);
   if (req.method === 'GET' && tableDetailMatch) {
     requireOrgUrl();
@@ -1030,6 +1092,23 @@ async function handleApi(req, res) {
   if (req.method === 'GET' && componentsMatch) {
     requireOrgUrl();
     sendJson(res, 200, await listSolutionComponents(componentsMatch[1]));
+    return;
+  }
+
+  const solutionAccessMatch = url.pathname.match(/^\/api\/solutions\/([0-9a-fA-F-]+)\/access$/);
+  if (req.method === 'POST' && solutionAccessMatch) {
+    requireOrgUrl();
+    const body = await readJson(req);
+    const orgUrl = selected.orgUrl;
+    const accountHomeId = selected.accountHomeId;
+    if (normalizeOrgUrl(body.orgUrl) !== normalizeOrgUrl(orgUrl) || body.accountHomeId !== accountHomeId) {
+      throw new HttpError(409, 'The account or environment changed. Reopen the solution access dialog.');
+    }
+    const access = new SolutionAccess(orgUrl, async (target, method, payload) => {
+      const response = await dvRequestUrl(method, target, payload, {}, orgUrl, accountHomeId);
+      return response.data;
+    });
+    sendJson(res, 200, await access.run({ ...body, solutionId: solutionAccessMatch[1] }));
     return;
   }
 
@@ -1226,6 +1305,9 @@ async function getTablePermissionsExport(role) {
       row[`${label} Available Scopes`] = privilege ? availableScopes(privilege) : '';
     }
 
+    row['No Permission'] = TABLE_PERMISSION_COLUMNS.every(([, label]) =>
+      row[label] === 'None' || row[label] === 'N/A');
+
     return row;
   });
 
@@ -1236,6 +1318,7 @@ async function getTablePermissionsExport(role) {
     'Name',
     'Record owner',
     'Permission type',
+    'No Permission',
     ...TABLE_PERMISSION_COLUMNS.map(([, label]) => label),
     ...TABLE_PERMISSION_COLUMNS.flatMap(([, label]) => [
       `${label} Privilege Name`,
@@ -3658,12 +3741,13 @@ async function listAssignedSecurityRoles(body) {
   }
   const collection = principalType === 'systemuser' ? 'systemusers' : 'teams';
   const association = principalType === 'systemuser' ? 'systemuserroles_association' : 'teamroles_association';
-  const data = await dvGet(`${collection}(${principalId})/${association}?$select=roleid,name,_businessunitid_value,_parentrootroleid_value`);
-  return (data.value || []).map((role) => ({
+  const data = await dvGetAll(`${collection}(${principalId})/${association}?$select=roleid,name,_businessunitid_value,_parentrootroleid_value&$expand=businessunitid($select=name)`);
+  return data.map((role) => ({
     roleid: normalizeGuid(role.roleid),
     rootRoleId: normalizeGuid(role._parentrootroleid_value) || normalizeGuid(role.roleid),
     name: role.name || '',
     businessUnitId: normalizeGuid(role._businessunitid_value),
+    businessUnitName: role.businessunitid?.name || '',
   }));
 }
 
@@ -5287,6 +5371,7 @@ async function getOrBuildCachedAutomatedReport(group, reportType, body = {}) {
   const reportSchemaVersion = group === 'solutions' ? 4 : 1;
   const cacheKey = reportCacheKey('automated', {
     version: reportSchemaVersion,
+    ...(group !== 'solutions' ? { dateMode: 'data-date-v3' } : {}),
     accountHomeId: reportCacheAccountId(body),
     group,
     reportType,
@@ -6112,6 +6197,11 @@ async function getReportTrendDb() {
       }
       ensureWeeklyReportTables(db);
       ensureSolutionComponentNamesTable(db);
+      db.exec(`CREATE TABLE IF NOT EXISTS report_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+      const hasHistory = Object.values(REPORT_TOTAL_TABLE_DEFINITIONS).some((definition) =>
+        db.prepare(`SELECT 1 FROM ${quoteSqlIdentifier(definition.tableName)} LIMIT 1`).get());
+      db.prepare('INSERT OR IGNORE INTO report_settings (key, value) VALUES (?, ?)')
+        .run('useRecordDate', hasHistory ? 'false' : 'true');
       return db;
     })();
   }
@@ -6127,6 +6217,7 @@ function ensureReportTotalTable(db, definition) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       account_home_id TEXT NOT NULL DEFAULT '',
       date_ran TEXT NOT NULL,
+      data_date TEXT NOT NULL DEFAULT '',
       collected_at TEXT NOT NULL,
       range_key TEXT NOT NULL DEFAULT '',
       range_label TEXT NOT NULL DEFAULT '',
@@ -6135,6 +6226,10 @@ function ensureReportTotalTable(db, definition) {
     CREATE INDEX IF NOT EXISTS ${quoteSqlIdentifier(`idx_${definition.tableName}_lookup`)}
       ON ${quoteSqlIdentifier(definition.tableName)}(account_home_id, date_ran, collected_at);
   `);
+  const columns = new Set(getSqlTableColumns(db, definition.tableName));
+  if (!columns.has('data_date')) {
+    db.exec(`ALTER TABLE ${quoteSqlIdentifier(definition.tableName)} ADD COLUMN data_date TEXT NOT NULL DEFAULT ''`);
+  }
 }
 
 function ensureWeeklyReportTables(db) {
@@ -6369,6 +6464,102 @@ async function enqueueReportTrendWrite(action) {
   return run;
 }
 
+// Storage adapters for the business logic shared with the IndexedDB runtime.
+async function trendSelectRows(table) {
+  if (table !== SOLUTION_COMPONENT_NAMES_TABLE && !reportTotalTableDefinitionByName(table)) {
+    throw new HttpError(404, 'Trend table not found.');
+  }
+  const db = await getReportTrendDb();
+  return db.prepare(`SELECT * FROM ${quoteSqlIdentifier(table)}`).all().map((row) => ({ ...row, table }));
+}
+
+async function reportTrendUseRecordDate() {
+  const db = await getReportTrendDb();
+  return db.prepare('SELECT value FROM report_settings WHERE key = ?').get('useRecordDate')?.value === 'true';
+}
+
+function populateReportTrendDataDatesInTransaction(db) {
+  let updatedRows = 0;
+  for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
+    const table = quoteSqlIdentifier(definition.tableName);
+    const update = db.prepare(`UPDATE ${table} SET date_ran = ?, data_date = ? WHERE id = ?`);
+    for (const row of db.prepare(`SELECT * FROM ${table}`).all()) {
+      const runDate = reportTrendRunDate(row);
+      const dataDate = reportTrendDataDate(row);
+      if (row.date_ran === runDate && row.data_date === dataDate) continue;
+      update.run(runDate, dataDate, row.id);
+      updatedRows += 1;
+    }
+  }
+  return updatedRows;
+}
+
+async function populateReportTrendDataDates() {
+  return enqueueReportTrendWrite(async () => {
+    const db = await getReportTrendDb();
+    db.exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      const updatedRows = populateReportTrendDataDatesInTransaction(db);
+      db.exec('COMMIT');
+      return updatedRows;
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  });
+}
+
+function reportTrendRunDate(row) {
+  return isDateOnlyString(row.run_date) ? row.run_date : row.date_ran;
+}
+
+function reportTrendDataDate(row) {
+  if (isDateOnlyString(row.data_date)) return row.data_date;
+  const runDate = reportTrendRunDate(row);
+  return isDateOnlyString(runDate)
+    ? toDateOnlyString(addDays(parseDateOnly(runDate, 'run date'), -1))
+    : '';
+}
+
+async function reportTrendDateModeStatus() {
+  await populateReportTrendDataDates();
+  const useRecordDate = await reportTrendUseRecordDate();
+  return { useRecordDate };
+}
+
+function completedTrendRange(range, today = new Date()) {
+  const end = addDays(atStartOfDay(today), -1);
+  if (range.range === 'custom') {
+    return makeAiEventRange('custom', range.start, new Date(Math.min(range.endExclusive.getTime(), atStartOfDay(today).getTime())));
+  }
+  const days = { today: 1, '7d': 7, '28d': 28, '365d': 365 }[range.range];
+  if (days) {
+    return makeAiEventRange(range.range, addDays(end, 1 - days), addDays(end, 1));
+  }
+  if (range.range === 'month') {
+    return makeAiEventRange(range.range, new Date(end.getFullYear(), end.getMonth(), 1), addDays(end, 1));
+  }
+  return makeAiEventRange(range.range, range.start,
+    new Date(Math.min(range.endExclusive.getTime(), atStartOfDay(today).getTime())));
+}
+
+async function setReportTrendDateMode(useRecordDate) {
+  return enqueueReportTrendWrite(async () => {
+    const db = await getReportTrendDb();
+    db.exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      const updatedRows = populateReportTrendDataDatesInTransaction(db);
+      db.prepare('INSERT OR REPLACE INTO report_settings (key, value) VALUES (?, ?)')
+        .run('useRecordDate', String(useRecordDate));
+      db.exec('COMMIT');
+      return { useRecordDate, updatedRows };
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  });
+}
+
 async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, dateRange = null, sourceGroups = [], solutionOptions = null }) {
   const definition = reportTotalTableDefinition(group);
   if (!definition) {
@@ -6378,6 +6569,7 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
   if (!totalRows.length) {
     return;
   }
+  await populateReportTrendDataDates();
   const collectedAt = new Date().toISOString();
   const dateRan = reportCacheDateKey();
   const rangeKey = dateRange ? `${dateRange.range || 'custom'}:${dateRange.startDate || ''}:${dateRange.endDate || ''}` : 'snapshot';
@@ -6390,8 +6582,8 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
   });
   const buildSolutionBackfillRows = buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOptions });
   const columns = definition.columns.map(([, key]) => key);
-  const placeholders = ['?', '?', '?', '?', '?', ...columns.map(() => '?')].join(', ');
-  const insertColumns = ['account_home_id', 'date_ran', 'collected_at', 'range_key', 'range_label', ...columns]
+  const placeholders = ['?', '?', '?', '?', '?', '?', ...columns.map(() => '?')].join(', ');
+  const insertColumns = ['account_home_id', 'date_ran', 'data_date', 'collected_at', 'range_key', 'range_label', ...columns]
     .map(quoteSqlIdentifier)
     .join(', ');
   const normalizedAccountHomeId = String(accountHomeId || '').trim();
@@ -6400,6 +6592,24 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
     const insert = db.prepare(`INSERT INTO ${quoteSqlIdentifier(definition.tableName)} (${insertColumns}) VALUES (${placeholders})`);
     try {
       db.exec('BEGIN TRANSACTION');
+      if (group !== 'solutions') {
+        const snapshots = buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan, useLocalDate: true });
+        const remove = db.prepare(`DELETE FROM ${quoteSqlIdentifier(definition.tableName)}
+          WHERE account_home_id = ? AND data_date = ? AND
+          COALESCE(NULLIF(environment_id, ''), NULLIF(environment_url, ''), environment_display_name) = ?`);
+        for (const snapshot of snapshots) {
+          const runDate = toDateOnlyString(addDays(parseDateOnly(snapshot.dateRan, 'snapshot'), 1));
+          for (const row of snapshot.rows) {
+            remove.run(normalizedAccountHomeId, snapshot.dateRan, reportTrendEnvironmentKey(row));
+            insert.run(normalizedAccountHomeId, runDate, snapshot.dateRan, collectedAt, rangeKey, rangeLabel,
+              ...definition.columns.map(([header, , type]) => sqlReportTotalValue(row[header], type)));
+          }
+        }
+        db.prepare(`DELETE FROM ${quoteSqlIdentifier(definition.tableName)} WHERE date_ran < ?`)
+          .run(reportTrendRetentionCutoffDate());
+        db.exec('COMMIT');
+        return;
+      }
       const missingDaySnapshots = [...backfillSnapshots];
       if (buildSolutionBackfillRows && isDateOnlyString(dateRan)) {
         // Solutions are a point-in-time inventory with no date range, so any
@@ -6444,6 +6654,7 @@ async function saveAutomatedReportTrendSnapshot({ accountHomeId, group, rows, da
           insert.run(
             normalizedAccountHomeId,
             snapshotDate,
+            reportTrendDataDate({ date_ran: snapshotDate }),
             collectedAt,
             rangeKey,
             rangeLabel,
@@ -6489,7 +6700,13 @@ function ensureSolutionComponentNamesTable(db) {
     CREATE INDEX IF NOT EXISTS idx_report_solution_component_names_account
       ON report_solution_component_names(account_home_id);
   `);
+  const columns = new Set(getSqlTableColumns(db, 'report_solution_component_names'));
+  for (const [name, fallback] of [['date_ran', "''"], ['component_records', "'null'"]]) {
+    if (!columns.has(name)) db.exec(`ALTER TABLE report_solution_component_names ADD COLUMN ${name} TEXT NOT NULL DEFAULT ${fallback}`);
+  }
 }
+
+const SOLUTION_COMPONENT_NAMES_TABLE = 'report_solution_component_names';
 
 function saveSolutionComponentNameSnapshots(db, accountHomeId, sourceGroups, collectedAt) {
   const groups = (Array.isArray(sourceGroups) ? sourceGroups : [])
@@ -6499,34 +6716,80 @@ function saveSolutionComponentNameSnapshots(db, accountHomeId, sourceGroups, col
   }
   const upsert = db.prepare(`
     INSERT OR REPLACE INTO report_solution_component_names (
-      environment_key, account_home_id, environment_id, environment_display_name, environment_url, collected_at, component_names
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      environment_key, account_home_id, environment_id, environment_display_name, environment_url, collected_at, component_names, date_ran, component_records
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  for (const { environment, componentNames } of groups) {
+  const dateRan = reportCacheDateKey(new Date(collectedAt));
+  const remove = db.prepare(`DELETE FROM report_solution_component_names WHERE account_home_id = ?
+    AND environment_id = ? AND COALESCE(NULLIF(date_ran, ''), substr(collected_at, 1, 10)) = ?`);
+  for (const { environment, componentNames, componentRecords } of groups) {
     const environmentId = String(environment.environmentId || '');
+    remove.run(accountHomeId, environmentId, dateRan);
     upsert.run(
-      `${accountHomeId}:${environmentId}`,
+      JSON.stringify([accountHomeId, environmentId, dateRan]),
       accountHomeId,
       environmentId,
       String(environment.displayName || ''),
       String(environment.orgUrl || ''),
       collectedAt,
       JSON.stringify(componentNames),
+      dateRan,
+      JSON.stringify(componentRecords || null),
     );
   }
+  db.prepare(`DELETE FROM report_solution_component_names
+    WHERE COALESCE(NULLIF(date_ran, ''), substr(collected_at, 1, 10)) < ?`).run(reportTrendRetentionCutoffDate());
+}
+
+async function listReportChartRecords(body = {}) {
+  const kinds = ['solutions', 'flows', 'canvasApps', 'codeApps', 'modelDrivenApps', 'agents', 'tables', 'aiModels', 'dataflows', 'sessions'];
+  if (!kinds.includes(body.kind)) throw new HttpError(400, 'This chart does not support record drilldown.');
+  const accountHomeId = String(body.accountHomeId || selected.accountHomeId || '').trim();
+  const environment = normalizeAutomatedReportEnvironments([body.environment || {}])[0];
+  if (!environment) throw new HttpError(400, 'The chart environment is missing.');
+  if (body.kind === 'sessions') {
+    const dateRange = getAgentSessionDateRange({ range: 'custom', start: body.start, end: body.end });
+    const groups = await collectAutomatedAgentSessionRows([environment], dateRange, accountHomeId);
+    return {
+      rows: groups[0]?.rows || [],
+      note: `Sessions from ${dateRange.startDate} to ${dateRange.endDate}. Retrieved from Dataverse now; deleted or expired sessions may no longer be available. Transcripts are not loaded.`,
+    };
+  }
+  const snapshots = (await trendSelectRows(SOLUTION_COMPONENT_NAMES_TABLE))
+    .filter((row) => row.account_home_id === accountHomeId && (
+      String(row.environment_id || '').toLowerCase() === String(environment.environmentId || '').toLowerCase()
+      || String(row.environment_url || '').toLowerCase() === String(environment.orgUrl || '').toLowerCase()))
+    .sort((a, b) => String(b.collected_at || '').localeCompare(String(a.collected_at || '')));
+  const snapshot = snapshots.find((row) => row.collected_at === body.collectedAt)
+    || snapshots.find((row) => (row.date_ran || String(row.collected_at || '').slice(0, 10)) === body.dateRan)
+    || snapshots[0];
+  if (!snapshot) return { rows: [], note: 'No saved record inventory is available. Run a Solutions report with trend saving enabled to collect it.' };
+  const records = JSON.parse(snapshot.component_records || 'null');
+  const names = JSON.parse(snapshot.component_names || '{}');
+  const rows = records?.[body.kind] || (names[body.kind] || []).map((name) => ({ name }));
+  const snapshotDate = snapshot.date_ran || String(snapshot.collected_at || '').slice(0, 10);
+  const exact = snapshot.collected_at === body.collectedAt || snapshotDate === body.dateRan;
+  return {
+    rows,
+    note: `${exact ? 'Saved inventory' : 'Historical record details are unavailable; showing the latest saved inventory'} (${snapshot.collected_at}).${records ? '' : ' This older inventory contains names only. Run a new Solutions report to collect record details.'}`,
+  };
 }
 
 async function readSolutionComponentNames(accountHomeId) {
-  const db = await getReportTrendDb();
+  const latest = new Map();
+  for (const row of await trendSelectRows(SOLUTION_COMPONENT_NAMES_TABLE)) {
+    if (row.account_home_id !== accountHomeId) continue;
+    const environmentId = String(row.environment_id || '');
+    const existing = latest.get(environmentId);
+    if (existing && String(existing.collected_at || '') > String(row.collected_at || '')) continue;
+    latest.set(environmentId, row);
+  }
   const names = {};
-  const rows = db.prepare(
-    'SELECT environment_id, environment_display_name, environment_url, component_names FROM report_solution_component_names WHERE account_home_id = ?',
-  ).all(String(accountHomeId || '').trim());
-  for (const row of rows) {
+  for (const [environmentId, row] of latest) {
     try {
       const parsed = JSON.parse(row.component_names || '');
       if (parsed && typeof parsed === 'object') {
-        for (const key of [row.environment_id, row.environment_url, row.environment_display_name]) {
+        for (const key of [environmentId, row.environment_url, row.environment_display_name]) {
           if (String(key || '').trim()) names[String(key).trim()] = parsed;
         }
       }
@@ -6537,7 +6800,7 @@ async function readSolutionComponentNames(accountHomeId) {
   return names;
 }
 
-function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan }) {
+function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateRange, dateRan, useLocalDate = false }) {
   const totalsBuilder = {
     'ai-events': buildAutomatedAiEventTotalsRows,
     'agent-sessions': buildAutomatedAgentSessionTotalsRows,
@@ -6554,7 +6817,7 @@ function buildAutomatedReportTrendBackfillSnapshots({ group, sourceGroups, dateR
   const timestampedGroups = groups.map(({ environment, rows }) => ({
     environment,
     rows: (Array.isArray(rows) ? rows : [])
-      .map((row) => ({ row, date: reportSourceRowDate(group, row) }))
+      .map((row) => ({ row, date: reportSourceRowDate(group, row, useLocalDate) }))
       .filter((item) => item.date && item.date >= startDate && item.date <= dateRan),
   }));
   const snapshots = [];
@@ -6597,7 +6860,7 @@ function buildSolutionTrendBackfillRowsBuilder({ group, sourceGroups, solutionOp
   })), solutionOptions);
 }
 
-function reportSourceRowDate(group, row = {}) {
+function reportSourceRowDate(group, row = {}, useLocalDate = false) {
   const value = group === 'ai-events'
     ? row.createdOnRaw || row.createdOn
     : group === 'agent-sessions'
@@ -6606,6 +6869,10 @@ function reportSourceRowDate(group, row = {}) {
         ? row.createdon
         : row.startTimeRaw || row.startTimeDisplay;
   const text = String(value || '').trim();
+  if (useLocalDate && text.length > 10) {
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? '' : reportCacheDateKey(parsed);
+  }
   const dateOnly = text.match(/^(\d{4}-\d{2}-\d{2})/)?.[1] || '';
   if (dateOnly) {
     return isDateOnlyString(dateOnly) ? dateOnly : '';
@@ -6626,9 +6893,9 @@ function isDateOnlyString(value) {
 }
 
 function reportTrendEnvironmentKey(row = {}) {
-  return String(row['Environment id'] ?? row.environment_id ?? '').trim()
-    || String(row['Environment url'] ?? row.environment_url ?? '').trim()
-    || String(row['Environment display name'] ?? row.environment_display_name ?? '').trim();
+  return String(row['Environment id'] ?? row.environment_id ?? row.environmentId ?? '').trim()
+    || String(row['Environment url'] ?? row.environment_url ?? row.environmentUrl ?? '').trim()
+    || String(row['Environment display name'] ?? row.environment_display_name ?? row.environmentDisplayName ?? '').trim();
 }
 
 function sqlReportTotalValue(value, type) {
@@ -6644,57 +6911,65 @@ function reportTotalTableDefinition(group) {
 }
 
 async function listReportTrendSnapshots(filters = {}) {
+  await populateReportTrendDataDates();
+  const useRecordDate = await reportTrendUseRecordDate();
   const dateRange = getReportTrendDateRange(filters);
-  const db = await getReportTrendDb();
   const accountHomeId = String(filters.accountHomeId || '').trim();
   const tables = [];
   for (const definition of Object.values(REPORT_TOTAL_TABLE_DEFINITIONS)) {
-    const result = filters.latestOnly ? db.prepare(`
-      WITH ranked AS (
-        SELECT *, ROW_NUMBER() OVER (
-          PARTITION BY COALESCE(
-            NULLIF(environment_id, ''),
-            NULLIF(environment_url, ''),
-            NULLIF(environment_display_name, ''),
-            CAST(id AS TEXT)
-          )
-          ORDER BY collected_at DESC, date_ran DESC, id DESC
-        ) AS snapshot_rank
-        FROM ${quoteSqlIdentifier(definition.tableName)}
-        WHERE account_home_id = ?
-          AND date_ran >= ?
-          AND date_ran <= ?
-      )
-      SELECT * FROM ranked
-      WHERE snapshot_rank = 1
-      ORDER BY collected_at, id
-    `).all(
-      accountHomeId,
-      dateRange.startDate,
-      dateRange.endDate,
-    ) : db.prepare(`
-      SELECT *
-      FROM ${quoteSqlIdentifier(definition.tableName)}
-      WHERE account_home_id = ?
-        AND date_ran >= ?
-        AND date_ran <= ?
-      ORDER BY collected_at, id
-    `).all(
-      accountHomeId,
-      dateRange.startDate,
-      dateRange.endDate,
-    );
+    const reportDate = (row) => useRecordDate ? reportTrendDataDate(row) : reportTrendRunDate(row);
+    const result = (await trendSelectRows(definition.tableName))
+      .filter((row) =>
+        row.account_home_id === accountHomeId
+        && reportDate(row) <= dateRange.endDate
+        && (!useRecordDate || definition.reportKey === 'solutions' || reportDate(row) < reportCacheDateKey()))
+      .sort((left, right) =>
+        String(left.collected_at || '').localeCompare(String(right.collected_at || ''))
+        || Number(left.id || 0) - Number(right.id || 0));
     const latestRows = new Map();
     for (const row of result) {
       const environmentKey = String(row.environment_id || '').trim()
         || String(row.environment_url || '').trim()
         || String(row.environment_display_name || '').trim()
         || String(row.id);
-      latestRows.set(`${row.date_ran}:${environmentKey}`, row);
+      latestRows.set(`${reportDate(row)}:${environmentKey}`, row);
     }
-    const rows = [...latestRows.values()].map((row) => ({
+    const baselineStartDate = `${dateRange.startDate.slice(0, 7)}-01`;
+    const previousByEnvironment = new Map();
+    const baselineRows = [];
+    let selectedRows = [];
+    for (const row of latestRows.values()) {
+      const date = reportDate(row);
+      if (date >= dateRange.startDate) {
+        selectedRows.push(row);
+      } else if (date >= baselineStartDate) {
+        baselineRows.push(row);
+      } else {
+        const environmentKey = reportTrendEnvironmentKey(row) || String(row.id);
+        const previous = previousByEnvironment.get(environmentKey);
+        if (!previous || date > reportDate(previous)) previousByEnvironment.set(environmentKey, row);
+      }
+    }
+    baselineRows.push(...previousByEnvironment.values());
+    if (filters.latestOnly) {
+      const latestByEnvironment = new Map();
+      for (const row of selectedRows) {
+        const environmentKey = String(row.environment_id || '').trim()
+          || String(row.environment_url || '').trim()
+          || String(row.environment_display_name || '').trim()
+          || String(row.id);
+        const existing = latestByEnvironment.get(environmentKey);
+        if (!existing || `${row.collected_at}:${row.date_ran}:${row.id}` > `${existing.collected_at}:${existing.date_ran}:${existing.id}`) {
+          latestByEnvironment.set(environmentKey, row);
+        }
+      }
+      selectedRows = [...latestByEnvironment.values()];
+    }
+    const toReportRow = (row) => ({
       id: row.id,
-      dateRan: row.date_ran,
+      dateRan: reportTrendRunDate(row),
+      dataDate: reportTrendDataDate(row),
+      reportDate: reportDate(row),
       collectedAt: row.collected_at,
       rangeKey: row.range_key,
       rangeLabel: row.range_label,
@@ -6702,8 +6977,9 @@ async function listReportTrendSnapshots(filters = {}) {
         key,
         type === 'REAL' ? Number(row[key] || 0) : String(row[key] ?? ''),
       ])),
-    })).sort((left, right) => `${left.dateRan}:${left.values.environment_display_name || ''}`
-      .localeCompare(`${right.dateRan}:${right.values.environment_display_name || ''}`));
+    });
+    const rows = selectedRows.map(toReportRow).sort((left, right) => `${left.reportDate}:${left.values.environment_display_name || ''}`
+      .localeCompare(`${right.reportDate}:${right.values.environment_display_name || ''}`));
     tables.push({
       tableName: definition.tableName,
       reportKey: definition.reportKey,
@@ -6715,9 +6991,11 @@ async function listReportTrendSnapshots(filters = {}) {
         numeric: type === 'REAL',
       })),
       rows,
+      baselineRows: baselineRows.map(toReportRow),
     });
   }
   return {
+    useRecordDate,
     range: {
       range: dateRange.range,
       startDate: dateRange.startDate,
@@ -6731,6 +7009,8 @@ async function listReportTrendSnapshots(filters = {}) {
       reportKey: table.reportKey,
       reportLabel: table.reportLabel,
       dateRan: row.dateRan,
+      dataDate: row.dataDate,
+      reportDate: row.reportDate,
       collectedAt: row.collectedAt,
     }))),
   };
@@ -6755,6 +7035,7 @@ function getUserSqlTableNames(db) {
     FROM sqlite_master
     WHERE type = 'table'
       AND name NOT LIKE 'sqlite_%'
+      AND name != 'report_settings'
     ORDER BY name
   `).all().map((row) => String(row.name || '')).filter(Boolean);
 }
@@ -6782,6 +7063,7 @@ function trendDataImportColumns(definition) {
   return [
     'account_home_id',
     'date_ran',
+    'data_date',
     'collected_at',
     'range_key',
     'range_label',
@@ -6815,7 +7097,7 @@ async function buildTrendDataImportTemplate(accountHomeId = '') {
     {
       worksheet: 'All trend worksheets',
       report: 'Optional fields',
-      rules: 'collected_at defaults to midnight UTC on date_ran. range_key defaults to import and range_label defaults to Imported trend data.',
+      rules: 'data_date is the source calendar day; blank defaults to the day before date_ran. collected_at defaults to midnight UTC on date_ran. range_key defaults to import and range_label defaults to Imported trend data.',
     },
     {
       worksheet: 'All trend worksheets',
@@ -6881,8 +7163,10 @@ async function parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId = 
     }
     const legacyIdColumn = actualHeaders[0] === 'id';
     const comparableHeaders = legacyIdColumn ? actualHeaders.slice(1) : actualHeaders;
-    if (comparableHeaders.length !== expectedHeaders.length
-      || comparableHeaders.some((header, index) => header !== expectedHeaders[index])) {
+    const importHeaders = comparableHeaders.includes('data_date')
+      ? expectedHeaders : expectedHeaders.filter((header) => header !== 'data_date');
+    if (comparableHeaders.length !== importHeaders.length
+      || comparableHeaders.some((header, index) => header !== importHeaders[index])) {
       throw new HttpError(
         400,
         `Worksheet "${definition.tableName}" headers do not match the PDAC export/import format. Download a new template and keep its headers unchanged.`,
@@ -6892,7 +7176,7 @@ async function parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId = 
     const rowsByKey = new Map();
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
       const worksheetRow = worksheet.getRow(rowNumber);
-      const values = Object.fromEntries(expectedHeaders.map((header, index) => [
+      const values = Object.fromEntries(importHeaders.map((header, index) => [
         header,
         trendDataImportCellValue(worksheetRow.getCell(index + 1 + (legacyIdColumn ? 1 : 0))),
       ]));
@@ -6913,6 +7197,9 @@ async function parseTrendDataImportWorkbook(xlsxBase64, fallbackAccountHomeId = 
       const record = {
         account_home_id: accountHomeId,
         date_ran: dateRan,
+        data_date: trendDataImportValueIsBlank(values.data_date)
+          ? reportTrendDataDate({ date_ran: dateRan })
+          : normalizeTrendImportDate(values.data_date, definition.tableName, rowNumber),
         collected_at: collectedAt,
         range_key: String(values.range_key || '').trim() || 'import',
         range_label: String(values.range_label || '').trim() || 'Imported trend data',
@@ -7043,6 +7330,7 @@ async function importTrendDataWorkbook(xlsxBase64, fallbackAccountHomeId = '') {
 }
 
 async function exportSqlTablesWorkbook() {
+  await populateReportTrendDataDates();
   const db = await getReportTrendDb();
   const template = await buildTrendDataImportTemplate(selected.accountHomeId);
   const workbook = new ExcelJS.Workbook();
@@ -7058,6 +7346,7 @@ async function exportSqlTablesWorkbook() {
 }
 
 async function exportSingleSqlTableWorkbook(tableName) {
+  await populateReportTrendDataDates();
   const db = await getReportTrendDb();
   const tableNames = getUserSqlTableNames(db);
   if (!tableNames.includes(tableName)) {
@@ -7189,6 +7478,10 @@ function getReportTrendDateRange(filters = {}) {
     const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     return { range, startDate: toDateOnlyString(monthStart), endDate: toDateOnlyString(monthEnd) };
   }
+  if (['previous-month', '2x-previous-month', '3-calendar-months'].includes(range)) {
+    const { startDate, endDate } = getAiEventDateRange({ range });
+    return { range, startDate, endDate };
+  }
   if (range === '730d' || range === '2y') {
     return { range: '730d', startDate: toDateOnlyString(addDays(today, -729)), endDate: toDateOnlyString(today) };
   }
@@ -7208,7 +7501,11 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   const accountHomeId = String(body.accountHomeId || body.selectedAccountHomeId || selected.accountHomeId || '').trim();
-  const dateRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
+  const requestedRange = getAutomatedReportDateRange(group, body.dateRange || body.filters || {});
+  const dateRange = group !== 'solutions' ? completedTrendRange(requestedRange) : requestedRange;
+  if (group !== 'solutions' && dateRange.start >= dateRange.endExclusive) {
+    throw new HttpError(400, 'The selected range has no completed days. Choose a date before today.');
+  }
   const reportProgress = createAutomatedReportProgressReporter(body);
   const saveTrends = Boolean(body.saveToDatabase);
   if (group === 'ai-events') {
@@ -7260,7 +7557,7 @@ async function buildAutomatedReport(group, reportType, body = {}) {
   }
 
   if (group === 'flow-runs') {
-    const flowRunDateRange = getFlowRunDateRange({ range: '7d' });
+    const flowRunDateRange = completedTrendRange(getFlowRunDateRange({ range: '7d' }));
     const rowsByEnvironment = await collectAutomatedFlowRunRows(environments, flowRunDateRange, accountHomeId, reportProgress);
     if (saveTrends && reportType !== 'raw') {
       await saveAutomatedReportTrendSnapshot({
@@ -7274,14 +7571,14 @@ async function buildAutomatedReport(group, reportType, body = {}) {
     if (reportType === 'both') {
       return {
         files: [
-          await buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment),
-          await buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment),
+          await buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment, flowRunDateRange),
+          await buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment, flowRunDateRange),
         ],
       };
     }
     return reportType === 'totals'
-      ? buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment)
-      : buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment);
+      ? buildAutomatedFlowRunTotalsWorkbook(rowsByEnvironment, flowRunDateRange)
+      : buildAutomatedFailedFlowRunsWorkbook(rowsByEnvironment, flowRunDateRange);
   }
 
   const solutionOptions = normalizeAutomatedSolutionOptions(body.solutionOptions || body.filters || {});
@@ -7684,6 +7981,36 @@ function buildSolutionComponentNameLists(solutions = [], namedComponents = []) {
   return lists;
 }
 
+function buildSolutionComponentRecordLists(solutions = [], namedComponents = []) {
+  const solutionNames = new Map(solutions.map((row) => [normalizeGuid(row.solutionid), row.friendlyname || row.uniquename || row.solutionid]));
+  const records = {
+    solutions: solutions.map((row) => ({
+      name: row.friendlyname || row.uniquename || row.solutionid,
+      uniqueName: row.uniquename || '',
+      id: row.solutionid,
+      version: row.version || '',
+      publisher: row.publisher?.friendlyname || row.publisher?.uniquename || '',
+      managed: row.ismanaged ? 'Managed' : 'Unmanaged',
+      modifiedOn: row.modifiedon || '',
+    })),
+  };
+  const seen = new Map();
+  for (const component of namedComponents) {
+    const key = `${component.kind}:${component.objectId}`;
+    if (!component.kind) continue;
+    if (!seen.has(key)) {
+      const record = { name: component.name || component.objectId, id: component.objectId, type: component.typeLabel || component.label || '', solutions: [] };
+      seen.set(key, record);
+      (records[component.kind] ||= []).push(record);
+    }
+    const record = seen.get(key);
+    const solution = solutionNames.get(normalizeGuid(component.solutionid));
+    if (solution && !record.solutions.includes(solution)) record.solutions.push(solution);
+  }
+  for (const rows of Object.values(records)) rows.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return records;
+}
+
 async function loadWeeklyComponentNames(orgUrl, components, accountHomeId) {
   const groups = {
     agents: { collection: 'bots', idField: 'botid', select: 'botid,name,schemaname' },
@@ -7809,10 +8136,21 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
       }
       return { ...component, typeLabel: 'Code App' };
     });
-    const componentsBySolution = groupSolutionComponentsBySolution(typedComponents);
-    const namedComponents = await buildWeeklyComponentsForEnvironment(environment.orgUrl, typedComponents, accountHomeId);
+    const tableComponents = typedComponents.filter((component) => Number(component.componenttype) === 1);
+    const customTableIds = tableComponents.length
+      ? new Set((await targetDvGetAll(
+          environment.orgUrl,
+          'EntityDefinitions?$select=MetadataId&$filter=IsCustomEntity eq true',
+          {},
+          accountHomeId,
+        )).map((table) => normalizeGuid(table.MetadataId)))
+      : new Set();
+    const includedComponents = typedComponents.filter((component) =>
+      Number(component.componenttype) !== 1 || customTableIds.has(normalizeGuid(component.objectid)));
+    const componentsBySolution = groupSolutionComponentsBySolution(includedComponents);
+    const namedComponents = await buildWeeklyComponentsForEnvironment(environment.orgUrl, includedComponents, accountHomeId);
     const namedComponentsBySolution = groupSolutionComponentsBySolution(namedComponents);
-    const componentTotals = solutionReportCountFields(typedComponents);
+    const componentTotals = solutionReportCountFields(includedComponents);
     const group = {
       environment,
       rows: filteredSolutions.map((solution) => {
@@ -7828,6 +8166,7 @@ async function collectAutomatedSolutionRows(environments, options, accountHomeId
       dataverseTableCount: componentTotals['# of Dataverse tables'],
       componentTotals,
       componentNames: buildSolutionComponentNameLists(filteredSolutions, namedComponents),
+      componentRecords: buildSolutionComponentRecordLists(filteredSolutions, namedComponents),
     };
     onEnvironment?.(environment, index, environments.length, 'complete');
     await delay(450);
@@ -8078,6 +8417,8 @@ function isDefaultEnvironmentSolution(solution = {}) {
   const normalizedFriendlyName = friendlyName.replace(/[^a-z0-9]/g, '');
   return uniqueName === 'default'
     || uniqueName === 'crdefault'
+    || uniqueName === 'active'
+    || normalizedFriendlyName === 'activesolution'
     || normalizedFriendlyName === 'defaultsolution'
     || normalizedFriendlyName === 'commondataservicedefaultsolution'
     || normalizedFriendlyName === 'commondataservicesdefaultsolution';
@@ -8561,10 +8902,10 @@ function buildAutomatedFlowRunTotalsRows(groups) {
   });
 }
 
-async function buildAutomatedFlowRunTotalsWorkbook(groups) {
+async function buildAutomatedFlowRunTotalsWorkbook(groups, dateRange = getFlowRunDateRange({ range: '7d' })) {
   const rows = buildAutomatedFlowRunTotalsRows(groups);
   return {
-    filename: `flow-runs-totals-by-environment-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
+    filename: `flow-runs-totals-by-environment-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
     bytes: await exportSimpleWorkbook('Flow Run Totals', [
       ['Environment display name', 30],
       ['Environment id', 38],
@@ -8578,7 +8919,7 @@ async function buildAutomatedFlowRunTotalsWorkbook(groups) {
   };
 }
 
-async function buildAutomatedFailedFlowRunsWorkbook(groups) {
+async function buildAutomatedFailedFlowRunsWorkbook(groups, dateRange = getFlowRunDateRange({ range: '7d' })) {
   const rows = groups.flatMap(({ rows: flowRuns }) => flowRuns
     .filter(isFailedFlowRun)
     .map((row) => ({
@@ -8596,7 +8937,7 @@ async function buildAutomatedFailedFlowRunsWorkbook(groups) {
       'Flow run URL': row.openUrl || '',
     })));
   return {
-    filename: `flow-runs-failed-raw-stacked-${safeFilename(dateRangeLabel(getFlowRunDateRange({ range: '7d' })))}.xlsx`,
+    filename: `flow-runs-failed-raw-stacked-${safeFilename(dateRangeLabel(dateRange))}.xlsx`,
     bytes: await exportSimpleWorkbook('Failed Flow Runs', [
       ['Environment display name', 30],
       ['Environment id', 38],
@@ -9406,6 +9747,14 @@ function getAiEventDateRange(filters = {}) {
     return makeAiEventRange(range, addDays(today, -364), addDays(today, 1));
   }
 
+  if (['previous-month', '2x-previous-month', '3-calendar-months'].includes(range)) {
+    const startOffset = range === 'previous-month' ? -1 : -2;
+    const endOffset = range === '3-calendar-months' ? 1 : startOffset + 1;
+    return makeAiEventRange(range,
+      new Date(now.getFullYear(), now.getMonth() + startOffset, 1),
+      new Date(now.getFullYear(), now.getMonth() + endOffset, 1));
+  }
+
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   return makeAiEventRange('month', monthStart, nextMonthStart);
@@ -10102,9 +10451,13 @@ function errorMessageFromResponse(data) {
 async function serveStatic(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
   const requested = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname);
-  const fullPath = normalize(join(PUBLIC_DIR, requested));
+  // These transport-independent data-browser assets are also used by the extension.
+  const sharedTableDataAsset = ['/table-data.js', '/table-data.css'].includes(requested);
+  const fullPath = sharedTableDataAsset
+    ? join(APP_DIR, 'chrome-ext', requested.slice(1))
+    : normalize(join(PUBLIC_DIR, requested));
 
-  if (!fullPath.startsWith(PUBLIC_DIR)) {
+  if (!sharedTableDataAsset && !fullPath.startsWith(PUBLIC_DIR)) {
     sendText(res, 403, 'Forbidden');
     return;
   }
@@ -10557,7 +10910,7 @@ function cleanErrorMessage(message) {
 }
 
 function getStatus(error) {
-  return error instanceof HttpError ? error.status : 500;
+  return error instanceof HttpError || error instanceof TableDataError ? error.status : 500;
 }
 
 class HttpError extends Error {

@@ -6,6 +6,7 @@
     <title>PDAC - Power DevBox Admin Center</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/table-data.css" />
   </head>
   <body>
     <header>
@@ -166,6 +167,9 @@
                         Date range
                         <select id="automatedAiEventsRange">
                           <option value="month">Current calendar month</option>
+                          <option value="previous-month">Previous calendar month</option>
+                          <option value="2x-previous-month">2x previous calendar month</option>
+                          <option value="3-calendar-months">3 calendar month view</option>
                           <option value="today">Today</option>
                           <option value="7d">Last 7 days</option>
                           <option value="28d">Last 28 days</option>
@@ -216,6 +220,9 @@
                           <option value="7d">Last 7 days</option>
                           <option value="28d">Last 28 days</option>
                           <option value="month" selected>Current calendar month</option>
+                          <option value="previous-month">Previous calendar month</option>
+                          <option value="2x-previous-month">2x previous calendar month</option>
+                          <option value="3-calendar-months">3 calendar month view</option>
                           <option value="365d">Last 365 days</option>
                           <option value="custom">Custom range</option>
                         </select>
@@ -331,7 +338,7 @@
                 <button id="weeklyReportDownloadButton" type="button" disabled>Download HTML</button>
               </div>
             </div>
-            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. Turning it on backfills the initial three months once. Each refresh and hourly server check then requests only changes since the locally saved last poll.</p>
+            <p class="muted weekly-report-note">Tracking uses the environments selected in the Scheduled reports &gt; Solutions card. Turning it on backfills the initial three months once. Each refresh and hourly background check then requests only changes since the locally saved last poll.</p>
             <p id="weeklyReportStatus" class="muted" aria-live="polite">Open the report to load locally saved data.</p>
             <div id="weeklyReportLoading" class="weekly-report-loading" role="status" aria-live="polite" hidden>
               <span class="spinner" aria-hidden="true"></span>
@@ -369,6 +376,9 @@
                     <option value="1m">Last month</option>
                     <option value="2m">Last 2 months</option>
                     <option value="3m" selected>Last 3 months</option>
+                    <option value="previous-month">Previous calendar month</option>
+                    <option value="2x-previous-month">2x previous calendar month</option>
+                    <option value="3-calendar-months">3 calendar month view</option>
                     <option value="custom">Custom range</option>
                   </select>
                 </label>
@@ -397,6 +407,7 @@
           </div>
           <p class="muted reports-date-note">Flow runs cover the last 7 days. AI Flow and Copilot sessions cover the current calendar month. Solution inventory includes managed and Microsoft-owned solutions.</p>
           <p id="chartsStatus" class="muted" aria-live="polite">Run a background report to populate these charts.</p>
+          <div id="chartsTotals" class="charts-totals" aria-label="Solution inventory totals" hidden></div>
           <div id="chartsGrid" class="reports-chart-grid"></div>
         </section>
       </section>
@@ -417,6 +428,9 @@
                 <option value="today">Today</option>
                 <option value="7d">Last 7 days</option>
                 <option value="month" selected>Current calendar month</option>
+                <option value="previous-month">Previous calendar month</option>
+                <option value="2x-previous-month">2x previous calendar month</option>
+                <option value="3-calendar-months">3 calendar month view</option>
                 <option value="365d">Last 365 days</option>
                 <option value="730d">Last 2 years</option>
                 <option value="custom">Custom range</option>
@@ -460,9 +474,7 @@
               <span class="summary-label">URL</span>
               <strong id="selectedEnvironmentUrl">None</strong>
             </div>
-            <button id="copyEnvironmentButton" class="icon-button secondary" type="button" title="Copy selected environment" aria-label="Copy selected environment">
-              <span class="copy-icon" aria-hidden="true"></span>
-            </button>
+            <button id="copyEnvironmentButton" class="secondary" type="button" title="Copy selected environment">Copy</button>
           </div>
 
           <div class="actions">
@@ -485,12 +497,18 @@
               <div class="actions">
                 <button id="refreshSqlTablesButton" class="secondary" type="button">Refresh</button>
                 <button id="exportSqlTablesButton" class="secondary" type="button">Export Excel</button>
-                <button id="downloadTrendTemplateButton" class="secondary" type="button">Download import template</button>
+                <button id="downloadTrendTemplateButton" class="secondary" type="button">Import template</button>
                 <button id="importTrendDataButton" class="secondary" type="button">Import Excel</button>
                 <input id="trendDataImportFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
                 <button id="deleteSqlRecordsButton" class="danger-button" type="button">Delete all records</button>
               </div>
             </div>
+            <label class="checkbox-label">
+              <input id="trendUseRecordDate" type="checkbox" />
+              Use data date instead of run date
+            </label>
+            <p class="muted"><strong>Import warning:</strong> The trend data now uses the data date. All future runs will use the created date, previous/blank data dates use the day before date_ran. Switching dates does not change totals.</p>
+            <p id="trendDateModeStatus" class="muted" aria-live="polite"></p>
             <div id="sqlTablesList" class="sql-table-list"></div>
           </section>
         </section>
@@ -767,6 +785,8 @@
                   <button id="loadComponentsButton" type="button" disabled>List components</button>
                   <button id="exportSolutionButton" type="button" disabled>Export solution</button>
                   <button id="deploySolutionButton" type="button" disabled>Deploy</button>
+                  <button id="shareSolutionButton" type="button" class="secondary" disabled>Share components</button>
+                  <button id="changeSolutionOwnerButton" type="button" class="secondary" disabled>Change component owner</button>
                 </div>
               </div>
               <div id="solutionTableActions" class="actions table-action-row" hidden>
@@ -830,6 +850,7 @@
                   </p>
                 </div>
                 <div class="actions table-action-row">
+                  <button id="openTableDataButton" type="button" disabled>Open data</button>
                   <button id="createTableDiagramButton" type="button" disabled>Create diagram</button>
                   <button id="createTableDocumentButton" type="button" class="secondary" disabled>Create table</button>
                 </div>
@@ -880,6 +901,9 @@
               Date range
               <select id="aiEventsRange">
                 <option value="month">Current calendar month</option>
+                <option value="previous-month">Previous calendar month</option>
+                <option value="2x-previous-month">2x previous calendar month</option>
+                <option value="3-calendar-months">3 calendar month view</option>
                 <option value="today">Today</option>
                 <option value="7d">Last 7 days</option>
                 <option value="28d">Last 28 days</option>
@@ -948,6 +972,9 @@
                 <option value="7d" selected>Last 7 days</option>
                 <option value="28d">Last 28 days</option>
                 <option value="month">Current calendar month</option>
+                <option value="previous-month">Previous calendar month</option>
+                <option value="2x-previous-month">2x previous calendar month</option>
+                <option value="3-calendar-months">3 calendar month view</option>
                 <option value="365d">Last 365 days</option>
                 <option value="custom">Custom range</option>
               </select>
@@ -1010,6 +1037,9 @@
                 <option value="7d">Last 7 days</option>
                 <option value="28d">Last 28 days</option>
                 <option value="month" selected>Current calendar month</option>
+                <option value="previous-month">Previous calendar month</option>
+                <option value="2x-previous-month">2x previous calendar month</option>
+                <option value="3-calendar-months">3 calendar month view</option>
                 <option value="365d">Last 365 days</option>
                 <option value="custom">Custom range</option>
               </select>
@@ -1053,12 +1083,16 @@
             </div>
 
             <div class="editor">
-              <label>
-                Target environment
-                <select id="importEnvironmentSelect">
+              <div class="combo import-environment-combo">
+                <label for="importEnvironmentSearch">Target environment</label>
+                <input id="importEnvironmentSearch" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="importEnvironmentOptions" autocomplete="off" placeholder="Search target environments" disabled />
+                <div id="importEnvironmentDropdown" class="combo-panel environment-panel" hidden>
+                  <div id="importEnvironmentOptions" class="environment-picker-list" role="listbox" aria-label="Target environments"></div>
+                </div>
+                <select id="importEnvironmentSelect" hidden aria-hidden="true" tabindex="-1">
                   <option value="">Load environments first</option>
                 </select>
-              </label>
+              </div>
               <div class="actions">
                 <button id="prepareImportButton" type="button" disabled>Prepare mappings</button>
                 <button id="refreshImportTargetButton" type="button" class="secondary" disabled>Refresh target</button>
@@ -1105,6 +1139,30 @@
       <span>2026</span>
     </footer>
 
+    <div id="solutionAccessModal" class="modal-backdrop" hidden>
+      <section class="modal solution-access-modal" role="dialog" aria-modal="true" aria-labelledby="solutionAccessTitle">
+        <div class="section-title compact-title">
+          <div><h2 id="solutionAccessTitle">Share solution components</h2><p id="solutionAccessMeta" class="muted"></p></div>
+          <button id="solutionAccessClose" type="button" class="secondary">Close</button>
+        </div>
+        <div class="guide">
+          <p>This applies to all compatible components in the selected solution, not the solution record itself. Unsupported components are reported, not changed.</p>
+          <p>Agents include their topics and linked authoring dependencies, which may be outside this solution or used elsewhere. Environment-variable values inherit definition permissions.</p>
+          <p>Recipients still need environment access, security roles and licensing. Flow run/co-owner permissions, connections, credentials and external data access must be managed separately. Changes are not automatically rolled back if an operation fails.</p>
+        </div>
+        <form id="solutionAccessForm" class="component-form">
+          <div class="share-grid">
+            <label>Recipient type<select id="solutionAccessKind"><option value="user">User</option><option value="team">Team</option></select></label>
+            <label><span id="solutionAccessRecipientLabel">User email</span><input id="solutionAccessRecipient" required autocomplete="off" placeholder="user@example.com" /></label>
+          </div>
+          <label id="solutionAccessPermissionsLabel">Permissions<input id="solutionAccessPermissions" value="ReadAccess,WriteAccess,AppendAccess,AppendToAccess,ShareAccess" required /></label>
+          <div class="actions"><button id="solutionAccessSubmit" type="submit">Share all compatible components</button></div>
+        </form>
+        <p id="solutionAccessStatus" class="muted" role="status" aria-live="polite"></p>
+        <div id="solutionAccessResults" class="solution-access-results" tabindex="0" aria-label="Operation details"></div>
+      </section>
+    </div>
+
     <div id="componentModal" class="modal-backdrop" hidden>
       <section class="modal" role="dialog" aria-modal="true" aria-labelledby="componentModalTitle">
         <div class="section-title compact-title">
@@ -1115,6 +1173,18 @@
           <button id="componentModalClose" class="icon-button secondary" type="button" title="Close" aria-label="Close">x</button>
         </div>
         <div id="componentModalBody" class="component-modal-body"></div>
+      </section>
+    </div>
+
+    <div id="chartRecordsModal" class="modal-backdrop" hidden>
+      <section class="modal chart-records-modal" role="dialog" aria-modal="true" aria-labelledby="chartRecordsTitle">
+        <div class="modal-header">
+          <div><h2 id="chartRecordsTitle">Chart records</h2><p id="chartRecordsMeta" class="muted" aria-live="polite"></p></div>
+          <button id="chartRecordsClose" class="secondary" type="button">Close</button>
+        </div>
+        <label class="search">Search records<input id="chartRecordsSearch" type="search" placeholder="Filter any field" /></label>
+        <p id="chartRecordsCount" class="muted" aria-live="polite"></p>
+        <div id="chartRecordsBody" class="chart-records-body"></div>
       </section>
     </div>
 

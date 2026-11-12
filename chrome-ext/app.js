@@ -1,3 +1,4 @@
+import { createTableDataBrowser } from './table-data.js';
 import {
   addCalendarDays,
   buildStandaloneWeeklyReportHtml,
@@ -427,6 +428,14 @@ const state = {
 };
 
 const LAST_ACCOUNT_KEY = 'pdacLastAccountHomeId';
+const tableDataBrowser = createTableDataBrowser({
+  api, toast,
+  getContext: () => ({ orgUrl: state.selectedEnvironment.orgUrl, accountHomeId: state.selectedAccountHomeId }),
+});
+const openTableDataButton = document.querySelector('#openTableDataButton');
+openTableDataButton.addEventListener('click', () => {
+  if (state.selectedTableDetails?.table) void tableDataBrowser.open(state.selectedTableDetails.table);
+});
 const LAST_ENVIRONMENT_PREFIX = 'pdacLastEnvironment';
 const AUTOMATED_REPORTS_RUN_ON_LOAD_KEY = 'pdacAutomatedReportsRunOnLoad';
 const AUTOMATED_REPORT_AUTO_DOWNLOAD_DATE_PREFIX = 'pdacAutomatedReportAutoDownloadDate';
@@ -7266,6 +7275,8 @@ function tableSearchText(table) {
 }
 
 async function selectTable(logicalName) {
+  tableDataBrowser.close();
+  openTableDataButton.disabled = true;
   state.selectedTableLogicalName = logicalName;
   state.selectedTableDiagram = null;
   renderTables();
@@ -7279,7 +7290,11 @@ async function loadSelectedTableDetails() {
   }
   el.columnsList.innerHTML = empty('Loading columns...');
   el.tableDiagramPanel.hidden = true;
-  const details = await api(`/api/tables/${encodeURIComponent(state.selectedTableLogicalName)}?columns=${encodeURIComponent(getColumnScope())}`);
+  const logicalName = state.selectedTableLogicalName;
+  const orgUrl = state.selectedEnvironment.orgUrl;
+  const accountHomeId = state.selectedAccountHomeId;
+  const details = await api(`/api/tables/${encodeURIComponent(logicalName)}?columns=${encodeURIComponent(getColumnScope())}`);
+  if (state.selectedTableLogicalName !== logicalName || state.selectedEnvironment.orgUrl !== orgUrl || state.selectedAccountHomeId !== accountHomeId) return;
   state.selectedTableDetails = details;
   renderTableDetails();
 }
@@ -7298,6 +7313,7 @@ function renderTableDetails() {
   el.selectedTableDescription.textContent = table.description || '';
   el.createTableDiagramButton.disabled = false;
   el.createTableDocumentButton.disabled = false;
+  openTableDataButton.disabled = false;
   renderColumns(details.columns || []);
 }
 
@@ -7330,6 +7346,8 @@ function renderColumns(columns) {
 }
 
 function clearTableSelection() {
+  tableDataBrowser.close();
+  openTableDataButton.disabled = true;
   if (!el.selectedTableName) {
     return;
   }

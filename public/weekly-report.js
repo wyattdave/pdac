@@ -16,6 +16,9 @@ export const WEEKLY_HISTORY_RANGES = {
   '1m': { label: 'Last month', months: 1 },
   '2m': { label: 'Last 2 months', months: 2 },
   '3m': { label: 'Last 3 months', months: 3 },
+  'previous-month': { label: 'Previous calendar month', startMonthOffset: -1, endMonthOffset: 0 },
+  '2x-previous-month': { label: '2x previous calendar month', startMonthOffset: -2, endMonthOffset: -1 },
+  '3-calendar-months': { label: '3 calendar month view', startMonthOffset: -2, endMonthOffset: 1 },
 };
 
 export function formatLocalDateKey(value = new Date()) {
@@ -64,6 +67,14 @@ export function historyDateRange(rangeKey = '3m', customStart = '', customEnd = 
   }
   const definition = WEEKLY_HISTORY_RANGES[rangeKey] || WEEKLY_HISTORY_RANGES['3m'];
   const startDate = parseLocalDateKey(end);
+  if (definition.startMonthOffset !== undefined) {
+    return {
+      key: rangeKey,
+      label: definition.label,
+      start: formatLocalDateKey(new Date(startDate.getFullYear(), startDate.getMonth() + definition.startMonthOffset, 1)),
+      end: formatLocalDateKey(new Date(startDate.getFullYear(), startDate.getMonth() + definition.endMonthOffset, 0)),
+    };
+  }
   if (definition.days) {
     startDate.setDate(startDate.getDate() - definition.days + 1);
   } else {
